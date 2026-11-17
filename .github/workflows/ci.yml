@@ -35,4 +35,5 @@ jobs:
         with:
           persist-credentials: false
       - run: swift --version
+      - run: brew install xcodegen
       - run: scripts/check.sh
