@@ -19,7 +19,18 @@ The project's priority order: data safety, then security, then correctness, then
 | UI | XCUITest for onboarding per provider type, search, viewer, import, export | Mac |
 | Migration | Every released archive and index version opened by the new build | Mac and Linux |
 
-Search budgets and the relevance set are in [DESIGN.md](DESIGN.md#search-quality-testing) and enforced from M2. Other budgets enforced in CI from M7: sync parsing at least 200 messages per second on an Apple silicon Mac mini, steady memory under 500 MB during a full sync.
+Search budgets are in [DESIGN.md](DESIGN.md#search-quality-testing) and enforced from M2. Other budgets enforced in CI from M7: sync parsing at least 200 messages per second on an Apple silicon Mac mini, steady memory under 500 MB during a full sync.
+
+### Relevance Targets for the Judged Set (chosen in M0)
+
+Measured on the M0 FTS5 spike's synthetic corpus (95 generated queries with known answers, 100,000 messages; [spike result](spikes/fts5-search.md)): recall@50 = 1.000, nDCG@10 = 0.638, first-ten p95 = 9.8 ms, ranked-page p95 = 12.6 ms, ingest 363 messages/s. That corpus is self-referential — its queries come from its own vocabulary — so it is a floor, not a prediction: the real judged set (about 300 curated queries over Enron plus the multilingual and attachment fixtures) is harder.
+
+Targets for the real judged set, enforced in CI from M2 on every change touching `ArchiveSearch`:
+
+- **recall@50 ≥ 0.75** across the full set.
+- **nDCG@10 ≥ 0.45** across the full set.
+- A change that drops either metric by more than **0.02** from the recorded baseline fails the build, even if it stays above the target.
+- The budgets above stand unchanged: first keystroke results under 50 ms, a ranked page under 200 ms (the spike's 13–16 ms p95 on 100k synthetic messages leaves the headroom for real text and 1M messages).
 
 
 ## Local Test Servers

@@ -72,4 +72,6 @@ Observed live, not taken from documentation. `?` means not yet checked.
 | Orange | ? | ? | ? | ? | ? | ? | ? | |
 | Proton Bridge | ? | ? | ? | ? | ? | ? | ? | |
 | Fastmail (IMAP) | ? | ? | ? | ? | ? | ? | ? | |
-| Dovecot (test server) | ? | ? | ? | ? | ? | ? | ? | |
+| Dovecot (test server) | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | 1 | Local brew 2.4.5 build; extensions absent from this build, not from Dovecot generally. [Spike](spikes/imap-client.md) |
+| GreenMail (test server) | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | 1 | Local 2.1.3 standalone; no RFC 2971 ID (tagged BAD, connection survives). [Spike](spikes/imap-client.md) |
+| Stalwart (test server) | ? | ? | ? | ? | ? | ? | ? | Bring-up parked: released 1.1.1 does not serve the API its own current docs and CLI describe. [Spike](spikes/imap-client.md) |
