@@ -3,9 +3,33 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# CI renders step summaries publicly, so failed build/test output lands there
+# even without API-log access.
+SUMMARY="${GITHUB_STEP_SUMMARY:-}"
+if [[ -n "$SUMMARY" ]]; then
+  tail_summary() {
+    echo '```' >> "$SUMMARY"
+    tail -80 "$1" >> "$SUMMARY" 2>/dev/null || true
+    echo '```' >> "$SUMMARY"
+  }
+  run_logged() {
+    local log="/tmp/check-$$.log"
+    if "$@" >"$log" 2>&1; then
+      rm -f "$log"
+      return 0
+    fi
+    echo "### Failed: $*" >> "$SUMMARY"
+    tail_summary "$log"
+    rm -f "$log"
+    return 1
+  }
+else
+  run_logged() { "$@"; }
+fi
+
 echo "== Swift build and tests"
-swift build
-swift test --parallel
+run_logged swift build
+run_logged swift test --parallel
 
 echo "== Docs: every relative link in a Markdown file points at a file that exists"
 python3 - <<'PY'
