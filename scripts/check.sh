@@ -20,6 +20,11 @@ if [[ -n "$SUMMARY" ]]; then
     fi
     echo "### Failed: $*" >> "$SUMMARY"
     tail_summary "$log"
+    # Also emit errors as job annotations: those are readable through the
+    # public checks API even when the full log is not.
+    grep -E "error:" "$log" | head -20 | while IFS= read -r line; do
+      printf '::error::%s\n' "$line"
+    done
     rm -f "$log"
     return 1
   }
