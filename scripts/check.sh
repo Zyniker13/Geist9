@@ -24,4 +24,13 @@ if bad:
 print("ok")
 PY
 
+# The app is macOS-only (DESIGN 12): generate its project and build it unsigned.
+if [[ "$(uname)" == "Darwin" ]]; then
+  echo "== App: XcodeGen generate and build"
+  xcodegen generate
+  xcodebuild -project EmailArchiver.xcodeproj -scheme EmailArchiver \
+    -configuration Debug -destination 'platform=macOS' build \
+    CODE_SIGNING_ALLOWED=NO 2>&1 | tail -3
+fi
+
 echo "== All checks passed"

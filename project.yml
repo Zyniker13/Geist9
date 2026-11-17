@@ -1,0 +1,41 @@
+# XcodeGen spec for the macOS app. The generated .xcodeproj is not committed;
+# run `xcodegen generate` (scripts/check.sh does, on macOS).
+name: EmailArchiver
+options:
+  bundleIdPrefix: it.bristlecone
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  EmailArchiver:
+    path: .
+targets:
+  EmailArchiver:
+    type: application
+    platform: macOS
+    sources:
+      - App/Sources
+    dependencies:
+      - package: EmailArchiver
+        product: ArchiveCore
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        PRODUCT_BUNDLE_IDENTIFIER: it.bristlecone.email-archiver
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Bristlecone Email Archiver
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        # Developer ID signing and notarization are maintainer steps (STATUS.md,
+        # "Needs the Maintainer"); local and CI builds are unsigned.
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+schemes:
+  EmailArchiver:
+    build:
+      targets:
+        EmailArchiver: all
+    run:
+      config: Debug
