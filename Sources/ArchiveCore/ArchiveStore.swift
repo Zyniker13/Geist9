@@ -1,0 +1,105 @@
+// ArchiveStore (DESIGN 6): owns one `<name>.emailarchive` directory —
+// manifest.json, content-addressed messages/, index.sqlite (WAL), and later
+// attachments-text/ and logs/. Message bytes and index rows are written so
+// that a crash can never lose stored bytes: the file lands first (fsync'd,
+// atomic rename), then the index records it; scrub re-converges the two.
+
+import Foundation
+import GRDB
+
+public final class ArchiveStore: Sendable {
+    /// Root of the archive, e.g. .../Mail.emailarchive
+    public let directory: URL
+    public let manifest: ArchiveManifest
+    public let db: DatabasePool
+
+    /// The index format this store was created at or migrated to.
+    public var indexVersion: Int { IndexSchema.version }
+
+    // MARK: Layout
+
+    static let manifestName = "manifest.json"
+    static let indexName = "index.sqlite"
+    static let messagesDirName = "messages"
+    static let attachmentsTextDirName = "attachments-text"
+
+    var messagesDirectory: URL { directory.appendingPathComponent(Self.messagesDirName) }
+    var indexURL: URL { directory.appendingPathComponent(Self.indexName) }
+
+    public static func isArchiveDirectory(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.appendingPathComponent(manifestName).path)
+    }
+
+    /// Creates a new archive. Refuses to touch an existing non-empty directory.
+    public static func create(at directory: URL, appVersion: String) throws -> ArchiveStore {
+        let fm = FileManager.default
+        let exists = (try? directory.checkResourceIsReachable()) ?? false
+        if exists {
+            let contents = (try? fm.contentsOfDirectory(atPath: directory.path)) ?? []
+            if !contents.isEmpty { throw ArchiveError.notAnArchive }
+        } else {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        try fm.createDirectory(at: directory.appendingPathComponent(messagesDirName), withIntermediateDirectories: true)
+        let manifest = ArchiveManifest(createdAt: Date(), appVersion: appVersion)
+        try manifest.write(to: directory.appendingPathComponent(manifestName))
+        return try open(at: directory)
+    }
+
+    /// Opens an existing archive, validating its manifest and running migrations.
+    public static func open(at directory: URL) throws -> ArchiveStore {
+        let manifestURL = directory.appendingPathComponent(manifestName)
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            throw ArchiveError.notAnArchive
+        }
+        let manifest = try ArchiveManifest.read(from: manifestURL)
+        try FileManager.default.createDirectory(
+            at: directory.appendingPathComponent(messagesDirName), withIntermediateDirectories: true
+        )
+        let db = try IndexSchema.openDatabase(at: directory.appendingPathComponent(indexName))
+        return ArchiveStore(directory: directory, manifest: manifest, db: db)
+    }
+
+    init(directory: URL, manifest: ArchiveManifest, db: DatabasePool) {
+        self.directory = directory
+        self.manifest = manifest
+        self.db = db
+    }
+
+    // MARK: Content-addressed message storage
+
+    /// Storage path of a message, relative to the archive root.
+    public static func relativePath(for hash: MessageHash) -> String {
+        "\(messagesDirName)/\(hash.relativePath)"
+    }
+
+    func fileURL(for hash: MessageHash) -> URL {
+        messagesDirectory.appendingPathComponent(hash.relativePath)
+    }
+
+    /// Stores message bytes content-addressed. If the exact bytes are already
+    /// stored, does nothing (dedup) — bytes are never rewritten in place.
+    /// Returns the hash. The write is fsync'd before it returns.
+    @discardableResult
+    public func putMessage(_ data: Data) throws -> MessageHash {
+        let hash = MessageHash.sha256(data)
+        let url = fileURL(for: hash)
+        if FileManager.default.fileExists(atPath: url.path) { return hash }
+        try AtomicWrite.write(data, to: url)
+        return hash
+    }
+
+    /// The stored original bytes of a message.
+    public func messageData(_ hash: MessageHash) throws -> Data {
+        let url = fileURL(for: hash)
+        do {
+            return try Data(contentsOf: url)
+        } catch {
+            throw ArchiveError.messageNotFound(hash)
+        }
+    }
+
+    public func hasMessage(_ hash: MessageHash) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL(for: hash).path)
+    }
+}
