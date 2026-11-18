@@ -1,8 +1,11 @@
 # Status
 
 - **Current milestone:** M0 (Foundations and Spikes)
-- **Last done:** M0 spike decisions completed: 1Password route (`op` CLI, decision 0011), MCP stdio transport (Foundation JSON-RPC, decision 0012). All 5 M0 spikes done: IMAP (0002), FTS5 (0007), Embedding (0008), Vision OCR (0009), WKWebView (0010), 1Password (0011), MCP stdio (0012).
-- **Next step:** M0 "Done when" sweep — verify every milestone "Done when" line is met with real command output from `scripts/check.sh` or the named benchmark, recorded in `STATUS.md`. Then proceed to M1 (sync engine, archive format implementation).
+- **Last done:** M0 "Done when" sweep complete. All three criteria met:
+  - `scripts/check.sh` passes locally; CI green on `b9bdc623` (both Linux and macOS legs).
+  - All 12 decisions (0001–0012) accepted. All 5 spike areas covered: IMAP (0002), FTS5 (0007), Embedding (0008), Vision OCR (0009), WKWebView (0010), 1Password (0005 updated), MCP stdio (0012).
+  - PROVIDERS.md has Dovecot, GreenMail, and Stalwart rows filled in.
+- **Next step:** M1: Local Archive and Search Core — archive store, MIME parser, import, export, search core, viewer, app shell.
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer
@@ -31,3 +34,4 @@ None yet.
 - 2026-11-17: WKWebView lockdown decision. Use file:// URLs with strict navigation/UI lockdown (navigationDelegate cancels all, uiDelegate nil). Decision 0010 recorded.
 - 2026-11-17: 1Password route decision. `op` CLI with desktop app integration for interactive use, service account tokens for unattended Macs. Decision 0011 recorded.
 - 2026-11-17: MCP stdio transport decision. Foundation JSON-RPC over stdin/stdout, no external dependencies. Decision 0012 recorded.
+- 2026-11-17: M0 "Done when" sweep complete. All three criteria met: check.sh passes locally; CI green on `b9bdc623` (both legs); all 12 decisions accepted; PROVIDERS.md rows filled. Proceeding to M1.
