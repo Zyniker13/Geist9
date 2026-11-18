@@ -226,7 +226,7 @@ func prepare(_ archiveDir: String, _ count: Int, _ seed: UInt64, killAfter: Int?
         // Kill point: simulate a crash after N messages.
         if let killAfter = killAfter, i + 1 == killAfter {
             print("== kill-after \(killAfter): sending SIGKILL to self")
-            fflush(stdout)
+            fflush(nil)
             // Use SIGABRT so the core dump signal is delivered; on macOS
             // this avoids the process-cleanup that SIGKILL would skip and
             // leaves the file system in a state indistinguishable from a
@@ -287,14 +287,14 @@ func importFixture(_ archiveDir: String, _ count: Int, _ seed: UInt64, killAfter
         ArchiveStore.crashHook = { stage in
             if let crashStage = crashStage, stage == crashStage {
                 print("== crash-stage \(stage): sending SIGABRT to self")
-                fflush(stdout)
+                fflush(nil)
                 raise(SIGABRT)
             }
             if stage == "files-written", let killAfter = killAfter {
                 let n = counter.next()
                 if n == killAfter {
                     print("== kill-after \(killAfter): sending SIGABRT to self")
-                    fflush(stdout)
+                    fflush(nil)
                     raise(SIGABRT)
                 }
             }
@@ -465,7 +465,7 @@ do {
         ArchiveStore.crashHook = { stage in
             if stage == crashStage {
                 print("== crash-stage \(stage): sending SIGABRT to self")
-                fflush(stdout)
+                fflush(nil)
                 raise(SIGABRT)
             }
         }
