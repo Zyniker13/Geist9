@@ -348,6 +348,19 @@ final class ArchiveStoreTests: XCTestCase {
         XCTAssertEqual(list.map(\.subject), ["Second", "First"])
     }
 
+    func testMessageByIDFetchesRowAndMissingReturnsNil() throws {
+        let store = try ArchiveStore.create(at: archiveURL, appVersion: "0.1.0")
+        let account = AccountIdentity(email: "a@x.com", displayName: "A", providerKind: "import")
+        guard case .created(let id) = try store.ingest(makeSampleMessage(subject: "ById"), into: account) else {
+            return XCTFail("expected created")
+        }
+        let row = try store.message(id: id)
+        XCTAssertEqual(row?.subject, "ById")
+        XCTAssertEqual(row?.fromEmail, "alice@example.com")
+        XCTAssertEqual(row?.hash, MessageHash.sha256(makeSampleMessage(subject: "ById").data))
+        XCTAssertNil(try store.message(id: 9_999))
+    }
+
     // MARK: Timestamps
 
     func testTimestampRoundTripAndOrdering() {

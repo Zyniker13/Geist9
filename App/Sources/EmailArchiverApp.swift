@@ -1,26 +1,16 @@
+// App entry (DESIGN 12): one window, three columns — archive controls and
+// mailboxes, the message list, the viewer. All state lives in ArchiveModel.
+
 import SwiftUI
 
 @main
 struct EmailArchiverApp: App {
+    @StateObject private var model = ArchiveModel()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(model)
         }
-    }
-}
-
-struct ContentView: View {
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "tray.full")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("Bristlecone Email Archiver")
-                .font(.title2)
-            Text("Early development build. Import and sync arrive in later milestones.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .frame(minWidth: 640, minHeight: 420)
     }
 }

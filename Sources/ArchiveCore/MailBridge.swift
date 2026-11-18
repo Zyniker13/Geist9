@@ -131,6 +131,39 @@ public enum MailBridge {
         return best?.path
     }
 
+    /// The transfer-decoded bytes, content type, and file name of the MIME
+    /// part at `path` — the paths `attachments(for:)` and `bodyPartPath(for:)`
+    /// report. nil when the path names no leaf of this message.
+    public static func part(
+        at path: String, in data: Data
+    ) -> (data: Data, contentType: String, filename: String?)? {
+        guard let root = try? parseRoot(data) else { return nil }
+        var found: (data: Data, contentType: String, filename: String?)? = nil
+        walkBodies(root, path: "") { partPath, part in
+            guard found == nil, partPath == path else { return }
+            let (main, _) = part.contentType
+            found = (Data(part.decodedBody), main, part.filename)
+        }
+        return found
+    }
+
+    /// The part whose Content-ID matches `cid` (the value a `cid:` URL
+    /// carries: angle brackets stripped, case folded), for inline image
+    /// rendering. nil when the message has no such part.
+    public static func attachment(
+        contentID: String, for data: Data
+    ) -> (data: Data, contentType: String)? {
+        guard let root = try? parseRoot(data) else { return nil }
+        let wanted = contentID.lowercased()
+        var found: (data: Data, contentType: String)? = nil
+        walkBodies(root, path: "") { _, part in
+            guard found == nil, let id = part.contentID, id.lowercased() == wanted else { return }
+            let (main, _) = part.contentType
+            found = (Data(part.decodedBody), main)
+        }
+        return found
+    }
+
     // MARK: - Search text (DESIGN 6A)
 
     /// Extracts the search text from message bytes without the rest of the

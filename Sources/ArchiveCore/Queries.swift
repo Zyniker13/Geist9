@@ -52,6 +52,22 @@ extension ArchiveStore {
         }
     }
 
+    /// One message row by its index id — the id search hits and the viewer
+    /// carry. nil when no row has that id.
+    public func message(id: Int64) throws -> MessageSummary? {
+        try db.read { db in
+            try MessageSummary.fetchOne(
+                db,
+                sql: """
+                SELECT id, hash, subject, fromName, fromEmail,
+                       dateSent, dateReceived, size
+                FROM message WHERE id = ?
+                """,
+                arguments: [id]
+            )
+        }
+    }
+
     /// All mailboxes of one account, with message counts.
     public func listMailboxes(accountEmail: String) throws -> [MailboxSummary] {
         try db.read { db in
