@@ -111,6 +111,7 @@ extension ArchiveStore {
         try runParallel(renames.count) { index in
             try AtomicWrite.writeDurableFile(renames[index].data, to: renames[index].url)
         }
+        Self.crashHook?("files-written")
 
         // Stage 1.5: compute the search-index tokens in parallel (pure CPU);
         // the index transaction then only inserts the precomputed columns.
@@ -132,6 +133,7 @@ extension ArchiveStore {
         try runParallel(directoryPaths.count) { index in
             try AtomicWrite.syncDirectory(atPath: directoryPaths[index])
         }
+        Self.crashHook?("dir-fsync")
 
         // Stage 4: index rows for the whole batch in ONE transaction.
         let results: [IngestResult] = try db.write { db in
@@ -155,6 +157,7 @@ extension ArchiveStore {
             }
             return slotResults
         }
+        Self.crashHook?("index-commit")
 
         // Expand slots back to one result per input message. A message whose
         // bytes repeat later in the batch reports .duplicate with the row id

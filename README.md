@@ -32,7 +32,7 @@ Early development. Nothing here is ready to use yet. [STATUS.md](STATUS.md) says
 
 ## Building
 
-Requires macOS 14 or later and Xcode 16 or later, or Swift 6 on Linux for the core packages.
+Requires macOS 15 or later and Xcode 26 or later (Swift 6.2), or Swift 6.2 on Linux for the core packages.
 
 ```sh
 scripts/check.sh

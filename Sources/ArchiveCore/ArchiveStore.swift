@@ -13,6 +13,13 @@ public final class ArchiveStore: Sendable {
     public let manifest: ArchiveManifest
     public let db: DatabasePool
 
+    /// Test-only fault injection: called with a stage label at batch-ingest
+    /// durability boundaries ("files-written", "dir-fsync", "index-commit") so
+    /// crash-recovery tests can stop the process exactly between stages.
+    /// Always nil in production; the crash tests in KillTests.swift are the
+    /// only setters. Not part of the API contract.
+    nonisolated(unsafe) public static var crashHook: (@Sendable (String) -> Void)?
+
     /// The index format this store was created at or migrated to.
     public var indexVersion: Int { IndexSchema.version }
 

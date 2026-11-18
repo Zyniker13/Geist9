@@ -173,7 +173,7 @@ struct Corpus {
 
 // MARK: Phases
 
-func prepare(_ archiveDir: String, _ count: Int, _ seed: UInt64) throws {
+func prepare(_ archiveDir: String, _ count: Int, _ seed: UInt64, killAfter: Int?) throws {
     let url = URL(fileURLWithPath: archiveDir)
     let store: ArchiveStore
     if FileManager.default.fileExists(atPath: url.appendingPathComponent("manifest.json").path) {
@@ -223,9 +223,89 @@ func prepare(_ archiveDir: String, _ count: Int, _ seed: UInt64) throws {
                 mark = now
             }
         }
+        // Kill point: simulate a crash after N messages.
+        if let killAfter = killAfter, i + 1 == killAfter {
+            print("== kill-after \(killAfter): sending SIGKILL to self")
+            fflush(stdout)
+            // Use SIGABRT so the core dump signal is delivered; on macOS
+            // this avoids the process-cleanup that SIGKILL would skip and
+            // leaves the file system in a state indistinguishable from a
+            // power loss (the kernel drops dirty cache, but our fsync'd
+            // files are already on disk).
+            raise(SIGABRT)
+        }
     }
     let total = Date().timeIntervalSince(started)
     print("== ingest done: \(try store.countMessages()) messages in \(Int(total)) s (\(Int(Double(count) / total)) msg/s avg)")
+}
+
+/// Thread-safe invocation counter for the import fault-injection hook.
+final class HookCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        count += 1
+        return count
+    }
+}
+
+/// Generates a synthetic .eml source folder, then runs the real import path
+/// (MailImporter.import → MailBridge.parse → per-message ingest) against the
+/// archive, with optional fault injection. The kill tests use this to crash a
+/// genuine import mid-run and verify the durability contract holds on the
+/// import path, not just on direct ingestion.
+///
+/// Import ingests one message at a time, so every message passes through all
+/// three stage boundaries. Counting "files-written" invocations kills after N
+/// messages' files are durable but before message N's index row commits.
+func importFixture(_ archiveDir: String, _ count: Int, _ seed: UInt64, killAfter: Int?, crashStage: String?) throws {
+    let src = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bench-import-src-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: src) }
+
+    var corpus = Corpus(seed: seed)
+    var previousID: String?
+    for i in 0..<count {
+        let (data, record, _, _) = corpus.message(i, previousID: previousID)
+        previousID = record.messageID
+        try data.write(to: src.appendingPathComponent("m\(i).eml"))
+    }
+
+    let url = URL(fileURLWithPath: archiveDir)
+    let store: ArchiveStore
+    if FileManager.default.fileExists(atPath: url.appendingPathComponent("manifest.json").path) {
+        store = try ArchiveStore.open(at: url)
+    } else {
+        store = try ArchiveStore.create(at: url, appVersion: "bench")
+    }
+
+    if crashStage != nil || killAfter != nil {
+        let counter = HookCounter()
+        ArchiveStore.crashHook = { stage in
+            if let crashStage = crashStage, stage == crashStage {
+                print("== crash-stage \(stage): sending SIGABRT to self")
+                fflush(stdout)
+                raise(SIGABRT)
+            }
+            if stage == "files-written", let killAfter = killAfter {
+                let n = counter.next()
+                if n == killAfter {
+                    print("== kill-after \(killAfter): sending SIGABRT to self")
+                    fflush(stdout)
+                    raise(SIGABRT)
+                }
+            }
+        }
+    }
+
+    let started = Date()
+    let report = try MailImporter.import(store, from: src)
+    let total = Date().timeIntervalSince(started)
+    print("== import done: \(report.imported) imported, \(report.duplicates) duplicates, \(report.failed) failed in \(Int(total)) s")
+    print("== import report: filesSeen \(report.filesSeen), messagesFound \(report.messagesFound)")
 }
 
 func percentile(_ sorted: [Double], _ p: Double) -> Double {
@@ -337,19 +417,69 @@ func maxRSSKB() -> Int {
 // MARK: Entry
 
 let args = Array(CommandLine.arguments.dropFirst())
+
+/// Parse `--kill-after N` from args; returns (remaining, killAfter).
+func parseKillAfter(_ args: [String]) -> ([String], Int?) {
+    var remaining = [String]()
+    var killAfter: Int?
+    var i = 0
+    while i < args.count {
+        if args[i] == "--kill-after", i + 1 < args.count {
+            killAfter = Int(args[i + 1])
+            i += 2
+        } else {
+            remaining.append(args[i])
+            i += 1
+        }
+    }
+    return (remaining, killAfter)
+}
+
+/// Parse `--crash-stage <name>` from args; returns (remaining, stage). When
+/// set, the store's test-only fault-injection hook raises SIGABRT exactly at
+/// that batch-ingest durability boundary (see ArchiveStore.crashHook).
+func parseCrashStage(_ args: [String]) -> ([String], String?) {
+    var remaining = [String]()
+    var stage: String?
+    var i = 0
+    while i < args.count {
+        if args[i] == "--crash-stage", i + 1 < args.count {
+            stage = args[i + 1]
+            i += 2
+        } else {
+            remaining.append(args[i])
+            i += 1
+        }
+    }
+    return (remaining, stage)
+}
+
 guard let command = args.first else {
-    print("usage: bench-search prepare|search|both <archive-dir> [count] [repeats] [seed]")
+    print("usage: bench-search prepare|search|both <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]")
     exit(2)
 }
 do {
+    let (parsedKill, killAfter) = parseKillAfter(args)
+    let (parsed, crashStage) = parseCrashStage(parsedKill)
+    if let crashStage = crashStage {
+        ArchiveStore.crashHook = { stage in
+            if stage == crashStage {
+                print("== crash-stage \(stage): sending SIGABRT to self")
+                fflush(stdout)
+                raise(SIGABRT)
+            }
+        }
+    }
     switch command {
     case "prepare":
-        try prepare(args[1], Int(args[2])!, args.count > 3 ? UInt64(args[3])! : 42)
+        try prepare(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42, killAfter: killAfter)
     case "search":
-        try searchPhase(args[1], args.count > 2 ? Int(args[2])! : 300)
+        try searchPhase(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 300)
     case "both":
-        try prepare(args[1], Int(args[2])!, args.count > 4 ? UInt64(args[4])! : 42)
-        try searchPhase(args[1], args.count > 3 ? Int(args[3])! : 300)
+        try prepare(parsed[1], Int(parsed[2])!, parsed.count > 4 ? UInt64(parsed[4])! : 42, killAfter: killAfter)
+        try searchPhase(parsed[1], parsed.count > 3 ? Int(parsed[3])! : 300)
+    case "import":
+        try importFixture(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42, killAfter: killAfter, crashStage: crashStage)
     default:
         print("unknown command: \(command)")
         exit(2)
