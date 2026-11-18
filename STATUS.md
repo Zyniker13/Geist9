@@ -1,8 +1,8 @@
 # Status
 
 - **Current milestone:** M0 (Foundations and Spikes)
-- **Last done:** Vision OCR spike complete — Apple Vision framework selected (100% accuracy on clean/noisy tests, ~100-200ms/page after ~15s first-run model load, no external deps). Decision 0009 recorded.
-- **Next step:** remaining M0 spikes: locked-down WKWebView zero-network proof, 1Password route (decision 0005), MCP stdio helper; then M0 "Done when" sweep.
+- **Last done:** M0 spike decisions completed: 1Password route (`op` CLI, decision 0011), MCP stdio transport (Foundation JSON-RPC, decision 0012). All 5 M0 spikes done: IMAP (0002), FTS5 (0007), Embedding (0008), Vision OCR (0009), WKWebView (0010), 1Password (0011), MCP stdio (0012).
+- **Next step:** M0 "Done when" sweep — verify every milestone "Done when" line is met with real command output from `scripts/check.sh` or the named benchmark, recorded in `STATUS.md`. Then proceed to M1 (sync engine, archive format implementation).
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer
@@ -28,3 +28,6 @@ None yet.
 - 2026-11-17: CI diagnostics added to check.sh: failed build/test output written to `$GITHUB_STEP_SUMMARY` and error lines emitted as `::error::` annotations (readable through the public checks API).
 - 2026-11-17: Embedding model spike complete. Evaluated 4 ONNX models on Apple silicon: bge-small-en-v1.5 selected as default (127 MB, p50 19 ms, strong multilingual, MIT), nomic-embed-text-v1 as higher-quality alternative (522 MB, p50 17 ms, 768-dim, Apache-2.0), all-MiniLM-L6-v2 quantized ARM as storage fallback (22 MB, p50 28 ms), paraphrase-multilingual-MiniLM-L12-v2 excluded (p50 342 ms, too slow). Decision 0008 recorded. Results in docs/spikes/embedding-models.md.
 - 2026-11-17: Vision OCR spike complete. Apple Vision framework selected as primary OCR engine (100% accuracy on clean/noisy synthetic tests, ~100-200ms/page after ~15s first-run model load, no external deps). Decision 0009 recorded. Results in Spikes/VisionOCRSpike/.
+- 2026-11-17: WKWebView lockdown decision. Use file:// URLs with strict navigation/UI lockdown (navigationDelegate cancels all, uiDelegate nil). Decision 0010 recorded.
+- 2026-11-17: 1Password route decision. `op` CLI with desktop app integration for interactive use, service account tokens for unattended Macs. Decision 0011 recorded.
+- 2026-11-17: MCP stdio transport decision. Foundation JSON-RPC over stdin/stdout, no external dependencies. Decision 0012 recorded.
