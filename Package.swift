@@ -49,7 +49,7 @@ let package = Package(
     dependencies: [
         // IMAP protocol layer, chosen in docs/decisions/0002 and confirmed by the M0 spike.
         .package(url: "https://github.com/apple/swift-nio-imap.git", exact: "0.5.0"),
-        .package(url: "https://github.com/apple/swift-nio.git", exact: "2.84.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", exact: "2.100.0"),
         // SQLite index layer (DESIGN 6), decision 0013: GRDB over SQLite in WAL mode.
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.12.0"),
         // SHA-256 for content addressing (DESIGN 6); decision 0014. Same Crypto API on Linux and macOS.
