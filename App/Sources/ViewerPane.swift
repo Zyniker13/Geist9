@@ -5,7 +5,9 @@
 // Remote content stays off unless the person turns it on for this message.
 
 import ArchiveCore
+import AppKit
 import MailMIME
+import QuickLookUI
 import SwiftUI
 import ViewerKit
 
@@ -51,10 +53,14 @@ struct ViewerPane: View {
 
     // MARK: Attachments
 
+    /// Quick Look is the primary open path (DESIGN 8, THREAT-MODEL): it
+    /// renders the attachment without executing it, so a malicious payload
+    /// gets far fewer chances than a full application launch. "Open with
+    /// app" stays available in the context menu.
     private var attachmentList: some View {
         List(message.attachments, id: \.partIndex) { attachment in
             Button {
-                openAttachment(attachment)
+                previewAttachment(attachment)
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "paperclip")
@@ -71,36 +77,127 @@ struct ViewerPane: View {
                 }
             }
             .buttonStyle(.plain)
-            .help("Open in its default application")
+            .help("Quick Look")
+            .contextMenu {
+                Button("Open in Default Application") {
+                    openWithApp(attachment)
+                }
+            }
         }
         .listStyle(.plain)
+        .background(PreviewPanelHost(box: previewPanelBox))
     }
 
-    /// Saves the decoded part to a temporary file and hands it to the
-    /// system opener. The file carries no quarantine attribute because it
-    /// is not a download: it came from the person's own archive.
-    private func openAttachment(_ attachment: AttachmentInfo) {
-        guard
-            let summary = try? store.message(id: message.rowID),
-            let data = try? store.messageData(summary.hash),
-            let part = MailBridge.part(at: attachment.partIndex, in: data)
-        else { return }
+    @State private var previewPanelBox = PreviewPanelBox()
 
-        let name = attachment.filename ?? "attachment-\(attachment.partIndex)"
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(ProcessInfo.processInfo.globallyUniqueString)
-            .appendingPathComponent(name)
+    /// Writes the decoded part to a temporary file and previews it in the
+    /// system Quick Look panel. The file carries no quarantine attribute
+    /// because it is not a download: it came from the person's own archive.
+    private func previewAttachment(_ attachment: AttachmentInfo) {
         do {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-            )
-            try part.data.write(to: url, options: .atomic)
-            NSWorkspace.shared.open(url)
+            let url = try writeAttachment(attachment)
+            // Drop the previous preview's temporary file first (unlinking a
+            // file Quick Look still has open is safe on POSIX).
+            if let previous = previewPanelBox.bridge?.urls.first {
+                try? FileManager.default.removeItem(at: previous)
+            }
+            previewPanelBox.bridge?.urls = [url]
+            QLPreviewPanel.shared().makeKeyAndOrderFront(nil)
         } catch {
             // Surfaced by the app shell's notice line.
             NotificationCenter.default.post(name: .viewerAttachmentFailed, object: error.localizedDescription)
         }
     }
+
+    /// The older escape hatch: hand the file to the system opener, which
+    /// launches the default application for its type. Explicitly requested
+    /// by the person via the context menu.
+    private func openWithApp(_ attachment: AttachmentInfo) {
+        guard let url = try? writeAttachment(attachment) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Saves the decoded part to a unique temporary file.
+    private func writeAttachment(_ attachment: AttachmentInfo) throws -> URL {
+        guard let summary = try? store.message(id: message.rowID) else {
+            throw ArchiveError.io(underlying: "message not found")
+        }
+        guard let data = try? store.messageData(summary.hash) else {
+            throw ArchiveError.messageNotFound(summary.hash)
+        }
+        guard let part = MailBridge.part(at: attachment.partIndex, in: data) else {
+            throw ArchiveError.io(underlying: "attachment part not found")
+        }
+
+        let name = attachment.filename ?? "attachment-\(attachment.partIndex)"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(ProcessInfo.processInfo.globallyUniqueString)
+            .appendingPathComponent(name)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try part.data.write(to: url, options: .atomic)
+        return url
+    }
+}
+
+// MARK: - Quick Look panel bridge (DESIGN 8)
+
+/// Bridges the system Quick Look panel (`QLPreviewPanel`) into the SwiftUI
+/// viewer. The bridge's view sits in the window's responder chain; when the
+/// panel looks for a controller it takes control here, and the bridge serves
+/// the attachment file URLs written by `ViewerPane`. Quick Look renders a
+/// file without executing it (THREAT-MODEL).
+private final class PreviewPanelBridge: NSView, @preconcurrency QLPreviewPanelDataSource, @preconcurrency QLPreviewPanelDelegate {
+    var urls: [URL] = [] {
+        didSet { reloadPanelIfControlling() }
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+        true
+    }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = self
+        panel.delegate = self
+        panel.reloadData()
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {}
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        urls.count
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        urls[index] as NSURL
+    }
+
+    private func reloadPanelIfControlling() {
+        guard QLPreviewPanel.sharedPreviewPanelExists(),
+              (QLPreviewPanel.shared().currentController as AnyObject) === self
+        else { return }
+        QLPreviewPanel.shared().reloadData()
+    }
+}
+
+/// Holds the bridge view once SwiftUI has placed it in the hierarchy, so the
+/// button action can update its URLs without a state-update round trip.
+@MainActor
+private final class PreviewPanelBox {
+    var bridge: PreviewPanelBridge?
+}
+
+private struct PreviewPanelHost: NSViewRepresentable {
+    let box: PreviewPanelBox
+
+    func makeNSView(context: Context) -> PreviewPanelBridge {
+        let bridge = PreviewPanelBridge()
+        box.bridge = bridge
+        return bridge
+    }
+
+    func updateNSView(_ nsView: PreviewPanelBridge, context: Context) {}
 }
 
 extension Notification.Name {

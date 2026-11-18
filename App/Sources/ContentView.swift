@@ -50,10 +50,16 @@ struct ContentView: View {
                     Button("Import…") { chooseImportSource() }
                     Menu("Export") {
                         ForEach(ArchiveModel.ExportFormat.allCases) { format in
-                            Button(format.rawValue) { chooseExportDestination(format) }
+                            Button("Selected: \(format.rawValue)") { chooseExportDestination(format) }
+                        }
+                        .disabled(model.selection == nil)
+                        Divider()
+                        ForEach(ArchiveModel.ExportFormat.allCases) { format in
+                            Button("Whole Archive: \(format.rawValue)") {
+                                chooseWholeArchiveDestination(format)
+                            }
                         }
                     }
-                    .disabled(model.selection == nil)
                 }
                 HStack(spacing: 10) {
                     Button("Scrub & Verify") { model.scrub() }
@@ -86,26 +92,76 @@ struct ContentView: View {
         List {
             Section("Mailboxes") {
                 ForEach(model.mailboxes, id: \.name) { mailbox in
-                    Button {
+                    sidebarRow(mailbox.name, count: mailbox.messageCount, active: model.selectedMailbox == mailbox.name && model.query.isEmpty) {
                         model.selectMailbox(mailbox.name)
-                    } label: {
-                        HStack {
-                            Text(mailbox.name)
-                                .lineLimit(1)
-                            Spacer()
-                            Text("\(mailbox.messageCount)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if !model.accounts.isEmpty {
+                Section("Accounts") {
+                    ForEach(model.accounts, id: \.email) { account in
+                        sidebarRow(account.email, count: account.messageCount, active: model.query == ArchiveModel.queryForAccount(account.email)) {
+                            model.selectAccount(account.email)
                         }
                     }
-                    .buttonStyle(.plain)
-                    .listRowBackground(
-                        mailbox.name == model.selectedMailbox
-                            ? Color.accentColor.opacity(0.18) : Color.clear
-                    )
+                }
+            }
+            if !model.labels.isEmpty {
+                Section("Labels") {
+                    ForEach(model.labels, id: \.name) { label in
+                        sidebarRow(label.name, count: label.messageCount, active: model.query == ArchiveModel.queryForLabel(label.name)) {
+                            model.selectLabel(label.name)
+                        }
+                    }
+                }
+            }
+            if !model.savedSearches.isEmpty {
+                Section("Saved Searches") {
+                    ForEach(model.savedSearches, id: \.id) { saved in
+                        sidebarRow(saved.name, count: nil, active: model.query == saved.query) {
+                            model.selectSavedSearch(saved)
+                        }
+                        .contextMenu {
+                            Button("Delete") { model.deleteSavedSearch(saved) }
+                        }
+                    }
                 }
             }
         }
+        .alert("Save Search", isPresented: $showSaveSearch) {
+            TextField("Name", text: $saveSearchName)
+            Button("Save") {
+                model.saveCurrentSearch(named: saveSearchName)
+                saveSearchName = ""
+            }
+            Button("Cancel", role: .cancel) { saveSearchName = "" }
+        } message: {
+            Text("Saves the current search text as a named query.")
+        }
+    }
+
+    @State private var saveSearchName = ""
+    @State private var showSaveSearch = false
+
+    private func sidebarRow(
+        _ title: String, count: Int?, active: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            action()
+        } label: {
+            HStack {
+                Text(title)
+                    .lineLimit(1)
+                Spacer()
+                if let count {
+                    Text("\(count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(active ? Color.accentColor.opacity(0.18) : Color.clear)
     }
 
     // MARK: Message list
@@ -128,6 +184,13 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Clear search")
+                    Button {
+                        showSaveSearch = true
+                    } label: {
+                        Image(systemName: "bookmark")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Save this search")
                 }
             }
             .padding(8)
@@ -283,6 +346,17 @@ struct ContentView: View {
         panel.message = "Where should the selected message be exported?"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         model.exportSelection(format, to: url)
+    }
+
+    private func chooseWholeArchiveDestination(_ format: ArchiveModel.ExportFormat) {
+        let panel = NSSavePanel()
+        switch format {
+        case .emlTree: panel.nameFieldStringValue = "Archive"
+        case .mbox: panel.nameFieldStringValue = "Archive.mbox"
+        }
+        panel.message = "Where should the whole archive be exported?"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        model.exportWholeArchive(format, to: url)
     }
 
     /// mailto hands off to the system without asking; http and https

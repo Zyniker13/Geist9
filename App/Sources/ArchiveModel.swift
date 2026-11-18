@@ -16,6 +16,9 @@ final class ArchiveModel: ObservableObject {
     @Published private(set) var store: ArchiveStore?
     @Published private(set) var archiveName: String?
     @Published private(set) var mailboxes: [MailboxSummary] = []
+    @Published private(set) var accounts: [AccountSummary] = []
+    @Published private(set) var labels: [LabelSummary] = []
+    @Published private(set) var savedSearches: [SavedSearchSummary] = []
     @Published var selectedMailbox: String?
     @Published var query: String = ""
     @Published private(set) var results: [SearchRow] = []
@@ -66,6 +69,9 @@ final class ArchiveModel: ObservableObject {
         store = nil
         archiveName = nil
         mailboxes = []
+        accounts = []
+        labels = []
+        savedSearches = []
         selectedMailbox = nil
         query = ""
         results = []
@@ -90,12 +96,16 @@ final class ArchiveModel: ObservableObject {
 
     // MARK: Sidebar
 
-    /// Imported mail lives under the pseudo-account "imported"; that is the
-    /// only account until sync lands in a later milestone.
+    /// Sidebar content: mailboxes of the imported account plus the account,
+    /// label and saved-search listings (DESIGN 12). Import and saving both
+    /// refresh it.
     func refreshMailboxes(selectFirst: Bool = false) {
         guard let store else { return }
         do {
             mailboxes = try store.listMailboxes(accountEmail: "imported")
+            accounts = try store.listAccounts()
+            labels = try store.listLabels(accountEmail: "imported")
+            savedSearches = try store.listSavedSearches()
             if selectFirst,
                selectedMailbox == nil || !mailboxes.contains(where: { $0.name == selectedMailbox }) {
                 selectedMailbox = mailboxes.first?.name
@@ -110,6 +120,67 @@ final class ArchiveModel: ObservableObject {
         selectedMailbox = name
         if query.isEmpty { refreshList() }
     }
+
+    /// Clicking a label runs it as a query (`label:"…"`) so the result stays
+    /// a live search — new mail carrying the label appears.
+    func selectLabel(_ name: String) {
+        query = Self.queryForLabel(name)
+        searchChanged()
+    }
+
+    /// Clicking an account runs it as a query (`account:"…"`) — same live
+    /// semantics as labels.
+    func selectAccount(_ email: String) {
+        query = Self.queryForAccount(email)
+        searchChanged()
+    }
+
+    // MARK: Saved searches
+
+    /// Save the current query under a name. Re-saving a name replaces its
+    /// query (ArchiveCore semantics).
+    func saveCurrentSearch(named name: String) {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let store, !text.isEmpty else { return }
+        do {
+            try store.saveSearch(name: name, query: text)
+            savedSearches = try store.listSavedSearches()
+            notice = "Saved search “\(name.trimmingCharacters(in: .whitespacesAndNewlines))”."
+        } catch {
+            notice = "Could not save search: \(describe(error))"
+        }
+    }
+
+    func selectSavedSearch(_ saved: SavedSearchSummary) {
+        searchTask?.cancel()
+        searchTask = nil
+        query = saved.query
+        runSearch(saved.query)
+    }
+
+    func deleteSavedSearch(_ saved: SavedSearchSummary) {
+        guard let store else { return }
+        do {
+            try store.deleteSavedSearch(id: saved.id)
+            savedSearches = try store.listSavedSearches()
+        } catch {
+            notice = "Could not delete saved search: \(describe(error))"
+        }
+    }
+
+    /// `op:"value"` with quotes and quote characters handled: the scanner
+    /// has no backslash escapes, so an embedded quote is dropped.
+    private static func operatorQuery(_ op: String, _ value: String) -> String {
+        let safe = value.replacingOccurrences(of: "\"", with: "")
+        return "\(op):\"\(safe)\""
+    }
+
+    /// The query string a label row runs. Shared with the sidebar so the
+    /// active-row highlight compares against the exact same text.
+    static func queryForLabel(_ name: String) -> String { operatorQuery("label", name) }
+
+    /// The query string an account row runs.
+    static func queryForAccount(_ email: String) -> String { operatorQuery("account", email) }
 
     // MARK: Message list and search
 
@@ -280,6 +351,31 @@ final class ArchiveModel: ObservableObject {
             notice = "Exported \(report.filesWritten.count) file(s)."
         } catch {
             notice = "Export failed: \(describe(error))"
+        }
+    }
+
+    /// Exports every message in the archive. Runs off the main actor: a
+    /// large archive can take minutes, and the UI must stay responsive.
+    func exportWholeArchive(_ format: ExportFormat, to url: URL) {
+        guard let store else { return }
+        notice = "Exporting the whole archive…"
+        Task.detached(priority: .userInitiated) { [store] in
+            do {
+                let messages = try store.exportMessages(mailbox: nil)
+                let report: ExportReport
+                switch format {
+                case .emlTree: report = try MailExporter.exportEMLTree(from: store, messages: messages, to: url)
+                case .mbox: report = try MailExporter.exportMbox(from: store, messages: messages, to: url)
+                }
+                await MainActor.run {
+                    self.notice = "Exported \(report.messagesExported) messages (\(report.filesWritten.count) file(s))."
+                }
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                await MainActor.run {
+                    self.notice = "Export failed: \(message)"
+                }
+            }
         }
     }
 
