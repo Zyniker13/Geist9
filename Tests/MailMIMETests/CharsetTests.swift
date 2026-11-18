@@ -105,7 +105,36 @@ final class CharsetTests: XCTestCase {
         XCTAssertEqual(Charset.lookup(Charset.normalized("gb2312")), .foundation(0x80000632))
         XCTAssertEqual(Charset.lookup(Charset.normalized("koi8-r")), .foundation(0x80000A02))
         XCTAssertEqual(Charset.lookup(Charset.normalized("utf-16be")), .utf16BE)
+        XCTAssertEqual(Charset.lookup(Charset.normalized("macintosh")), .macRoman)
+        XCTAssertEqual(Charset.lookup(Charset.normalized("eucjp")), .eucJP)
         XCTAssertEqual(Charset.lookup(Charset.normalized("nope")), .defaultSniff)
         XCTAssertEqual(Charset.lookup(""), .defaultSniff)
+    }
+
+    func testMacRomanTableEdgeBytes() {
+        // Generated-table edges: accents, currency, math symbols, the
+        // Apple-logo PUA slot, and untouched ASCII controls.
+        XCTAssertEqual(Charset.decode("mac-roman", [0x8D]), "ç")
+        XCTAssertEqual(Charset.decode("mac-roman", [0x8E]), "é")
+        XCTAssertEqual(Charset.decode("mac-roman", [0x9F]), "ü")
+        XCTAssertEqual(Charset.decode("mac-roman", [0xDB]), "€")
+        XCTAssertEqual(Charset.decode("mac-roman", [0xF0]), "\u{F8FF}")
+        XCTAssertEqual(Charset.decode("mac-roman", [0xFF]), "\u{2C7}")
+        XCTAssertEqual(Charset.decode("mac-roman", [0x00, 0x41, 0x7F]), "\u{0}A\u{7F}")
+    }
+
+    func testEucJpPlanesAndMalformedSequences() {
+        // Halfwidth katakana (0x8E-prefixed) uses the arithmetic mapping.
+        XCTAssertEqual(Charset.decode("euc-jp", [0x8E, 0xB1]), "ｱ")
+        // JIS X 0212 (0x8F-prefixed plane) decodes from the generated table.
+        XCTAssertEqual(Charset.decode("euc-jp", [0x8F, 0xB0, 0xA1]), "丂")
+        // Malformed and truncated sequences never throw; they render U+FFFD
+        // and keep everything after the bad byte.
+        XCTAssertEqual(Charset.decode("euc-jp", [0x8E]), "\u{FFFD}")
+        XCTAssertEqual(Charset.decode("euc-jp", [0x8F]), "\u{FFFD}")
+        XCTAssertEqual(Charset.decode("euc-jp", [0x8F, 0x41]), "\u{FFFD}A")
+        XCTAssertEqual(Charset.decode("euc-jp", [0x8E, 0x41]), "\u{FFFD}A")
+        XCTAssertEqual(Charset.decode("euc-jp", [0xA1]), "\u{FFFD}")
+        XCTAssertEqual(Charset.decode("euc-jp", [0xFF]), "\u{FFFD}")
     }
 }

@@ -2,6 +2,11 @@
 // and are frequently wrong or exotic. Coverage:
 //   - hand-decoded exact paths: Latin-1, Windows-1252, UTF-16 (BOM + forced
 //     endianness) — byte-exact, no Foundation converter involved;
+//   - table-decoded paths: MacRoman and EUC-JP decode from generated tables
+//     (CharsetTables.swift, scripts/gen-charset-tables.py). Linux
+//     corelibs-foundation ships a trimmed ICU without the macintosh and
+//     euc-jp converters, and MacRoman's builtin CF converter is Apple-only,
+//     so these two never route through Foundation;
 //   - everything else routes through Foundation's string converters
 //     (ICU-backed on both macOS and Linux corelibs) via NSStringEncoding
 //     numbers: the classic small values, or 0x80000000 | kCFStringEncoding
@@ -30,6 +35,10 @@ public enum Charset {
             return decodeUTF16(bytes, forcedBigEndian: true)
         case .utf16LE:
             return decodeUTF16(bytes, forcedBigEndian: false)
+        case .macRoman:
+            return decodeMacRoman(bytes)
+        case .eucJP:
+            return decodeEucJp(bytes)
         case .foundation(let nsEncoding):
             if let string = String(data: Data(bytes), encoding: String.Encoding(rawValue: nsEncoding)) {
                 return string
@@ -52,6 +61,8 @@ public enum Charset {
         case utf16BOM
         case utf16BE
         case utf16LE
+        case macRoman
+        case eucJP
         case foundation(UInt)
         case defaultSniff
     }
@@ -174,7 +185,10 @@ public enum Charset {
             "shift-jis", "shift_jis", "sjis", "cp932", "ms932", "windows-31j",
             "cswindows31j", "csshiftjis", "ms-kanji", "ms_kanji",
         ])
-        add(.foundation(3), [
+        // EUC-JP decodes from the generated JIS table (CharsetTables.swift):
+        // Linux corelibs-foundation lacks the converter, and the table keeps
+        // macOS and Linux byte-identical.
+        add(.eucJP, [
             "euc-jp", "eucjp", "euc_jp", "x-euc-jp", "ujis",
             "cseucjpkdfmtjapanese",
         ])
@@ -190,8 +204,10 @@ public enum Charset {
             "cp949", "ms949", "windows-949", "uhc",
         ])
 
-        // Mac Roman, common in old Apple mail.
-        add(.foundation(30), ["mac-roman", "macintosh", "macroman", "x-mac-roman", "csmacintosh"])
+        // Mac Roman, common in old Apple mail; decodes from the generated
+        // table (CharsetTables.swift): Linux corelibs-foundation lacks the
+        // converter and the builtin one is Apple-only.
+        add(.macRoman, ["mac-roman", "macintosh", "macroman", "x-mac-roman", "csmacintosh"])
 
         return table
     }()
@@ -280,5 +296,71 @@ public enum Charset {
             i += 2
         }
         return String(decoding: units, as: UTF16.self)
+    }
+
+    // Mac OS Roman: 0x00-0x7F is ASCII identity, 0x80-0xFF maps through the
+    // generated 128-entry table. Linux corelibs-foundation has no macintosh
+    // converter and the builtin CF one is Apple-only, so every platform
+    // decodes from the table.
+    static func decodeMacRoman(_ bytes: [UInt8]) -> String {
+        var scalars = String.UnicodeScalarView()
+        for byte in bytes {
+            if byte < 0x80 {
+                scalars.append(Unicode.Scalar(UInt32(byte))!)
+            } else {
+                scalars.append(Unicode.Scalar(CharsetTables.macRomanHigh[Int(byte) - 0x80])!)
+            }
+        }
+        return String(scalars)
+    }
+
+    // EUC-JP: ASCII identity, 0x8E-prefixed halfwidth katakana (arithmetic
+    // mapping), 0x8F-prefixed JIS X 0212 plane, and the 94x94 JIS X 0208
+    // grid. Undefined slots and malformed sequences render as U+FFFD; the
+    // decoder never throws.
+    static func decodeEucJp(_ bytes: [UInt8]) -> String {
+        var scalars = String.UnicodeScalarView()
+        let replacement = Unicode.Scalar(0xFFFD)!
+        var i = 0
+        while i < bytes.count {
+            let b = bytes[i]
+            if b < 0x80 {
+                scalars.append(Unicode.Scalar(UInt32(b))!)
+                i += 1
+            } else if b == 0x8E {
+                if i + 1 < bytes.count, bytes[i + 1] >= 0xA1, bytes[i + 1] <= 0xDF {
+                    scalars.append(Unicode.Scalar(0xFF61 + UInt32(bytes[i + 1]) - 0xA1)!)
+                    i += 2
+                } else {
+                    scalars.append(replacement)
+                    i += 1
+                }
+            } else if b == 0x8F {
+                if i + 2 < bytes.count, bytes[i + 1] >= 0xA1, bytes[i + 1] <= 0xFE,
+                    bytes[i + 2] >= 0xA1, bytes[i + 2] <= 0xFE {
+                    let index = Int(bytes[i + 1] - 0xA1) * 94 + Int(bytes[i + 2] - 0xA1)
+                    let v = CharsetTables.eucJpPlane2[index]
+                    scalars.append(v == 0xFFFF ? replacement : Unicode.Scalar(UInt32(v))!)
+                    i += 3
+                } else {
+                    scalars.append(replacement)
+                    i += 1
+                }
+            } else if b >= 0xA1, b <= 0xFE {
+                if i + 1 < bytes.count, bytes[i + 1] >= 0xA1, bytes[i + 1] <= 0xFE {
+                    let index = Int(b - 0xA1) * 94 + Int(bytes[i + 1] - 0xA1)
+                    let v = CharsetTables.eucJpPlane1[index]
+                    scalars.append(v == 0xFFFF ? replacement : Unicode.Scalar(UInt32(v))!)
+                    i += 2
+                } else {
+                    scalars.append(replacement)
+                    i += 1
+                }
+            } else {
+                scalars.append(replacement)
+                i += 1
+            }
+        }
+        return String(scalars)
     }
 }

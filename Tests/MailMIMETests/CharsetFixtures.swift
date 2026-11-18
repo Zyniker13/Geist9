@@ -52,6 +52,9 @@ let charsetFixtures: [CharsetFixture] = [
     CharsetFixture(label: "hz-gb-2312", bytes: [0x7e, 0x7b, 0x56, 0x50, 0x4e, 0x44, 0x7e, 0x7d], expected: "\u{4E2D}\u{6587}"),
     CharsetFixture(label: "utf-8", bytes: [0x68, 0xc3, 0xa9, 0x6c, 0x6c, 0x6f, 0x20, 0xe4, 0xb8, 0xad, 0xe6, 0x96, 0x87, 0x20, 0xf0, 0x9f, 0x8e, 0x89], expected: "h\u{00E9}llo \u{4E2D}\u{6587} \u{1F389}"),
     CharsetFixture(label: "us-ascii", bytes: [0x70, 0x6c, 0x61, 0x69, 0x6e, 0x20, 0x61, 0x73, 0x63, 0x69, 0x69, 0x20, 0x74, 0x65, 0x78, 0x74], expected: "plain ascii text"),
+    CharsetFixture(label: "euc-jp", bytes: [0xa4, 0xa2, 0xa4, 0xa4, 0xa4, 0xa6, 0x8e, 0xb1, 0x8e, 0xb2, 0x8e, 0xb3], expected: "\u{3042}\u{3044}\u{3046}\u{FF71}\u{FF72}\u{FF73}"),
+    CharsetFixture(label: "euc-jp", bytes: [0x8f, 0xb0, 0xa1], expected: "\u{4E02}"),
+    CharsetFixture(label: "mac-roman", bytes: [0x63, 0x61, 0x66, 0x8e, 0x20, 0x54, 0x9f, 0x72, 0x6b, 0x20, 0xb4, 0xb9, 0xbd, 0xce], expected: "caf\u{00E9} T\u{00FC}rk \u{00A5}\u{03C0}\u{03A9}\u{0152}"),
 ]
 
 let charsetMislabels: [CharsetMislabel] = [
@@ -75,4 +78,7 @@ let charsetMislabels: [CharsetMislabel] = [
     CharsetMislabel(alias: "eucJP", like: "euc-jp"),
     CharsetMislabel(alias: "koi8_r", like: "koi8-r"),
     CharsetMislabel(alias: "big-five", like: "big5"),
+    CharsetMislabel(alias: "x-euc-jp", like: "euc-jp"),
+    CharsetMislabel(alias: "ujis", like: "euc-jp"),
+    CharsetMislabel(alias: "macroman", like: "mac-roman"),
 ]
