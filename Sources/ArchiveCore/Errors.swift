@@ -16,4 +16,8 @@ public enum ArchiveError: Error, Equatable, Sendable {
     case io(underlying: String)
     /// An invariant of the archive format was violated (e.g. bad shard path).
     case corruptLayout(String)
+    /// A saved search needs a non-empty name.
+    case invalidSavedSearchName
+    /// A saved search needs a non-empty query.
+    case invalidSavedSearchQuery
 }

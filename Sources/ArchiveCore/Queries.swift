@@ -24,6 +24,24 @@ public struct MailboxSummary: Sendable, Equatable {
     public var messageCount: Int
 }
 
+public struct LabelSummary: Sendable, Equatable {
+    public var name: String
+    public var messageCount: Int
+}
+
+public struct AccountSummary: Sendable, Equatable {
+    public var email: String
+    public var displayName: String
+    public var messageCount: Int
+}
+
+public struct SavedSearchSummary: Sendable, Equatable {
+    public var id: Int64
+    public var name: String
+    public var query: String
+    public var createdAt: Date
+}
+
 extension ArchiveStore {
     /// Messages in one mailbox, newest first by dateReceived (then id).
     public func listMessages(mailbox: String, newestFirst: Bool = true, limit: Int = 100, offset: Int = 0) throws -> [MessageSummary] {
@@ -87,6 +105,87 @@ extension ArchiveStore {
             )
         }
     }
+
+    /// Distinct labels of one account with the number of messages carrying
+    /// each. Labels with no messages still appear, so the sidebar shows the
+    /// full set an import laid down.
+    public func listLabels(accountEmail: String) throws -> [LabelSummary] {
+        try db.read { db in
+            try LabelSummary.fetchAll(
+                db,
+                sql: """
+                SELECT l.name, COALESCE(COUNT(ml.messageID), 0) AS messageCount
+                FROM label l
+                JOIN account a ON a.id = l.accountID
+                LEFT JOIN message_label ml ON ml.labelID = l.id
+                WHERE a.email = ?
+                GROUP BY l.id
+                ORDER BY l.name
+                """,
+                arguments: [accountEmail.lowercased()]
+            )
+        }
+    }
+
+    /// All accounts with message counts, for the sidebar. Accounts with no
+    /// messages still appear.
+    public func listAccounts() throws -> [AccountSummary] {
+        try db.read { db in
+            try AccountSummary.fetchAll(
+                db,
+                sql: """
+                SELECT a.email, a.displayName,
+                       COALESCE(COUNT(DISTINCT m.id), 0) AS messageCount
+                FROM account a
+                LEFT JOIN mailbox mb ON mb.accountID = a.id
+                LEFT JOIN message_mailbox mm ON mm.mailboxID = mb.id
+                LEFT JOIN message m ON m.id = mm.messageID
+                GROUP BY a.id
+                ORDER BY a.email
+                """
+            )
+        }
+    }
+
+    /// Saved searches (DESIGN 12), by name. Opening one runs its stored
+    /// query live over the current index.
+    public func listSavedSearches() throws -> [SavedSearchSummary] {
+        try db.read { db in
+            try SavedSearchSummary.fetchAll(
+                db,
+                sql: "SELECT id, name, query, createdAt FROM saved_search ORDER BY name"
+            )
+        }
+    }
+
+    /// Save a named query. Saving under an existing name replaces its
+    /// query — the save flow is "name what you are looking at".
+    public func saveSearch(name: String, query: String) throws {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw ArchiveError.invalidSavedSearchName }
+        guard !trimmedQuery.isEmpty else { throw ArchiveError.invalidSavedSearchQuery }
+        try db.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO saved_search (name, query, createdAt)
+                VALUES (?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET query = excluded.query
+                """,
+                arguments: [trimmedName, trimmedQuery, Timestamp.string(Date())]
+            )
+        }
+    }
+
+    /// Delete one saved search. Affects only the saved_search table.
+    public func deleteSavedSearch(id: Int64) throws {
+        try db.write { db in
+            try db.execute(
+                sql: "DELETE FROM saved_search WHERE id = ?",
+                arguments: [id]
+            )
+        }
+    }
 }
 
 /// GRDB row mapping.
@@ -113,6 +212,36 @@ extension MailboxSummary: FetchableRecord {
             name: row["name"],
             role: row["role"],
             messageCount: row["messageCount"]
+        )
+    }
+}
+
+extension LabelSummary: FetchableRecord {
+    public init(row: Row) throws {
+        self.init(
+            name: row["name"],
+            messageCount: row["messageCount"]
+        )
+    }
+}
+
+extension AccountSummary: FetchableRecord {
+    public init(row: Row) throws {
+        self.init(
+            email: row["email"],
+            displayName: row["displayName"],
+            messageCount: row["messageCount"]
+        )
+    }
+}
+
+extension SavedSearchSummary: FetchableRecord {
+    public init(row: Row) throws {
+        self.init(
+            id: row["id"],
+            name: row["name"],
+            query: row["query"],
+            createdAt: Timestamp.date(row["createdAt"] as String) ?? Date(timeIntervalSince1970: 0)
         )
     }
 }

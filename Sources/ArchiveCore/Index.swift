@@ -9,8 +9,12 @@ import Foundation
 import GRDB
 
 public enum IndexSchema {
-    /// Matches ArchiveManifest.currentFormatVersion; bump together.
-    public static let version = 3
+    /// The index schema has its own version, applied by the ordered
+    /// migrations below. It is independent of ArchiveManifest's archive
+    /// format version, which tracks the on-disk file layout contract
+    /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
+    /// without any change to the stored files.
+    public static let version = 4
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -19,6 +23,7 @@ public enum IndexSchema {
         ("core-v1", coreV1),
         ("core-v2", coreV2),
         ("core-v3", coreV3),
+        ("core-v4", coreV4),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -165,6 +170,20 @@ public enum IndexSchema {
         try db.create(index: "idx_message_normsubject", on: "message", columns: ["normalizedSubject"])
         try db.create(index: "idx_message_thread", on: "message", columns: ["threadID"])
         try db.create(index: "idx_message_provthread", on: "message", columns: ["providerThreadID"])
+    }
+
+    /// core-v4: saved searches (DESIGN 12). A saved search is a stored,
+    /// named query the person saved; opening it runs the query live over
+    /// the current index, so it stays current as mail arrives. Saved
+    /// searches never touch message rows.
+    private static func coreV4(_ db: Database) throws {
+        try db.create(table: "saved_search") { t in
+            t.autoIncrementedPrimaryKey("id")
+            t.column("name", .text).notNull()
+            t.column("query", .text).notNull()
+            t.column("createdAt", .text).notNull()
+            t.uniqueKey(["name"])
+        }
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {
