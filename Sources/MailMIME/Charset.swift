@@ -80,10 +80,21 @@ public enum Charset {
     static func decodeUTF16(_ bytes: [UInt8]) -> String {
         guard bytes.count >= 2 else { return "" }
         func units(_ start: Int, bigEndian: Bool) -> [UInt16] {
-            stride(from: start, to: bytes.count - 1, by: 2).map {
-                bigEndian ? UInt16(bytes[$0]) << 8 | UInt16(bytes[$0 + 1])
-                          : UInt16(bytes[$0]) | UInt16(bytes[$0 + 1]) << 8
+            var result: [UInt16] = []
+            var i = start
+            while i + 1 < bytes.count {
+                let hi = UInt16(bytes[i])
+                let lo = UInt16(bytes[i + 1])
+                let unit: UInt16
+                if bigEndian {
+                    unit = (hi << 8) | lo
+                } else {
+                    unit = hi | (lo << 8)
+                }
+                result.append(unit)
+                i += 2
             }
+            return result
         }
         if bytes[0] == 0xFE, bytes[1] == 0xFF {
             return String(decoding: units(2, bigEndian: true), as: UTF16.self)
