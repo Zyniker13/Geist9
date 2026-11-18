@@ -52,11 +52,14 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.84.0"),
         // SQLite index layer (DESIGN 6), decision 0013: GRDB over SQLite in WAL mode.
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.12.0"),
+        // SHA-256 for content addressing (DESIGN 6); decision 0014. Same Crypto API on Linux and macOS.
+        .package(url: "https://github.com/apple/swift-crypto.git", exact: "5.1.1"),
     ],
     targets: [
         // models, archive format, index, migrations (DESIGN 6)
         .target(name: "ArchiveCore", dependencies: [
             .product(name: "GRDB", package: "GRDB.swift"),
+            .product(name: "Crypto", package: "swift-crypto"),
         ]),
         // parser, charsets, threading (DESIGN 7)
         .target(name: "MailMIME"),
@@ -74,6 +77,7 @@ let package = Package(
         .target(name: "Credentials"),
     ] + spikeTargets + [
         .testTarget(name: "ArchiveCoreTests", dependencies: ["ArchiveCore"]),
+        .testTarget(name: "MailMIMETests", dependencies: ["MailMIME"]),
         .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
     ]
 )
