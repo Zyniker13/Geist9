@@ -54,6 +54,27 @@ enum AtomicWrite {
         try sync(fd: dirFD)
     }
 
+    /// Finalizes a file that was written to `temp` by a streaming writer:
+    /// fsync it, rename it to `url`, fsync the directory. Deletes the temp
+    /// file when anything fails, so a partial export never keeps the
+    /// destination's name.
+    static func finalize(temp: URL, to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        let fd = open(temp.path, O_RDONLY)
+        guard fd >= 0 else { throw ArchiveError.io(underlying: ioDescription()) }
+        defer { close(fd) }
+        try sync(fd: fd)
+        guard rename(temp.path, url.path) == 0 else {
+            let description = ioDescription()
+            try? FileManager.default.removeItem(at: temp)
+            throw ArchiveError.io(underlying: description)
+        }
+        let dirFD = open(directory.path, O_RDONLY)
+        guard dirFD >= 0 else { throw ArchiveError.io(underlying: ioDescription()) }
+        defer { close(dirFD) }
+        try sync(fd: dirFD)
+    }
+
     private static func sync(fd: Int32) throws {
         #if os(macOS)
         // F_FULLFSYNC forces a physical flush on APFS; fsync alone may not.
