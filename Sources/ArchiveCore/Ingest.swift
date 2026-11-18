@@ -551,9 +551,21 @@ extension ArchiveStore {
             }
         }
         let box = ErrorBox()
+        // concurrentPerform's work closure is @Sendable on Linux; the token
+        // stage legitimately hands it an unsafe buffer pointer, so the body
+        // travels in an unchecked-Sendable box instead of loosening every
+        // call site. Each index runs exactly once (concurrentPerform
+        // contract) and the box is immutable, so the box itself adds no
+        // shared mutable state; captured-state safety is the caller's
+        // contract, as documented below.
+        final class BodyBox: @unchecked Sendable {
+            let body: (Int) throws -> Void
+            init(_ body: @escaping (Int) throws -> Void) { self.body = body }
+        }
+        let bodyBox = BodyBox(body)
         DispatchQueue.concurrentPerform(iterations: count) { index in
             do {
-                try body(index)
+                try bodyBox.body(index)
             } catch {
                 box.set(error)
             }
