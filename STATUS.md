@@ -1,8 +1,8 @@
 # Status
 
 - **Current milestone:** M1 (Local Archive and Search Core)
-- **Last done:** M1.11 export complete: `.eml` trees (byte-verbatim copies under folders mirroring mailbox names, `<hash12>-<subject>.eml`), mbox with mboxrd re-quoting and a From_ envelope from the index (envelope date from Date, then received, then the epoch), Apple Mail `.mbox` packages (bare legacy `mbox`, no private `table_of_contents`), whole-archive dedup with stable order, refusal to clobber an existing destination, atomic finalize. Round trips byte-identical in both directions (.eml always; mbox except the one documented frame-newline byte for stored messages that lack a trailing newline). 12 export tests, 187 total; decisions 0015 and 0016 record import/export semantics.
-- **Next step:** M1 search: tokenizer pipeline + language detection, then FTS5 query layer.
+- **Last done:** M1 search tokenizer pipeline: new `ArchiveSearch` module with `TokenPipeline` (fold → segment → fold → filter), NLLanguageRecognizer + NLTokenizer on macOS and a documented Linux fallback (whitespace split, one token per CJK character), locale-independent NFKC/case/diacritic folding, order-preserving token stream for FTS5 phrases, address-aware tokens (`jane.doe@example.com` → `jane doe jane.doe example example.com`, bare TLD excluded), 22 golden tests pinning per-language segmentation. Decision 0017 records the architecture; the CI fix for root containers bypassing chmod is `c91b899`.
+- **Next step:** M1 search: FTS5 index integration (ingest writes the token stream into FTS5 in the ingest transaction), the query language, field-weighted BM25, thread grouping, snippets.
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer
@@ -28,6 +28,7 @@ None yet.
 - 2026-11-17: CI diagnostics added to check.sh: failed build/test output written to `$GITHUB_STEP_SUMMARY` and error lines emitted as `::error::` annotations (readable through the public checks API).
 - 2026-11-17: Embedding model spike complete. Evaluated 4 ONNX models on Apple silicon: bge-small-en-v1.5 selected as default (127 MB, p50 19 ms, strong multilingual, MIT), nomic-embed-text-v1 as higher-quality alternative (522 MB, p50 17 ms, 768-dim, Apache-2.0), all-MiniLM-L6-v2 quantized ARM as storage fallback (22 MB, p50 28 ms), paraphrase-multilingual-MiniLM-L12-v2 excluded (p50 342 ms, too slow). Decision 0009 recorded. Results in docs/spikes/embedding-models.md.
 - 2026-11-17: Vision OCR spike complete. Apple Vision framework selected as primary OCR engine (100% accuracy on clean/noisy synthetic tests, ~100-200ms/page after ~15s first-run model load, no external deps). Decision 0010 recorded. Results in Spikes/VisionOCRSpike/.
+- 2026-11-18: M1 search tokenizer pipeline: `ArchiveSearch` module (`TokenPipeline`), NLLanguageRecognizer/NLTokenizer on macOS, Linux fallback (per-character CJK tokens), address-aware tokens, 22 golden tests; decision 0017.
 - 2026-11-17: WKWebView lockdown decision. Use file:// URLs with strict navigation/UI lockdown (navigationDelegate cancels all, uiDelegate nil). Decision 0011 recorded.
 - 2026-11-17: 1Password route decision. `op` CLI with desktop app integration for interactive use, service account tokens for unattended Macs. Decision 0005 accepted (spike result merged into the existing 0005 record; duplicate 0011 record deleted).
 - 2026-11-17: Decision numbering made monotonic: spike-era records renumbered 0009 (embedding), 0010 (OCR), 0011 (WKWebView); 0012 (MCP stdio) keeps its number. The first 0008 record is the MCP server decision.

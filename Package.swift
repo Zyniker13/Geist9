@@ -84,6 +84,7 @@ let package = Package(
         .target(name: "Credentials"),
     ] + spikeTargets + [
         .testTarget(name: "ArchiveCoreTests", dependencies: ["ArchiveCore"]),
+        .testTarget(name: "ArchiveSearchTests", dependencies: ["ArchiveSearch"]),
         .testTarget(name: "MailMIMETests", dependencies: ["MailMIME"]),
         .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
     ]
