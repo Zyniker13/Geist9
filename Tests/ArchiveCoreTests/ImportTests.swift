@@ -199,10 +199,12 @@ final class ImportTests: XCTestCase {
 
     func testEMLFolderContinuesPastUnreadableFile() throws {
         try write(eml(subject: "Good"), to: tempDir.appendingPathComponent("good.eml"))
-        let broken = tempDir.appendingPathComponent("Broken.eml")
-        try write("junk", to: broken)
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: broken.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: broken.path) }
+        // A directory named like a message. Even a privileged process (CI
+        // containers run as root, which bypasses permission bits) cannot
+        // read it as a file, so the import must fail that entry and continue.
+        try FileManager.default.createDirectory(
+            at: tempDir.appendingPathComponent("Broken.eml"), withIntermediateDirectories: false
+        )
 
         let report = try MailImporter.import(store, from: tempDir, now: importTime)
 

@@ -588,7 +588,11 @@ public enum MailImporter {
                 enumerator.skipDescendants()
                 continue
             }
-            guard file.lastPathComponent.hasSuffix(".eml"), file.isRegularFile else { continue }
+            // Anything with an .eml name is a claimed message: collect it
+            // even if it is not a regular file, so reading it fails and the
+            // import reports a per-file failure instead of silently skipping
+            // an entry the tree says is a message.
+            guard file.lastPathComponent.hasSuffix(".eml") else { continue }
             files.append(file)
         }
         return files.sorted { $0.path < $1.path }
