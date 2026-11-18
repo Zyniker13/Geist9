@@ -33,6 +33,20 @@ let spikeTargets: [Target] = [
 ]
 #endif
 
+let viewerProducts: [Product]
+let viewerTargets: [Target]
+#if os(macOS)
+// Message viewer: sanitizer assembly, WKWebView lockdown, attachment scheme (DESIGN 8)
+viewerProducts = [.library(name: "ViewerKit", targets: ["ViewerKit"])]
+viewerTargets = [
+    .target(name: "ViewerKit", dependencies: ["MailMIME"]),
+    .testTarget(name: "ViewerKitTests", dependencies: ["ViewerKit"]),
+]
+#else
+viewerProducts = []
+viewerTargets = []
+#endif
+
 let package = Package(
     name: "EmailArchiver",
     platforms: [.macOS(.v15)],
@@ -45,7 +59,7 @@ let package = Package(
         .library(name: "ArchiveCrypto", targets: ["ArchiveCrypto"]),
         .library(name: "ArchiveMCP", targets: ["ArchiveMCP"]),
         .library(name: "Credentials", targets: ["Credentials"]),
-    ],
+    ] + viewerProducts,
     dependencies: [
         // IMAP protocol layer, chosen in docs/decisions/0002 and confirmed by the M0 spike.
         .package(url: "https://github.com/apple/swift-nio-imap.git", exact: "0.5.0"),
@@ -83,7 +97,7 @@ let package = Package(
         .target(name: "ArchiveMCP"),
         // CredentialStore, Keychain and 1Password backends (DESIGN 4)
         .target(name: "Credentials"),
-    ] + spikeTargets + [
+    ] + spikeTargets + viewerTargets + [
         .testTarget(name: "ArchiveCoreTests", dependencies: ["ArchiveCore"]),
         .testTarget(name: "ArchiveSearchTests", dependencies: ["ArchiveSearch"]),
         .testTarget(name: "MailMIMETests", dependencies: ["MailMIME"]),
