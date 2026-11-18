@@ -50,10 +50,14 @@ let package = Package(
         // IMAP protocol layer, chosen in docs/decisions/0002 and confirmed by the M0 spike.
         .package(url: "https://github.com/apple/swift-nio-imap.git", exact: "0.5.0"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.84.0"),
+        // SQLite index layer (DESIGN 6), decision 0013: GRDB over SQLite in WAL mode.
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.12.0"),
     ],
     targets: [
         // models, archive format, index, migrations (DESIGN 6)
-        .target(name: "ArchiveCore"),
+        .target(name: "ArchiveCore", dependencies: [
+            .product(name: "GRDB", package: "GRDB.swift"),
+        ]),
         // parser, charsets, threading (DESIGN 7)
         .target(name: "MailMIME"),
         // IMAP, JMAP, provider database (DESIGN 5)

@@ -14,3 +14,4 @@ One record per significant decision, numbered in order: Context, Decision, Conse
 - [0010: OCR Engine](0010-ocr-engine.md)
 - [0011: WKWebView Lockdown](0011-wkwebview-lockdown.md)
 - [0012: MCP stdio transport](0012-mcp-stdio.md)
+- [0013: SQLite Layer — GRDB](0013-sqlite-layer-grdb.md)
