@@ -10,3 +10,7 @@ One record per significant decision, numbered in order: Context, Decision, Conse
 - [0006: All Rights Reserved](0006-license.md)
 - [0007: Search Built on SQLite FTS5 With Our Own Text Pipeline](0007-search-engine.md)
 - [0008: A Local, Read-Only MCP Server](0008-mcp-server.md)
+- [0009: Embedding Model for Semantic Search](0009-embedding-model.md)
+- [0010: OCR Engine](0010-ocr-engine.md)
+- [0011: WKWebView Lockdown](0011-wkwebview-lockdown.md)
+- [0012: MCP stdio transport](0012-mcp-stdio.md)

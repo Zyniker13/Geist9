@@ -1,4 +1,4 @@
-# 0008 Embedding Model for Semantic Search
+# 0009 Embedding Model for Semantic Search
 
 ## Context
 

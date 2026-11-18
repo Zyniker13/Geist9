@@ -1,0 +1,58 @@
+[
+  {
+    "test": "English clean",
+    "engine": "tesseract",
+    "latency_ms": 722.7893749950454,
+    "accuracy": 0.1511111111111111,
+    "error": null
+  },
+  {
+    "test": "English clean",
+    "engine": "vision",
+    "latency_ms": 30019.380666009965,
+    "accuracy": null,
+    "error": "ERROR: Command '['swift', '/var/folders/yr/9s0htl1n449d00vx_tzwk0p80000gp/T/tmp9dhdaqr4/vision_ocr.swift']' timed out after 30 seconds"
+  },
+  {
+    "test": "English low quality",
+    "engine": "tesseract",
+    "latency_ms": 164.47970799345057,
+    "accuracy": 0.1511111111111111,
+    "error": null
+  },
+  {
+    "test": "English low quality",
+    "engine": "vision",
+    "latency_ms": 30054.490958995302,
+    "accuracy": null,
+    "error": "ERROR: Command '['swift', '/var/folders/yr/9s0htl1n449d00vx_tzwk0p80000gp/T/tmpwvs6omto/vision_ocr.swift']' timed out after 30 seconds"
+  },
+  {
+    "test": "Chinese",
+    "engine": "tesseract",
+    "latency_ms": 875.0662500096951,
+    "accuracy": 0.017391304347826087,
+    "error": null
+  },
+  {
+    "test": "Chinese",
+    "engine": "vision",
+    "latency_ms": 30023.534249994555,
+    "accuracy": null,
+    "error": "ERROR: Command '['swift', '/var/folders/yr/9s0htl1n449d00vx_tzwk0p80000gp/T/tmp8u3t94kq/vision_ocr.swift']' timed out after 30 seconds"
+  },
+  {
+    "test": "Short subject line",
+    "engine": "tesseract",
+    "latency_ms": 252.329541996005,
+    "accuracy": 1.0,
+    "error": null
+  },
+  {
+    "test": "Short subject line",
+    "engine": "vision",
+    "latency_ms": 30019.80987499701,
+    "accuracy": null,
+    "error": "ERROR: Command '['swift', '/var/folders/yr/9s0htl1n449d00vx_tzwk0p80000gp/T/tmpkna_xn_u/vision_ocr.swift']' timed out after 30 seconds"
+  }
+]
