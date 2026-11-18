@@ -1,5 +1,5 @@
 {
-  "originHash" : "451d26385a2930aebb6014d2e30441aed999afe1beebbeb26927b3bb4f37df6f",
+  "originHash" : "cf2cff695b7dc492a897f5abf20da8d978adfaa059d88c42429666f4f123d38e",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -105,8 +105,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio.git",
       "state" : {
-        "revision" : "ad6b5f17270a7008f60d35ec5378e6144a575162",
-        "version" : "2.84.0"
+        "revision" : "2f58d8ef84438d6517fc78bcea2f8527e3c72936",
+        "version" : "2.105.0"
       }
     },
     {
@@ -114,8 +114,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio-extras",
       "state" : {
-        "revision" : "cc599775aa85d04340f09b47e5432564f9889ae7",
-        "version" : "1.32.0"
+        "revision" : "8e1249b29f92574e05e0d91637f239e378a9a95b",
+        "version" : "1.35.2"
       }
     },
     {
@@ -141,8 +141,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio-ssl",
       "state" : {
-        "revision" : "3f337058ccd7243c4cac7911477d8ad4c598d4da",
-        "version" : "2.37.0"
+        "revision" : "15e0b9e495786807272dd4891fa4bac76aa43034",
+        "version" : "2.37.6"
       }
     },
     {

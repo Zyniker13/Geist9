@@ -49,7 +49,12 @@ let package = Package(
     dependencies: [
         // IMAP protocol layer, chosen in docs/decisions/0002 and confirmed by the M0 spike.
         .package(url: "https://github.com/apple/swift-nio-imap.git", exact: "0.5.0"),
-        .package(url: "https://github.com/apple/swift-nio.git", exact: "2.84.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", exact: "2.105.0"),
+        // Transitive pins for security advisories: extras <1.34.1 (decompressor
+        // ratio bypass, GHSA-6ph5-fww6-vfwv) and ssl <2.37.6 (SAN buffer OOB
+        // read, CVE-2026-43820) are affected; pinning forces resolution past them.
+        .package(url: "https://github.com/apple/swift-nio-extras.git", exact: "1.35.2"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", exact: "2.37.6"),
         // SQLite index layer (DESIGN 6), decision 0013: GRDB over SQLite in WAL mode.
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.12.0"),
         // SHA-256 for content addressing (DESIGN 6); decision 0014. Same Crypto API on Linux and macOS.
