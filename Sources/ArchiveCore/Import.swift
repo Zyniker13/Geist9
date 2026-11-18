@@ -528,7 +528,10 @@ public enum MailImporter {
             labels: labels,
             attachments: parsed.attachments,
             importSource: importSource,
-            providerThreadID: threadID
+            providerThreadID: threadID,
+            // Bodies must be searchable on imported mail: carry the parsed
+            // search text through, or the index stores no body tokens.
+            searchText: parsed.searchText
         )
         return try store.ingest(message, into: account, now: now)
     }

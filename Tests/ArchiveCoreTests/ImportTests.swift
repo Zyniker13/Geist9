@@ -242,6 +242,36 @@ final class ImportTests: XCTestCase {
         XCTAssertEqual(try mailboxesOf(subject: "Solo"), ["Imported"])
     }
 
+    // Regression: imported mail must be searchable by words in its body.
+    // ingestOne used to leave `searchText` nil, so bodies were never indexed
+    // and a two-word body query found nothing on imported mail.
+    func testImportIndexesBodyForSearch() throws {
+        let file = tempDir.appendingPathComponent("bodysearch.eml")
+        try eml(
+            subject: "Quarterly budget",
+            body: "The xylophone repair invoice is inside the broomstick folder."
+        ).write(to: file)
+
+        _ = try MailImporter.import(store, from: file, now: importTime)
+        let expected = try rowIDOf(subject: "Quarterly budget")
+
+        let results = try store.search("xylophone broomstick")
+        XCTAssertEqual(
+            results.hits.map(\.messageID),
+            [expected],
+            "a body-word query must find imported mail"
+        )
+    }
+
+    /// The message row's id for a subject, failing the test when absent.
+    private func rowIDOf(subject: String) throws -> Int64 {
+        try store.db.read { db in
+            try Int64.fetchOne(
+                db, sql: "SELECT id FROM message WHERE subject = ?", arguments: [subject]
+            ) ?? -1
+        }
+    }
+
     // MARK: mbox
 
     func testMboxImportKeepsSourceBytesAndUsesEnvelopeDate() throws {
