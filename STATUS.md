@@ -1,8 +1,8 @@
 # Status
 
 - **Current milestone:** M0 (Foundations and Spikes)
-- **Last done:** embedding model spike complete — bge-small-en-v1.5 selected as default (127 MB, p50 19 ms), nomic-embed-text-v1 as higher-quality alternative (522 MB, p50 17 ms), all-MiniLM-L6-v2 quantized ARM as storage fallback (22 MB). Decision 0008 recorded.
-- **Next step:** remaining M0 spikes: Vision OCR speed/accuracy fixture, locked-down WKWebView zero-network proof, 1Password route (decision 0005), MCP stdio helper; then M0 "Done when" sweep.
+- **Last done:** Vision OCR spike complete — Apple Vision framework selected (100% accuracy on clean/noisy tests, ~100-200ms/page after ~15s first-run model load, no external deps). Decision 0009 recorded.
+- **Next step:** remaining M0 spikes: locked-down WKWebView zero-network proof, 1Password route (decision 0005), MCP stdio helper; then M0 "Done when" sweep.
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer
@@ -26,4 +26,5 @@ None yet.
 - 2026-11-17: CI toolchain bump: swift-nio-imap 0.5.0's Package.swift floor is tools-version 6.2, so the Linux container moves to swift:6.2-noble and the macOS job to the macos-26 runner (default Xcode 26.6). Both CI legs failed on the spike commit until this; local builds pass because the local Xcode is newer than CI's was.
 - 2026-11-17: CI fix: `setvbuf(stdout, ...)` in IMAPSpike fails on Linux under Swift 6 strict concurrency (Glibc's stdout is a var / shared mutable state). Removed the line; also removed an unreachable `default: break` in the ID switch. Both spikes verified green on GreenMail (11/2) and Dovecot (12/1).
 - 2026-11-17: CI diagnostics added to check.sh: failed build/test output written to `$GITHUB_STEP_SUMMARY` and error lines emitted as `::error::` annotations (readable through the public checks API).
-|- 2026-11-17: Embedding model spike complete. Evaluated 4 ONNX models on Apple silicon: bge-small-en-v1.5 selected as default (127 MB, p50 19 ms, strong multilingual, MIT), nomic-embed-text-v1 as higher-quality alternative (522 MB, p50 17 ms, 768-dim, Apache-2.0), all-MiniLM-L6-v2 quantized ARM as storage fallback (22 MB, p50 28 ms), paraphrase-multilingual-MiniLM-L12-v2 excluded (p50 342 ms, too slow). Decision 0008 recorded. Results in docs/spikes/embedding-models.md.
+- 2026-11-17: Embedding model spike complete. Evaluated 4 ONNX models on Apple silicon: bge-small-en-v1.5 selected as default (127 MB, p50 19 ms, strong multilingual, MIT), nomic-embed-text-v1 as higher-quality alternative (522 MB, p50 17 ms, 768-dim, Apache-2.0), all-MiniLM-L6-v2 quantized ARM as storage fallback (22 MB, p50 28 ms), paraphrase-multilingual-MiniLM-L12-v2 excluded (p50 342 ms, too slow). Decision 0008 recorded. Results in docs/spikes/embedding-models.md.
+- 2026-11-17: Vision OCR spike complete. Apple Vision framework selected as primary OCR engine (100% accuracy on clean/noisy synthetic tests, ~100-200ms/page after ~15s first-run model load, no external deps). Decision 0009 recorded. Results in Spikes/VisionOCRSpike/.
