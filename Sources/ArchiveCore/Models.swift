@@ -150,6 +150,9 @@ public struct IngestedMessage: Sendable {
     /// Provider thread id from the source format, e.g. Google Takeout's X-GM-THRID
     /// (hex or decimal string as found). Threading joins on this later (DESIGN 7).
     public var providerThreadID: String?
+    /// Search text for the FTS5 index (DESIGN 6A). Import fills this from
+    /// MailBridge; sync fills it the same way. nil indexes as empty columns.
+    public var searchText: SearchText?
 
     public init(
         record: MessageRecord,
@@ -158,7 +161,8 @@ public struct IngestedMessage: Sendable {
         labels: [LabelName] = [],
         attachments: [AttachmentInfo] = [],
         importSource: String? = nil,
-        providerThreadID: String? = nil
+        providerThreadID: String? = nil,
+        searchText: SearchText? = nil
     ) {
         self.record = record
         self.data = data
@@ -167,6 +171,7 @@ public struct IngestedMessage: Sendable {
         self.attachments = attachments
         self.importSource = importSource
         self.providerThreadID = providerThreadID
+        self.searchText = searchText
     }
 }
 

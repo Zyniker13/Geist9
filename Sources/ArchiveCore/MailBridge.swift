@@ -7,6 +7,24 @@
 import Foundation
 import MailMIME
 
+/// The text the search index gets from one message: the body a person
+/// wrote (ranks high) and quoted or signature text (ranks low). The
+/// plain-text part wins; HTML is reduced to text only when the message
+/// has no plain part. Nested messages (message/rfc822) are skipped: their
+/// content belongs to the inner message, and the outer body usually
+/// quotes it anyway.
+public struct SearchText: Sendable, Equatable {
+    /// Body text outside quotes and signature; nil when empty.
+    public var body: String?
+    /// Quoted replies and signature lines; nil when empty.
+    public var quoted: String?
+
+    public init(body: String?, quoted: String?) {
+        self.body = body
+        self.quoted = quoted
+    }
+}
+
 public enum MailBridge {
     /// Everything the index needs from one message, parsed in a single pass
     /// over the bytes. Import formats call this once per message; `record(for:)`
@@ -20,6 +38,10 @@ public enum MailBridge {
         /// X-GM-THRID value exactly as found, for provider thread joining
         /// (DESIGN 7); nil when the message has none.
         public var gmailThreadID: String?
+        /// Body text the search index stores (DESIGN 6A): the part the person
+        /// wrote, and quoted or signature text kept separate so ranking can
+        /// treat them differently.
+        public var searchText: SearchText
     }
 
     /// Parses message bytes into everything the index stores, in one pass.
@@ -48,8 +70,10 @@ public enum MailBridge {
         )
 
         var attachments: [AttachmentInfo] = []
+        var searchText = SearchText(body: nil, quoted: nil)
         if let root = try? parseRoot(data) {
             walk(root, path: "", into: &attachments)
+            searchText = extractSearchText(root)
         }
 
         var gmailLabels: [String] = []
@@ -69,7 +93,8 @@ public enum MailBridge {
             record: record,
             attachments: attachments,
             gmailLabels: gmailLabels,
-            gmailThreadID: gmailThreadID
+            gmailThreadID: gmailThreadID,
+            searchText: searchText
         )
     }
 
@@ -104,6 +129,210 @@ public enum MailBridge {
             }
         }
         return best?.path
+    }
+
+    // MARK: - Search text (DESIGN 6A)
+
+    /// Extracts the search text from message bytes without the rest of the
+    /// parse. Never throws; unparseable input yields empty text.
+    public static func searchText(for data: Data) -> SearchText {
+        guard let root = try? parseRoot(data) else { return SearchText(body: nil, quoted: nil) }
+        return extractSearchText(root)
+    }
+
+    static func extractSearchText(_ root: MIMEPart) -> SearchText {
+        var plain: String? = nil
+        var html: String? = nil
+        walkTextBodies(root) { part in
+            let (main, parameters) = part.contentType
+            guard main == "text/plain" || main == "text/html" else { return }
+            let text = Charset.decode(parameters["charset"], Array(part.decodedBody))
+            if main == "text/plain" {
+                if plain == nil { plain = text }
+            } else if html == nil {
+                html = text
+            }
+        }
+        let source: String
+        if let plain, !plain.isEmpty {
+            source = plain
+        } else if let html, !html.isEmpty {
+            source = htmlToText(html)
+        } else {
+            return SearchText(body: nil, quoted: nil)
+        }
+        return splitBodyText(source)
+    }
+
+    /// Leaves only: descends through multipart, never into message/rfc822.
+    private static func walkTextBodies(_ part: MIMEPart, _ visit: (MIMEPart) -> Void) {
+        if part.kind == .multipart {
+            for child in part.children { walkTextBodies(child, visit) }
+            return
+        }
+        if part.kind == .nestedMessage { return }
+        visit(part)
+    }
+
+    /// Splits body text at the first quote or signature marker: everything
+    /// above the marker is body, everything below is quoted. Heuristic per
+    /// DESIGN 6A — text after an interleaved reply marker is still prose,
+    /// but it is almost always the older text, so ranking it low is right
+    /// far more often than not. Returns nils instead of empty strings.
+    static func splitBodyText(_ text: String) -> SearchText {
+        var body: [String] = []
+        var quoted: [String] = []
+        var belowMarker = false
+        for line in text.components(separatedBy: "\n") {
+            if belowMarker {
+                quoted.append(line)
+                continue
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "--" {
+                // Signature delimiter; the signature itself is not even
+                // worth the quoted bucket.
+                belowMarker = true
+                continue
+            }
+            if isQuoteMarker(trimmed) {
+                belowMarker = true
+                quoted.append(line)
+                continue
+            }
+            body.append(line)
+        }
+        func clean(_ lines: [String]) -> String? {
+            let joined = lines.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return joined.isEmpty ? nil : joined
+        }
+        return SearchText(body: clean(body), quoted: clean(quoted))
+    }
+
+    /// A line that starts the quoted region: `>` quoting, a one-line
+    /// "On ... wrote:" attribution, or a forwarded/original-message marker.
+    static func isQuoteMarker(_ line: String) -> Bool {
+        if line.hasPrefix(">") { return true }
+        let lowered = line.lowercased()
+        if lowered.hasPrefix("on "),
+           lowered.hasSuffix("wrote:") || lowered.hasSuffix("writes:") {
+            return true
+        }
+        if lowered.hasPrefix("---"),
+           lowered.contains("original message") || lowered.contains("forwarded") {
+            return true
+        }
+        if lowered.hasPrefix("begin forwarded message") { return true }
+        return false
+    }
+
+    /// Reduces HTML to plain text: drops script/style content and comments,
+    /// turns block boundaries into newlines, decodes the common entities.
+    /// Deliberately not a full HTML parser — the goal is search text.
+    static func htmlToText(_ html: String) -> String {
+        let scalars = Array(html.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        let breaks: Set<String> = [
+            "br", "p", "div", "tr", "li", "table", "hr", "pre", "blockquote",
+            "ul", "ol", "dl", "dt", "dd", "form", "section", "article",
+            "header", "footer", "main", "nav", "aside", "figure",
+            "h1", "h2", "h3", "h4", "h5", "h6",
+        ]
+        var skipping: String? = nil
+        var i = 0
+        while i < scalars.count {
+            let scalar = scalars[i]
+            if scalar != "<" {
+                if skipping == nil { out.append(scalar) }
+                i += 1
+                continue
+            }
+            guard let close = scalars[i...].firstIndex(of: ">"), close > i else {
+                i += 1  // a lone '<' that never closes: keep scanning text
+                continue
+            }
+            let raw = String(String.UnicodeScalarView(scalars[(i + 1)..<close])).lowercased()
+            i = close + 1
+            let name = raw.trimmingCharacters(in: CharacterSet(charactersIn: "/!? \t\n\r"))
+            let bare = String(name.prefix(while: { $0.isLetter || $0.isNumber }))
+            if let inside = skipping {
+                // Wait for the matching close tag; ignore everything else.
+                if raw.hasPrefix("/"), bare == inside { skipping = nil }
+                continue
+            }
+            if raw.hasPrefix("!") || raw.hasPrefix("?") { continue }  // comments, declarations
+            if bare == "script" || bare == "style" {
+                skipping = bare
+                continue
+            }
+            if breaks.contains(bare) {
+                out.append("\n")
+            } else if bare == "td" || bare == "th" {
+                out.append(" ")
+            }
+        }
+        var text = String(out)
+        if text.contains("&") { text = decodeEntities(text) }
+        return collapseBlankRuns(text)
+    }
+
+    /// Decodes the entities HTML commonly carries; unknown or malformed
+    /// entities stay literal.
+    static func decodeEntities(_ text: String) -> String {
+        let scalars = Array(text.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var i = 0
+        while i < scalars.count {
+            guard scalars[i] == "&" else { out.append(scalars[i]); i += 1; continue }
+            var j = i + 1
+            var end: Int? = nil
+            while j < scalars.count, j - i <= 10 {
+                if scalars[j] == ";" { end = j; break }
+                j += 1
+            }
+            guard let end, end > i + 1 else { out.append(scalars[i]); i += 1; continue }
+            let entity = String(String.UnicodeScalarView(scalars[(i + 1)..<end]))
+            i = end + 1
+            switch entity {
+            case "amp": out.append("&")
+            case "lt": out.append("<")
+            case "gt": out.append(">")
+            case "quot": out.append("\"")
+            case "apos": out.append("'")
+            case "nbsp": out.append(" ")
+            default:
+                if entity.hasPrefix("#x") || entity.hasPrefix("#X") {
+                    if let code = UInt32(entity.dropFirst(2), radix: 16), let scalar = Unicode.Scalar(code) {
+                        out.append(scalar)
+                    } else {
+                        out.append(contentsOf: "&\(entity);".unicodeScalars)
+                    }
+                } else if entity.first == "#", let code = UInt32(entity.dropFirst()), let scalar = Unicode.Scalar(code) {
+                    out.append(scalar)
+                } else {
+                    out.append(contentsOf: "&\(entity);".unicodeScalars)
+                }
+            }
+        }
+        return String(out)
+    }
+
+    /// Collapses runs of blank lines to one blank line so long HTML mail
+    /// does not bury later text under whitespace.
+    static func collapseBlankRuns(_ text: String) -> String {
+        var lines: [String] = []
+        var blankRun = 0
+        for line in text.components(separatedBy: "\n") {
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                blankRun += 1
+                if blankRun == 1 { lines.append("") }
+            } else {
+                blankRun = 0
+                lines.append(line)
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Parsing

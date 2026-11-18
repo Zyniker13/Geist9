@@ -10,7 +10,7 @@ import GRDB
 
 public enum IndexSchema {
     /// Matches ArchiveManifest.currentFormatVersion; bump together.
-    public static let version = 2
+    public static let version = 3
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -18,6 +18,7 @@ public enum IndexSchema {
     static let steps: [(name: String, apply: @Sendable (Database) throws -> Void)] = [
         ("core-v1", coreV1),
         ("core-v2", coreV2),
+        ("core-v3", coreV3),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -140,6 +141,30 @@ public enum IndexSchema {
             t.add(column: "importSource", .text)
             t.add(column: "providerThreadID", .text)
         }
+    }
+
+    /// core-v3: the search index (DESIGN 6A). The FTS5 table holds the
+    /// pre-tokenized text columns; its rowid is `message.id`, so ingest writes
+    /// the token stream in the same transaction as the message row. Column
+    /// Column order matches the BM25 weight vector used at query time:
+    /// subject(12) from_name(8) from_addr(6) recipients(5) body(1)
+    /// quoted(0.4) attachments(0.3).
+    private static func coreV3(_ db: Database) throws {
+        // Provider thread identity is keyed per account (X-GM-THRID values are
+        // only unique within one account), so the stored key is account + id.
+        try db.alter(table: "thread") { t in
+            t.add(column: "providerKey", .text)
+        }
+        try db.execute(sql: """
+            CREATE VIRTUAL TABLE IF NOT EXISTS message_text USING fts5(
+                subject, from_name, from_addr, recipients, body, quoted, attachments,
+                tokenize = 'unicode61'
+            )
+            """)
+        // Thread and subject lookups the query executor and threading rely on.
+        try db.create(index: "idx_message_normsubject", on: "message", columns: ["normalizedSubject"])
+        try db.create(index: "idx_message_thread", on: "message", columns: ["threadID"])
+        try db.create(index: "idx_message_provthread", on: "message", columns: ["providerThreadID"])
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

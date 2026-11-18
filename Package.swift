@@ -67,6 +67,7 @@ let package = Package(
             .product(name: "GRDB", package: "GRDB.swift"),
             .product(name: "Crypto", package: "swift-crypto"),
             "MailMIME",
+            "ArchiveSearch",
         ]),
         // parser, charsets, threading (DESIGN 7)
         .target(name: "MailMIME"),

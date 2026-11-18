@@ -3,6 +3,7 @@
 // bytes adds nothing twice (content addressing + UNIQUE constraints); a later
 // copy in a different mailbox adds only the new membership row.
 
+import ArchiveSearch
 import Foundation
 import GRDB
 
@@ -53,6 +54,17 @@ extension ArchiveStore {
                 messageID = db.lastInsertedRowID
             }
             let messageRowID = messageID!
+
+            // Search index and thread assignment stay in the same
+            // transaction as the message row, so search never shows a
+            // message the list lacks, and vice versa.
+            if isNew {
+                try Self.indexSearchText(message, messageRowID: messageRowID, db: db)
+            }
+            try Self.assignThread(
+                message, accountEmail: account.email,
+                messageRowID: messageRowID, db: db
+            )
 
             for membership in message.memberships {
                 let mailboxID = try Self.getOrCreateMailbox(
@@ -129,6 +141,122 @@ extension ArchiveStore {
             return isNew ? .created(messageID: messageRowID) : .duplicate(messageID: messageRowID)
         }
         return result
+    }
+
+    // MARK: Search + threading (run inside the ingest transaction)
+
+    /// Writes the pre-tokenized text columns into the FTS5 table (DESIGN 6A).
+    /// The rowid is the message row's id, which is what makes MATCH results
+    /// joinable to `message` without a mapping table.
+    static func indexSearchText(
+        _ message: IngestedMessage, messageRowID: Int64, db: Database
+    ) throws {
+        let search = message.searchText ?? SearchText(body: nil, quoted: nil)
+        func tokens(_ text: String?, _ field: TextField) -> String {
+            guard let text, !text.isEmpty else { return "" }
+            return TokenPipeline.tokens(for: text, field: field).joined(separator: " ")
+        }
+        var recipients: [String] = []
+        for recipient in message.record.to + message.record.cc + message.record.bcc {
+            if let name = recipient.name, !name.isEmpty { recipients.append(name) }
+            if !recipient.email.isEmpty { recipients.append(recipient.email) }
+        }
+        let attachmentNames = message.attachments
+            .compactMap { (attachment: AttachmentInfo) -> String? in attachment.filename }
+            .joined(separator: " ")
+        try db.execute(
+            sql: """
+            INSERT INTO message_text
+                (rowid, subject, from_name, from_addr, recipients, body, quoted, attachments)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                messageRowID,
+                tokens(message.record.subject, .subject),
+                tokens(message.record.from?.name, .sender),
+                // The address is stored folded but raw: unicode61 splits it on
+                // '@' and '.', which yields exactly the address-aware tokens
+                // DESIGN 6A wants, and phrase queries (`from:a@b.c`) reassemble
+                // them (same pattern as the FTS5 spike).
+                message.record.from.map { TokenPipeline.folded($0.email) } ?? "",
+                tokens(recipients.joined(separator: " "), .recipient),
+                tokens(search.body, .body),
+                tokens(search.quoted, .quoted),
+                tokens(attachmentNames, .attachment),
+            ]
+        )
+    }
+
+    /// Joins the message to its thread (DESIGN 7). Order: provider thread id
+    /// first (exact), then the parent through References (nearest first) and
+    /// In-Reply-To, then the normalized subject; otherwise its own thread.
+    static func assignThread(
+        _ message: IngestedMessage, accountEmail: String, messageRowID: Int64, db: Database
+    ) throws {
+        func attach(_ threadID: Int64) throws {
+            try db.execute(
+                sql: "UPDATE message SET threadID = ? WHERE id = ?",
+                arguments: [threadID, messageRowID]
+            )
+        }
+
+        // 1. Provider thread id, keyed per account: X-GM-THRID values are
+        //    only unique within one account, so the key carries the address.
+        if let provider = message.providerThreadID?.trimmingCharacters(in: .whitespaces), !provider.isEmpty {
+            let key = "\(accountEmail.lowercased())/\(provider.lowercased())"
+            if let threadID = try Int64.fetchOne(
+                db, sql: "SELECT id FROM thread WHERE providerKey = ?", arguments: [key]
+            ) {
+                try attach(threadID)
+                return
+            }
+            try attach(Self.createThread(
+                subject: message.record.normalizedSubject, providerKey: key, db: db
+            ))
+            return
+        }
+
+        // 2. Parent lookup: the References chain newest first, then
+        //    In-Reply-To (which some clients set alone).
+        let parents = Array(message.record.references.reversed()) + message.record.inReplyTo
+        for parent in parents {
+            if let threadID = try Int64.fetchOne(
+                db, sql: "SELECT threadID FROM message WHERE messageID = ?",
+                arguments: [parent]
+            ) {
+                try attach(threadID)
+                return
+            }
+        }
+
+        // 3. Same normalized subject joins the existing thread.
+        if let subject = message.record.normalizedSubject, !subject.isEmpty {
+            if let threadID = try Int64.fetchOne(
+                db, sql: """
+                SELECT t.id FROM thread t
+                JOIN message m ON m.threadID = t.id
+                WHERE m.normalizedSubject = ?
+                LIMIT 1
+                """,
+                arguments: [subject]
+            ) {
+                try attach(threadID)
+                return
+            }
+            try attach(Self.createThread(subject: subject, providerKey: nil, db: db))
+            return
+        }
+
+        // 4. Nothing to hang it on: its own thread.
+        try attach(Self.createThread(subject: nil, providerKey: nil, db: db))
+    }
+
+    static func createThread(subject: String?, providerKey: String?, db: Database) throws -> Int64 {
+        try db.execute(
+            sql: "INSERT INTO thread (rootSubject, providerKey) VALUES (?, ?)",
+            arguments: [subject, providerKey]
+        )
+        return db.lastInsertedRowID
     }
 
     // MARK: Helpers (static, db passed in)
