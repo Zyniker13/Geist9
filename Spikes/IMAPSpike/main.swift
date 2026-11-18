@@ -14,7 +14,6 @@ import Foundation
 // that ran passed. QRESYNC steps SKIP when the server does not advertise it.
 
 let env = ProcessInfo.processInfo.environment
-setvbuf(stdout, nil, _IONBF, 0)
 let host = env["IMAP_HOST"] ?? "127.0.0.1"
 let port = UInt16(env["IMAP_PORT"] ?? "3143") ?? 3143
 let user = env["IMAP_USER"] ?? "alice@example.com"
@@ -129,7 +128,6 @@ do {
                     case .ok: idOK = true
                     case .no(let rt): idUnsupported = true; idServer = "NO: \(rt.text)"
                     case .bad(let rt): idUnsupported = true; idServer = "BAD: \(rt.text)"
-                    default: break
                     }
                 default:
                     break
