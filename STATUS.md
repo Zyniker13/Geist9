@@ -1,11 +1,8 @@
 # Status
 
-- **Current milestone:** M0 (Foundations and Spikes)
-- **Last done:** M0 "Done when" sweep complete. All three criteria met:
-  - `scripts/check.sh` passes locally; CI green on `b9bdc623` (both Linux and macOS legs).
-  - All 12 decisions (0001–0012) accepted. All 5 spike areas covered: IMAP (0002), FTS5 (0007), Embedding (0008), Vision OCR (0009), WKWebView (0010), 1Password (0005 updated), MCP stdio (0012).
-  - PROVIDERS.md has Dovecot, GreenMail, and Stalwart rows filled in.
-- **Next step:** M1: Local Archive and Search Core — archive store, MIME parser, import, export, search core, viewer, app shell.
+- **Current milestone:** M1 (Local Archive and Search Core)
+- **Last done:** M1.6 (MailMIME headers) complete: header block scanner (bare LF/CR tolerant), RFC 2047 encoded words (byte-level, split-multibyte repair, fallback charset for raw 8-bit), RFC 5322 addresses and dates, RFC 2231 parameters with continuations, typed header access. 58 header-layer tests pass. M1.1–M1.5 done earlier: GRDB 7.12.0 (0013), swift-crypto SHA-256 (0014), ArchiveCore store/index/ingest/scrub/queries with 22 tests.
+- **Next step:** M1.7 MailMIME body structure and transfer encodings (quoted-printable, base64, multipart, message/rfc822).
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer
@@ -36,3 +33,5 @@ None yet.
 - 2026-11-17: Decision numbering made monotonic: spike-era records renumbered 0009 (embedding), 0010 (OCR), 0011 (WKWebView); 0012 (MCP stdio) keeps its number. The first 0008 record is the MCP server decision.
 - 2026-11-17: MCP stdio transport decision. Foundation JSON-RPC over stdin/stdout, no external dependencies. Decision 0012 recorded.
 - 2026-11-17: M0 "Done when" sweep complete. All three criteria met: check.sh passes locally; CI green on `b9bdc623` (both legs); all 12 decisions accepted; PROVIDERS.md rows filled. Proceeding to M1.
+- 2026-11-17: M1.1–M1.5 complete. GRDB 7.12.0 as the SQLite layer (decision 0013), swift-crypto 5.1.1 for content addressing (decision 0014), ArchiveCore: content-addressed `.eml` store, atomic durable writes, index schema v1 (8 tables), ingest in one transaction (file first, index second), integrity scrub that repairs the index side only, queries. 22 store tests pass.
+- 2026-11-17: M1.6 MailMIME header layer complete: header block scanner (unfolds, tolerates bare LF/CR and junk lines), RFC 2047 encoded words (B/Q, byte-level with split-multibyte repair and unknown-charset fallback), RFC 5322 addresses (groups, obsolete routes, comments) and dates (obsolete forms), RFC 2231 parameters (continuations, charset'lang' encoding), typed accessors. 58 header tests pass. Two parser bugs found by tests and fixed before commit: a single-Character subscript truncating parameter values, and plain `name*0=` continuations being treated as plain parameters.
