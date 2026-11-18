@@ -7,7 +7,9 @@ import Foundation
 public struct ArchiveManifest: Codable, Sendable, Equatable {
     /// The archive format this repository documents (docs/ARCHIVE-FORMAT.md).
     /// Bump only when the on-disk contract changes, with a migration note.
-    public static let currentFormatVersion = 1
+    /// v2 (M1.10): message gains `importSource` and `providerThreadID` columns;
+    /// see docs/decisions/0015-import-export-semantics.md.
+    public static let currentFormatVersion = 2
 
     public var formatVersion: Int
     /// UTC, ISO 8601.
@@ -64,10 +66,16 @@ public struct ArchiveManifest: Codable, Sendable, Equatable {
 /// ISO 8601 UTC at seconds precision, fixed width, so SQLite TEXT comparisons
 /// sort chronologically and third-party tools can read the index directly.
 public enum Timestamp {
-    public static func string(_ date: Date) -> String {
+    /// Shared UTC calendar for every date the index and mbox From-lines
+    /// construct or decompose. All archive dates are UTC.
+    public static let utcCalendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
-        let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        return calendar
+    }()
+
+    public static func string(_ date: Date) -> String {
+        let c = utcCalendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
         return String(
             format: "%04d-%02d-%02dT%02d:%02d:%02dZ",
             c.year ?? 0, c.month ?? 0, c.day ?? 0,
@@ -90,9 +98,7 @@ public enum Timestamp {
         guard let year = group(1), let month = group(2), let day = group(3),
               let hour = group(4), let minute = group(5), let second = group(6),
               (1...12).contains(month), (1...31).contains(day) else { return nil }
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
-        return calendar.date(from: DateComponents(
+        return Timestamp.utcCalendar.date(from: DateComponents(
             year: year, month: month, day: day, hour: hour, minute: minute, second: second
         ))
     }

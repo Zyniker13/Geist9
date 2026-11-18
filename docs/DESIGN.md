@@ -151,7 +151,7 @@ A login item (`SMAppService.loginItem`, a helper inside the app bundle) runs the
 
 ### Index
 
-GRDB over SQLite in WAL mode. Tables: `account`, `mailbox`, `message` (hash, size, dates, normalized headers), `message_mailbox` (membership, UID, flags, first and last seen), `label`, `thread`, `address`, `attachment`. Migrations are versioned and tested on archives made by every earlier version.
+GRDB over SQLite in WAL mode. Tables: `account`, `mailbox`, `message` (hash, size, dates, normalized headers, import source, provider thread id), `message_mailbox` (membership, UID, flags, first and last seen), `label`, `thread`, `address`, `attachment`. Migrations are versioned and tested on archives made by every earlier version.
 
 ## 6A. Search and Indexing (a Primary Feature)
 

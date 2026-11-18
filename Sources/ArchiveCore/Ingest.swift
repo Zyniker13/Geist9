@@ -29,8 +29,9 @@ extension ArchiveStore {
                     sql: """
                     INSERT INTO message
                         (hash, size, subject, normalizedSubject, dateSent, dateReceived,
-                         messageID, inReplyTo, referencesIDs, fromName, fromEmail, listID)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         messageID, inReplyTo, referencesIDs, fromName, fromEmail, listID,
+                         importSource, providerThreadID)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     arguments: [
                         hash.bytes,
@@ -45,6 +46,8 @@ extension ArchiveStore {
                         message.record.from?.name,
                         message.record.from?.email,
                         message.record.listID,
+                        message.importSource,
+                        message.providerThreadID,
                     ]
                 )
                 messageID = db.lastInsertedRowID

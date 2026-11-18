@@ -144,19 +144,29 @@ public struct IngestedMessage: Sendable {
     public var memberships: [Membership]
     public var labels: [LabelName]
     public var attachments: [AttachmentInfo]
+    /// Where the message came from, for imports: e.g. "eml", "mbox", "apple-mail",
+    /// "takeout", or a source-specific tag. nil for messages synced from a server.
+    public var importSource: String?
+    /// Provider thread id from the source format, e.g. Google Takeout's X-GM-THRID
+    /// (hex or decimal string as found). Threading joins on this later (DESIGN 7).
+    public var providerThreadID: String?
 
     public init(
         record: MessageRecord,
         data: Data,
         memberships: [Membership],
         labels: [LabelName] = [],
-        attachments: [AttachmentInfo] = []
+        attachments: [AttachmentInfo] = [],
+        importSource: String? = nil,
+        providerThreadID: String? = nil
     ) {
         self.record = record
         self.data = data
         self.memberships = memberships
         self.labels = labels
         self.attachments = attachments
+        self.importSource = importSource
+        self.providerThreadID = providerThreadID
     }
 }
 

@@ -63,7 +63,7 @@ final class ArchiveStoreTests: XCTestCase {
         XCTAssertTrue(ArchiveStore.isArchiveDirectory(archiveURL))
         let manifestData = try Data(contentsOf: archiveURL.appendingPathComponent("manifest.json"))
         let json = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any]
-        XCTAssertEqual(json?["formatVersion"] as? Int, 1)
+        XCTAssertEqual(json?["formatVersion"] as? Int, 2)
         XCTAssertEqual(json?["appVersion"] as? String, "0.1.0")
         let encryption = json?["encryption"] as? [String: Any]
         XCTAssertEqual(encryption?["enabled"] as? Bool, false)
@@ -88,6 +88,62 @@ final class ArchiveStoreTests: XCTestCase {
         XCTAssertThrowsError(try ArchiveStore.open(at: archiveURL)) { error in
             XCTAssertEqual(error as? ArchiveError, .unsupportedFormatVersion(99))
         }
+    }
+
+    func testIndexMigratesV1ArchiveToCurrentSchema() throws {
+        // Simulate an archive written by the M1.1–M1.9 build: manifest
+        // formatVersion 1 and an index with only core-v1 applied, holding a
+        // real row. Opening it must run core-v2 (add the import provenance
+        // columns) without touching the stored row.
+        _ = try ArchiveStore.create(at: archiveURL, appVersion: "0.1.0")
+        var manifestV1 = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: archiveURL.appendingPathComponent("manifest.json"))
+        ) as! [String: Any]
+        manifestV1["formatVersion"] = 1
+        try JSONSerialization.data(
+            withJSONObject: manifestV1, options: [.prettyPrinted, .sortedKeys]
+        ).write(to: archiveURL.appendingPathComponent("manifest.json"))
+
+        let indexURL = archiveURL.appendingPathComponent(ArchiveStore.indexName)
+        let pool = try DatabasePool(path: indexURL.path)
+        try IndexSchema.migrator(through: "core-v1").migrate(pool)
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO account (email, displayName, providerKind)
+                VALUES ('alice@example.com', 'Alice', 'imap')
+                """
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO message (hash, size, subject, normalizedSubject, dateSent, messageID, fromEmail)
+                VALUES (x'01020304', 12, 'Old subject', 'old subject',
+                        '2024-03-05T14:23:01Z', '<old@example.com>', 'alice@example.com')
+                """
+            )
+        }
+
+        let store = try ArchiveStore.open(at: archiveURL)
+        let row = try singleRow(
+            store,
+            "SELECT subject, fromEmail, importSource, providerThreadID FROM message"
+        )
+        XCTAssertEqual(row["subject"] as? String, "Old subject")
+        XCTAssertEqual(row["fromEmail"] as? String, "alice@example.com")
+        // New columns exist (added by core-v2) and are NULL for the old row;
+        // the row itself was not rewritten.
+        XCTAssertNil(row["importSource"] as? String)
+        XCTAssertNil(row["providerThreadID"] as? String)
+        // The migrated index accepts inserts with the new columns.
+        try store.db.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO message (hash, size, subject, importSource, providerThreadID)
+                VALUES (x'05060708', 8, 'New subject', 'emlFolder', '<new@example.com>')
+                """
+            )
+        }
+        XCTAssertEqual(try count(store, "SELECT COUNT(*) FROM message"), 2)
     }
 
     func testOpenRejectsNonArchiveDirectory() throws {

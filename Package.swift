@@ -61,10 +61,12 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", exact: "5.1.1"),
     ],
     targets: [
-        // models, archive format, index, migrations (DESIGN 6)
+        // models, archive format, index, migrations, import/export (DESIGN 6, DESIGN 9);
+        // import parsing goes through MailMIME, never its own parser.
         .target(name: "ArchiveCore", dependencies: [
             .product(name: "GRDB", package: "GRDB.swift"),
             .product(name: "Crypto", package: "swift-crypto"),
+            "MailMIME",
         ]),
         // parser, charsets, threading (DESIGN 7)
         .target(name: "MailMIME"),
