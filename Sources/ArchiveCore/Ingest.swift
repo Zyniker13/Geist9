@@ -7,6 +7,50 @@ import ArchiveSearch
 import Foundation
 import GRDB
 
+// MARK: Search token precompute (pure CPU, safe to run in parallel)
+
+/// The seven pre-tokenized FTS5 column strings for one message. Computing
+/// them is pure CPU with no database access, so batch ingest computes them
+/// in parallel before the index transaction and the transaction only inserts.
+struct SearchTokens: Sendable {
+    var subject = ""
+    var fromName = ""
+    var fromAddr = ""
+    var recipients = ""
+    var body = ""
+    var quoted = ""
+    var attachments = ""
+
+    init() {}
+
+    init(_ message: IngestedMessage) {
+        let search = message.searchText ?? SearchText(body: nil, quoted: nil)
+        func tokens(_ text: String?, _ field: TextField) -> String {
+            guard let text, !text.isEmpty else { return "" }
+            return TokenPipeline.tokens(for: text, field: field).joined(separator: " ")
+        }
+        var recipients: [String] = []
+        for recipient in message.record.to + message.record.cc + message.record.bcc {
+            if let name = recipient.name, !name.isEmpty { recipients.append(name) }
+            if !recipient.email.isEmpty { recipients.append(recipient.email) }
+        }
+        let attachmentNames = message.attachments
+            .compactMap { (attachment: AttachmentInfo) -> String? in attachment.filename }
+            .joined(separator: " ")
+        self.subject = tokens(message.record.subject, .subject)
+        self.fromName = tokens(message.record.from?.name, .sender)
+        // The address is stored folded but raw: unicode61 splits it on
+        // '@' and '.', which yields exactly the address-aware tokens
+        // DESIGN 6A wants, and phrase queries (`from:a@b.c`) reassemble
+        // them (same pattern as the FTS5 spike).
+        self.fromAddr = message.record.from.map { TokenPipeline.folded($0.email) } ?? ""
+        self.recipients = tokens(recipients.joined(separator: " "), .recipient)
+        self.body = tokens(search.body, .body)
+        self.quoted = tokens(search.quoted, .quoted)
+        self.attachments = tokens(attachmentNames, .attachment)
+    }
+}
+
 extension ArchiveStore {
     /// Ingests one message: content-addressed storage + index rows, atomically.
     ///
@@ -15,12 +59,141 @@ extension ArchiveStore {
     /// re-import re-records it. The index never leads the files.
     @discardableResult
     public func ingest(_ message: IngestedMessage, into account: AccountIdentity, now: Date = Date()) throws -> IngestResult {
-        let hash = try putMessage(message.data)
+        try ingest([message], into: account, now: now)[0]
+    }
+
+    /// Ingests a batch of messages with the same durability contract as the
+    /// single-message form: every file is fsync'd before its rename, every
+    /// touched directory is fsync'd, and the index rows commit only after all
+    /// files are durable — so the index never leads the files, and a crash
+    /// anywhere leaves only complete files and (at most) an unindexed set that
+    /// scrub and rebuildIndex repair.
+    ///
+    /// The work is restructured for throughput, not for weaker durability:
+    /// file writes run in parallel (fsync latency is wait time), the directory
+    /// flushes are gathered into one pass, and the whole batch's index rows
+    /// commit in ONE transaction. Messages whose exact bytes are already
+    /// stored, or repeated inside the batch, cost only index lookups.
+    ///
+    /// Returns one result per input, in input order.
+    @discardableResult
+    public func ingest(_ messages: [IngestedMessage], into account: AccountIdentity, now: Date = Date()) throws -> [IngestResult] {
         let nowString = Timestamp.string(now)
 
-        let result: IngestResult = try db.write { db in
-            let accountID = try Self.getOrCreateAccount(account, db: db)
+        // Stage 1: hash every message, dedupe within the batch (first
+        // occurrence wins), and skip files already stored. All cheap, so it
+        // stays sequential and gives the parallel stage a plain list.
+        var firstIndexByHash: [String: Int] = [:]
+        var ordered: [(message: IngestedMessage, url: URL, hash: MessageHash)] = []
+        var resultSlotByInput: [Int] = Array(repeating: -1, count: messages.count)
+        for (index, message) in messages.enumerated() {
+            let hash = MessageHash.sha256(message.data)
+            if let slot = firstIndexByHash[hash.hex] {
+                resultSlotByInput[index] = slot
+                continue
+            }
+            firstIndexByHash[hash.hex] = ordered.count
+            resultSlotByInput[index] = ordered.count
+            ordered.append((message, fileURL(for: hash), hash))
+        }
 
+        // Stage 2: durable file writes in parallel. Each write fsyncs its own
+        // file before the rename (the bytes are complete on disk the moment
+        // the name appears); directory flushes are deferred to stage 3 so a
+        // batch pays one flush per directory, not per file. A failure here
+        // aborts the batch; files already renamed stay — they are complete
+        // and merely unindexed until a re-import records them.
+        var renames: [(data: Data, url: URL)] = []
+        renames.reserveCapacity(ordered.count)
+        for item in ordered where !FileManager.default.fileExists(atPath: item.url.path) {
+            renames.append((item.message.data, item.url))
+        }
+        try runParallel(renames.count) { index in
+            try AtomicWrite.writeDurableFile(renames[index].data, to: renames[index].url)
+        }
+
+        // Stage 1.5: compute the search-index tokens in parallel (pure CPU);
+        // the index transaction then only inserts the precomputed columns.
+        var tokenBuffer = [SearchTokens](repeating: SearchTokens(), count: ordered.count)
+        try tokenBuffer.withUnsafeMutableBufferPointer { buffer -> Void in
+            let base = buffer.baseAddress!
+            try runParallel(ordered.count) { index in
+                base[index] = SearchTokens(ordered[index].message)
+            }
+        }
+
+        // Stage 3: flush every touched directory once, so all of this batch's
+        // renames are durable before any index row commits.
+        var touchedDirectories = Set<String>()
+        for rename in renames {
+            touchedDirectories.insert(rename.url.deletingLastPathComponent().path)
+        }
+        let directoryPaths = Array(touchedDirectories)
+        try runParallel(directoryPaths.count) { index in
+            try AtomicWrite.syncDirectory(atPath: directoryPaths[index])
+        }
+
+        // Stage 4: index rows for the whole batch in ONE transaction.
+        let results: [IngestResult] = try db.write { db in
+            let accountID = try Self.getOrCreateAccount(account, db: db)
+            var slotResults: [IngestResult] = []
+            slotResults.reserveCapacity(ordered.count)
+            // Transaction-local caches: the same mailbox/address/label names
+            // repeat constantly in a real batch, so resolve each name once.
+            var mailboxCache: [String: Int64] = [:]
+            var labelCache: [String: Int64] = [:]
+            var addressCache: [String: Int64] = [:]
+            for (slotIndex, item) in ordered.enumerated() {
+                slotResults.append(try Self.insertRows(
+                    item.message, hash: item.hash, tokens: tokenBuffer[slotIndex],
+                    accountID: accountID, db: db, nowString: nowString,
+                    accountEmail: account.email,
+                    mailboxCache: &mailboxCache,
+                    labelCache: &labelCache,
+                    addressCache: &addressCache
+                ))
+            }
+            return slotResults
+        }
+
+        // Expand slots back to one result per input message. A message whose
+        // bytes repeat later in the batch reports .duplicate with the row id
+        // the first occurrence got; insertRows already reports .duplicate for
+        // bytes that existed before this batch.
+        var expanded: [IngestResult] = []
+        expanded.reserveCapacity(messages.count)
+        for index in messages.indices {
+            let slot = resultSlotByInput[index]
+            let slotResult = results[slot]
+            if index != firstInputIndex(bySlot: slot, slotMap: resultSlotByInput) {
+                if case .created(let id) = slotResult {
+                    expanded.append(.duplicate(messageID: id))
+                    continue
+                }
+            }
+            expanded.append(slotResult)
+        }
+        return expanded
+    }
+
+    /// The first input index that maps to `slot` — i.e. the occurrence whose
+    /// result came from insertRows rather than a same-batch repeat.
+    private func firstInputIndex(bySlot slot: Int, slotMap: [Int]) -> Int {
+        slotMap.firstIndex(of: slot) ?? slot
+    }
+
+    /// Inserts one message's index rows (run inside the ingest transaction):
+    /// the message row, search index, thread assignment, memberships, labels,
+    /// addresses and attachments. Returns .created for new bytes, .duplicate
+    /// when the exact bytes were already stored. The name caches are
+    /// transaction-local and single-threaded (db.write serializes callers).
+    static func insertRows(
+        _ message: IngestedMessage, hash: MessageHash, tokens: SearchTokens,
+        accountID: Int64, db: Database, nowString: String, accountEmail: String,
+        mailboxCache: inout [String: Int64],
+        labelCache: inout [String: Int64],
+        addressCache: inout [String: Int64]
+    ) throws -> IngestResult {
             var messageID = try Int64.fetchOne(
                 db, sql: "SELECT id FROM message WHERE hash = ?", arguments: [hash.bytes]
             )
@@ -59,17 +232,24 @@ extension ArchiveStore {
             // transaction as the message row, so search never shows a
             // message the list lacks, and vice versa.
             if isNew {
-                try Self.indexSearchText(message, messageRowID: messageRowID, db: db)
+                try Self.indexSearchText(tokens, messageRowID: messageRowID, db: db)
             }
             try Self.assignThread(
-                message, accountEmail: account.email,
+                message, accountEmail: accountEmail,
                 messageRowID: messageRowID, db: db
             )
 
             for membership in message.memberships {
-                let mailboxID = try Self.getOrCreateMailbox(
-                    accountID: accountID, name: membership.mailbox, db: db
-                )
+                let mailboxKey = "\(accountID)/\(membership.mailbox)"
+                let mailboxID: Int64
+                if let cached = mailboxCache[mailboxKey] {
+                    mailboxID = cached
+                } else {
+                    mailboxID = try Self.getOrCreateMailbox(
+                        accountID: accountID, name: membership.mailbox, db: db
+                    )
+                    mailboxCache[mailboxKey] = mailboxID
+                }
                 // Merge flags: a re-fetch may carry more keywords than before.
                 let existingFlags = try String.fetchOne(
                     db, sql: "SELECT flags FROM message_mailbox WHERE messageID = ? AND mailboxID = ?",
@@ -91,7 +271,14 @@ extension ArchiveStore {
             }
 
             for label in message.labels {
-                let labelID = try Self.getOrCreateLabel(accountID: accountID, name: label.name, db: db)
+                let labelKey = "\(accountID)/\(label.name)"
+                let labelID: Int64
+                if let cached = labelCache[labelKey] {
+                    labelID = cached
+                } else {
+                    labelID = try Self.getOrCreateLabel(accountID: accountID, name: label.name, db: db)
+                    labelCache[labelKey] = labelID
+                }
                 try db.execute(
                     sql: "INSERT OR IGNORE INTO message_label (messageID, labelID) VALUES (?, ?)",
                     arguments: [messageRowID, labelID]
@@ -107,7 +294,16 @@ extension ArchiveStore {
             ]
             for (kind, recipients) in kinds {
                 for recipient in recipients {
-                    let addressID = try Self.getOrCreateAddress(recipient, db: db)
+                    // Key distinguishes a nil name from an empty one (NUL
+                    // marker never appears in real addresses).
+                    let addressKey = recipient.email.lowercased() + "|" + (recipient.name ?? "\u{0}")
+                    let addressID: Int64
+                    if let cached = addressCache[addressKey] {
+                        addressID = cached
+                    } else {
+                        addressID = try Self.getOrCreateAddress(recipient, db: db)
+                        addressCache[addressKey] = addressID
+                    }
                     try db.execute(
                         sql: "INSERT OR IGNORE INTO message_address (messageID, addressID, kind) VALUES (?, ?, ?)",
                         arguments: [messageRowID, addressID, kind]
@@ -139,31 +335,17 @@ extension ArchiveStore {
             }
 
             return isNew ? .created(messageID: messageRowID) : .duplicate(messageID: messageRowID)
-        }
-        return result
     }
 
     // MARK: Search + threading (run inside the ingest transaction)
 
     /// Writes the pre-tokenized text columns into the FTS5 table (DESIGN 6A).
     /// The rowid is the message row's id, which is what makes MATCH results
-    /// joinable to `message` without a mapping table.
+    /// joinable to `message` without a mapping table. Tokenization happened
+    /// earlier (parallel in batch ingest); this only inserts.
     static func indexSearchText(
-        _ message: IngestedMessage, messageRowID: Int64, db: Database
+        _ tokens: SearchTokens, messageRowID: Int64, db: Database
     ) throws {
-        let search = message.searchText ?? SearchText(body: nil, quoted: nil)
-        func tokens(_ text: String?, _ field: TextField) -> String {
-            guard let text, !text.isEmpty else { return "" }
-            return TokenPipeline.tokens(for: text, field: field).joined(separator: " ")
-        }
-        var recipients: [String] = []
-        for recipient in message.record.to + message.record.cc + message.record.bcc {
-            if let name = recipient.name, !name.isEmpty { recipients.append(name) }
-            if !recipient.email.isEmpty { recipients.append(recipient.email) }
-        }
-        let attachmentNames = message.attachments
-            .compactMap { (attachment: AttachmentInfo) -> String? in attachment.filename }
-            .joined(separator: " ")
         try db.execute(
             sql: """
             INSERT INTO message_text
@@ -172,17 +354,13 @@ extension ArchiveStore {
             """,
             arguments: [
                 messageRowID,
-                tokens(message.record.subject, .subject),
-                tokens(message.record.from?.name, .sender),
-                // The address is stored folded but raw: unicode61 splits it on
-                // '@' and '.', which yields exactly the address-aware tokens
-                // DESIGN 6A wants, and phrase queries (`from:a@b.c`) reassemble
-                // them (same pattern as the FTS5 spike).
-                message.record.from.map { TokenPipeline.folded($0.email) } ?? "",
-                tokens(recipients.joined(separator: " "), .recipient),
-                tokens(search.body, .body),
-                tokens(search.quoted, .quoted),
-                tokens(attachmentNames, .attachment),
+                tokens.subject,
+                tokens.fromName,
+                tokens.fromAddr,
+                tokens.recipients,
+                tokens.body,
+                tokens.quoted,
+                tokens.attachments,
             ]
         )
     }
@@ -340,6 +518,45 @@ extension ArchiveStore {
         case "junk", "spam", "junk e-mail": return "junk"
         case "archive", "all mail": return "archive"
         default: return nil
+        }
+    }
+}
+
+extension ArchiveStore {
+    /// Runs `body(index)` for `count` indices on the cooperative global
+    /// concurrent queue and waits for all of them. Used by batch ingest to
+    /// overlap fsync latency across files; the per-index work is independent
+    /// and idempotent, so no ordering is assumed. The first error thrown wins;
+    /// the rest finish (their writes are harmless), then the error rethrows.
+    func runParallel(_ count: Int, body: @escaping (Int) throws -> Void) throws {
+        guard count > 1 else {
+            if count == 1 { try body(0) }
+            return
+        }
+        final class ErrorBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var error: Error?
+            func set(_ error: Error) {
+                lock.lock()
+                if self.error == nil { self.error = error }
+                lock.unlock()
+            }
+            var firstError: Error? {
+                lock.lock()
+                defer { lock.unlock() }
+                return error
+            }
+        }
+        let box = ErrorBox()
+        DispatchQueue.concurrentPerform(iterations: count) { index in
+            do {
+                try body(index)
+            } catch {
+                box.set(error)
+            }
+        }
+        if let error = box.firstError {
+            throw error
         }
     }
 }

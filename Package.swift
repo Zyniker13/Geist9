@@ -59,6 +59,7 @@ let package = Package(
         .library(name: "ArchiveCrypto", targets: ["ArchiveCrypto"]),
         .library(name: "ArchiveMCP", targets: ["ArchiveMCP"]),
         .library(name: "Credentials", targets: ["Credentials"]),
+        .executable(name: "bench-search", targets: ["Benchmarks"]),
     ] + viewerProducts,
     dependencies: [
         // IMAP protocol layer, chosen in docs/decisions/0002 and confirmed by the M0 spike.
@@ -97,6 +98,8 @@ let package = Package(
         .target(name: "ArchiveMCP"),
         // CredentialStore, Keychain and 1Password backends (DESIGN 4)
         .target(name: "Credentials"),
+        // scale benchmark harness (ROADMAP M1 "Done when", docs/TESTING.md)
+        .executableTarget(name: "Benchmarks", dependencies: ["ArchiveCore"]),
     ] + spikeTargets + viewerTargets + [
         .testTarget(name: "ArchiveCoreTests", dependencies: ["ArchiveCore"]),
         .testTarget(name: "ArchiveSearchTests", dependencies: ["ArchiveSearch"]),

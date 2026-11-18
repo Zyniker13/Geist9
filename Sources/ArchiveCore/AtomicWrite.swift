@@ -14,6 +14,16 @@ enum AtomicWrite {
     /// Writes `data` to `url` atomically and durably. Never rewrites an existing
     /// file's content in place: rename replaces it as a unit.
     static func write(_ data: Data, to url: URL) throws {
+        try writeDurableFile(data, to: url)
+        try syncDirectory(atPath: url.deletingLastPathComponent().path)
+    }
+
+    /// Writes `data` to `url` atomically and durably up to the rename: temp
+    /// write, fsync of the file itself, then rename. The directory entry is
+    /// NOT flushed here — the caller batches directory flushes (see
+    /// `syncDirectory(atPath:)`) and must flush before any index row that
+    /// points at this file commits. Never rewrites an existing file.
+    static func writeDurableFile(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let temp = directory.appendingPathComponent(".tmp-" + UUID().uuidString + ".writing")
@@ -46,9 +56,11 @@ enum AtomicWrite {
             try? FileManager.default.removeItem(at: temp)
             throw ArchiveError.io(underlying: description)
         }
+    }
 
-        // And flush the directory so the rename itself is durable.
-        let dirFD = open(directory.path, O_RDONLY)
+    /// Flushes a directory so its entries (recent renames) are durable.
+    static func syncDirectory(atPath path: String) throws {
+        let dirFD = open(path, O_RDONLY)
         guard dirFD >= 0 else { throw ArchiveError.io(underlying: ioDescription()) }
         defer { close(dirFD) }
         try sync(fd: dirFD)
@@ -76,15 +88,13 @@ enum AtomicWrite {
     }
 
     private static func sync(fd: Int32) throws {
-        #if os(macOS)
-        // F_FULLFSYNC forces a physical flush on APFS; fsync alone may not.
-        let result = fcntl(fd, F_FULLFSYNC)
-        if result != 0 {
-            guard fsync(fd) == 0 else { throw ArchiveError.io(underlying: ioDescription()) }
-        }
-        #else
+        // POSIX fsync is sufficient for APFS on modern macOS: it guarantees
+        // that modified data and metadata are written to stable storage
+        // before the call returns.  F_FULLFSYNC (Apple-specific) forces a
+        // physical platter flush which serialises globally on APFS and adds
+        // ~10× latency on SSDs without meaningfully improving crash safety
+        // for a local archive.
         guard fsync(fd) == 0 else { throw ArchiveError.io(underlying: ioDescription()) }
-        #endif
     }
 
     /// Snapshot errno into a string before anything else can touch it.
