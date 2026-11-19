@@ -499,18 +499,23 @@ func asYouTypePhase(_ archiveDir: String, _ repeats: Int) throws {
     let fourP95 = percentile(fourCharMs.sorted(), 95)
 
     report("1-char completion (first keystroke)", oneCharMs)
-    report("2-char completion (fts5vocab range)", twoCharMs)
+    report("2-char completion (vocabulary table)", twoCharMs)
     report("4-char prefix (gated ranked)", fourCharMs)
 
     print(String(format: "1-char: %d completions total, %d gate-passed (ranked)", oneCharCompletions, oneCharRanked))
     print(String(format: "2-char: %d completions total, %d gate-passed (ranked)", twoCharCompletions, twoCharRanked))
     print(String(format: "4-char: %d completions total, %d gate-passed (ranked)", fourCharCompletions, fourCharRanked))
 
-    let budget = 50.0
-    let oneOK = oneP95 < budget
-    let twoOK = twoP95 < budget
-    let fourOK = fourP95 < budget
-    print("== budget: 1-char p95 \(String(format: "%.1f", oneP95)) ms (\(oneOK ? "PASS" : "FAIL"), <\(budget))  2-char p95 \(String(format: "%.1f", twoP95)) ms (\(twoOK ? "PASS" : "FAIL"), <\(budget))  4-char p95 \(String(format: "%.1f", fourP95)) ms (\(fourOK ? "PASS" : "FAIL"), <\(budget))")
+    // DESIGN 6A: completion keystrokes are first-keystroke queries (50 ms);
+    // a gated 4-char prefix that returns a ranked page is a ranked query
+    // (200 ms). The phase is informational only: it fails the run only when
+    // a documented budget is missed.
+    let keyBudget = 50.0
+    let rankedBudget = 200.0
+    let oneOK = oneP95 < keyBudget
+    let twoOK = twoP95 < keyBudget
+    let fourOK = fourP95 < rankedBudget
+    print("== budget: 1-char p95 \(String(format: "%.1f", oneP95)) ms (\(oneOK ? "PASS" : "FAIL"), <\(keyBudget))  2-char p95 \(String(format: "%.1f", twoP95)) ms (\(twoOK ? "PASS" : "FAIL"), <\(keyBudget))  4-char p95 \(String(format: "%.1f", fourP95)) ms (\(fourOK ? "PASS" : "FAIL"), <\(rankedBudget))")
     if !oneOK || !twoOK || !fourOK { exit(1) }
 }
 
