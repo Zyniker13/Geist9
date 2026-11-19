@@ -273,4 +273,234 @@ final class EntityTests: XCTestCase {
         XCTAssertEqual(try search(store, "amount:>1000"), [id])
         XCTAssertEqual(try store.reindexOutdated(), 0)
     }
+
+    // MARK: Dates
+
+    /// The UTC epoch of a calendar date, for comparing normalized dates.
+    private func utc(
+        year: Int, month: Int, day: Int, hour: Int = 0, minute: Int = 0
+    ) -> Double {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let date = calendar.date(
+            from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute)
+        )!
+        return date.timeIntervalSince1970
+    }
+
+    private func hitsByValue(_ hits: [EntityHit], _ kind: EntityKind) -> [String: EntityHit] {
+        Dictionary(hits.filter { $0.kind == kind }.map { ($0.value, $0) },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    func testISODatesExtracted() throws {
+        let hits = EntityExtraction.entities(in: "meeting moved to 2024-03-03 in the plan")
+        let date = try XCTUnwrap(hits.first { $0.kind == .date })
+        XCTAssertEqual(date.value, "2024-03-03")
+        XCTAssertEqual(date.normalized, utc(year: 2024, month: 3, day: 3))
+        XCTAssertNil(date.currency)
+    }
+
+    func testISODatetimesExtracted() throws {
+        let hits = EntityExtraction.entities(in: "starts 2024-03-03T14:23 sharp")
+        let date = try XCTUnwrap(hits.first { $0.kind == .date })
+        XCTAssertEqual(date.normalized, utc(year: 2024, month: 3, day: 3, hour: 14, minute: 23))
+    }
+
+    func testMonthNameDatesExtracted() throws {
+        let hits = EntityExtraction.entities(
+            in: "due March 3, 2024; reply by 3 April 2024; follow-up May 3, 2024"
+        )
+        let dates = hitsByValue(hits, .date)
+        XCTAssertEqual(dates["March 3, 2024"]?.normalized, utc(year: 2024, month: 3, day: 3))
+        XCTAssertEqual(dates["3 April 2024"]?.normalized, utc(year: 2024, month: 4, day: 3))
+        XCTAssertEqual(dates["May 3, 2024"]?.normalized, utc(year: 2024, month: 5, day: 3))
+        XCTAssertEqual(dates.count, 3)
+    }
+
+    func testAbbreviatedMonthDatesExtracted() throws {
+        let hits = EntityExtraction.entities(in: "ship by Sep 30, 2024 or Dec 31, 2024")
+        let dates = hitsByValue(hits, .date)
+        XCTAssertEqual(dates["Sep 30, 2024"]?.normalized, utc(year: 2024, month: 9, day: 30))
+        XCTAssertEqual(dates["Dec 31, 2024"]?.normalized, utc(year: 2024, month: 12, day: 31))
+    }
+
+    func testNumericDatesFollowTheirConvention() throws {
+        // Slash runs month-first (US), dot runs day-first (European); the
+        // written form is stored either way, so the raw text stays visible.
+        let hits = EntityExtraction.entities(
+            in: "pick 3/3/2024 or 03.03.2024, deadline 12/03/2024, alt 12.03.2024"
+        )
+        let dates = hitsByValue(hits, .date)
+        XCTAssertEqual(dates.count, 4, "each written form is its own entity")
+        XCTAssertEqual(dates["3/3/2024"]?.normalized, utc(year: 2024, month: 3, day: 3))
+        XCTAssertEqual(dates["03.03.2024"]?.normalized, utc(year: 2024, month: 3, day: 3))
+        XCTAssertEqual(dates["12/03/2024"]?.normalized, utc(year: 2024, month: 12, day: 3))
+        XCTAssertEqual(dates["12.03.2024"]?.normalized, utc(year: 2024, month: 3, day: 12))
+    }
+
+    func testInvalidDatesAreSkipped() throws {
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "nonsense 31.02.2024 and 13/13/2024")
+                .filter { $0.kind == .date },
+            [],
+            "impossible calendar dates are not entities"
+        )
+    }
+
+    func testBareWeekdayIsNotADate() throws {
+        // Relative and weekday-only mentions stay out of the shared patterns:
+        // their meaning depends on when the message is read, and a bare
+        // "Friday" in a fixture must not become a date row.
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "we meet on Friday, due date next Tuesday")
+                .filter { $0.kind == .date },
+            []
+        )
+    }
+
+    func testGermanMonthDateOnMacOS() throws {
+        #if canImport(Darwin)
+        // NSDataDetector adds the multilingual and natural forms the shared
+        // patterns do not carry; Linux keeps the shared patterns only.
+        let hits = EntityExtraction.entities(in: "am 3. März 2024 antworten")
+        let date = try XCTUnwrap(hits.first { $0.kind == .date })
+        XCTAssertEqual(date.normalized, utc(year: 2024, month: 3, day: 3))
+        #endif
+    }
+
+    // MARK: Phone numbers
+
+    func testE164PhonesExtracted() throws {
+        let hits = EntityExtraction.entities(in: "call +49 30 1234567 or +1-800-555-0100")
+        let phones = hitsByValue(hits, .phone)
+        XCTAssertEqual(phones["+49 30 1234567"]?.value, "+49 30 1234567")
+        XCTAssertEqual(phones["+1-800-555-0100"]?.value, "+1-800-555-0100")
+        XCTAssertEqual(phones.count, 2)
+        for phone in phones.values {
+            XCTAssertEqual(phone.normalized, 0, "phone numbers have no numeric meaning")
+            XCTAssertNil(phone.currency)
+        }
+    }
+
+    func testShortPlusSequencesAreNotPhones() throws {
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "build with -DDEBUG+1.2.3 flags").filter { $0.kind == .phone },
+            []
+        )
+    }
+
+    func testDetectorPhoneOnMacOS() throws {
+        #if canImport(Darwin)
+        let hits = EntityExtraction.entities(in: "office phone (415) 555-0100")
+        XCTAssertTrue(
+            hits.contains { $0.kind == .phone && $0.value.contains("555-0100") },
+            "the detector adds forms the shared patterns do not carry"
+        )
+        #endif
+    }
+
+    // MARK: Tracking numbers
+
+    func testUPSTrackingNumbers() throws {
+        let hits = EntityExtraction.entities(in: "your parcel 1Z999AA10123456784 shipped")
+        XCTAssertEqual(
+            hits.first { $0.kind == .tracking }?.value, "1Z999AA10123456784"
+        )
+    }
+
+    func testUSPSTrackingNumbers() throws {
+        let hits = EntityExtraction.entities(in: "track 9400 1000 0000 0000 0000 00 at usps.com")
+        XCTAssertEqual(hits.first { $0.kind == .tracking }?.value, "9400 1000 0000 0000 0000 00")
+    }
+
+    func testShortDigitRunsAreNotTracking() throws {
+        // Ten digits is an order number, a card, or anything else — only the
+        // long service-specific shapes count as tracking numbers.
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "order #1234567890 and card 4111 1111 1111 1111")
+                .filter { $0.kind == .tracking },
+            []
+        )
+    }
+
+    // MARK: Booking codes
+
+    func testBookingCodesNeedContext() throws {
+        let hits = EntityExtraction.entities(in: "PNR: 7QKX2Z — booking code AB12CD")
+        let bookings = hitsByValue(hits, .booking)
+        XCTAssertEqual(bookings["7QKX2Z"]?.value, "7QKX2Z")
+        XCTAssertEqual(bookings["AB12CD"]?.value, "AB12CD")
+        XCTAssertEqual(bookings.count, 2)
+    }
+
+    func testBareSixCharacterTokensAreNotBookings() throws {
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "revenue 7QKX2Z grew ABC123 percent").filter { $0.kind == .booking },
+            [],
+            "a six-character token without its keyword is noise"
+        )
+    }
+
+    // MARK: Domains
+
+    func testDomainsFromURLsAndBareHosts() throws {
+        let hits = EntityExtraction.entities(
+            in: "track it at https://example.com/checkout?x=1 or www.example.org, docs at docs.example.io/dev"
+        )
+        let domains = hitsByValue(hits, .domain)
+        XCTAssertEqual(domains["example.com"]?.value, "example.com")
+        XCTAssertEqual(domains["www.example.org"]?.value, "www.example.org")
+        XCTAssertEqual(domains["docs.example.io"]?.value, "docs.example.io")
+        XCTAssertEqual(domains.count, 3)
+    }
+
+    func testNonDomainsAreSkipped() throws {
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "open invoice.pdf, build v1.2.3, ping foo.bar")
+                .filter { $0.kind == .domain },
+            [],
+            "file names, versions, and unknown TLDs are not domains"
+        )
+    }
+
+    // MARK: Storage for all kinds
+
+    func testAllKindsStoredAndRemovedWithMessage() throws {
+        let store = try makeStore()
+        let id = try ingest(
+            makeMessage(
+                subject: "Shipment",
+                body: "Parcel 1Z999AA10123456784 arrives 2024-03-03; postage $15, questions to +49 30 1234567,"
+                    + " details at https://example.com/track, PNR: 7QKX2Z"
+            ),
+            into: store
+        )
+        let kinds = try store.db.read { db in
+            try String.fetchAll(
+                db, sql: "SELECT DISTINCT kind FROM message_entity WHERE messageID = ?",
+                arguments: [id]
+            ).sorted()
+        }
+        XCTAssertEqual(kinds, ["amount", "booking", "date", "domain", "phone", "tracking"].sorted())
+
+        try store.db.write { db in
+            try db.execute(sql: "DELETE FROM message WHERE id = ?", arguments: [id])
+        }
+        let remaining = try store.db.read { db in
+            try Int.fetchOne(
+                db, sql: "SELECT COUNT(*) FROM message_entity WHERE messageID = ?",
+                arguments: [id]
+            ) ?? 0
+        }
+        XCTAssertEqual(remaining, 0, "entity rows of every kind leave with their message")
+    }
+
+    func testDuplicateEntitiesCollapsePerMessageAcrossKinds() throws {
+        let hits = EntityExtraction.entities(in: "due 2024-03-03, again 2024-03-03, see example.com and example.com")
+        let dates = hits.filter { $0.kind == .date }
+        let domains = hits.filter { $0.kind == .domain }
+        XCTAssertEqual(dates.count, 1)
+        XCTAssertEqual(domains.count, 1)
+    }
 }
