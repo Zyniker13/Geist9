@@ -225,14 +225,15 @@ func prepare(_ archiveDir: String, _ count: Int, _ seed: UInt64, killAfter: Int?
         }
         // Kill point: simulate a crash after N messages.
         if let killAfter = killAfter, i + 1 == killAfter {
-            print("== kill-after \(killAfter): sending SIGKILL to self")
+            print("== kill-after \(killAfter): sending SIGABRT to self")
             fflush(nil)
-            // Use SIGABRT so the core dump signal is delivered; on macOS
-            // this avoids the process-cleanup that SIGKILL would skip and
-            // leaves the file system in a state indistinguishable from a
-            // power loss (the kernel drops dirty cache, but our fsync'd
-            // files are already on disk).
-            raise(SIGABRT)
+            // abort(), not raise(SIGABRT): the Swift Linux runtime installs a
+            // one-shot SIGABRT handler (its crash backtracer) that returns,
+            // leaving the process alive after the first raise. abort() is
+            // guaranteed by POSIX to terminate: glibc resets the disposition,
+            // unblocks the signal, and re-raises. Same signal, same default
+            // core-dump action, indistinguishable from a power loss.
+            abort()
         }
     }
     let total = Date().timeIntervalSince(started)
@@ -288,14 +289,15 @@ func importFixture(_ archiveDir: String, _ count: Int, _ seed: UInt64, killAfter
             if let crashStage = crashStage, stage == crashStage {
                 print("== crash-stage \(stage): sending SIGABRT to self")
                 fflush(nil)
-                raise(SIGABRT)
+                // abort(): see the comment at the prepare-path kill point.
+                abort()
             }
             if stage == "files-written", let killAfter = killAfter {
                 let n = counter.next()
                 if n == killAfter {
                     print("== kill-after \(killAfter): sending SIGABRT to self")
                     fflush(nil)
-                    raise(SIGABRT)
+                    abort()
                 }
             }
         }
@@ -471,7 +473,8 @@ do {
             if stage == crashStage {
                 print("== crash-stage \(stage): sending SIGABRT to self")
                 fflush(nil)
-                raise(SIGABRT)
+                // abort(): see the comment at the prepare-path kill point.
+                abort()
             }
         }
     }
