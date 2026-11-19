@@ -35,7 +35,12 @@ enum TextIndexVersion {
     /// the backfill re-indexes older rows from their stored bytes to add
     /// it.
     static let v7 = 7
-    static var current: Int { v7 }
+    /// M2.3: the extracted text of iWork package attachments
+    /// (.pages/.key/.numbers, decision 0038) joins the attachments column;
+    /// the backfill re-indexes older rows from their stored bytes to add
+    /// it.
+    static let v8 = 8
+    static var current: Int { v8 }
 }
 
 extension ArchiveStore {

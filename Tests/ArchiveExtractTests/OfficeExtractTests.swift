@@ -13,6 +13,10 @@ struct OfficeExtractTests {
         Data(ZIPBuilder.make(entries: pairs.map { .stored($0.0, Array($0.1.utf8)) }))
     }
 
+    private func zipData(_ pairs: [(String, Data)]) -> Data {
+        Data(ZIPBuilder.make(entries: pairs.map { .stored($0.0, Array($0.1)) }))
+    }
+
     // MARK: - .docx
 
     @Test func extractsDocxParagraphs() {
@@ -185,16 +189,88 @@ struct OfficeExtractTests {
         #expect(OfficeExtract.openDocumentText(Data("plain text".utf8)) == nil)
     }
 
-    @Test func attachmentLimitsRejectLyingSizes() {
-        // A stored entry that declares a 40 MB inflated size must hit the
-        // attachment preset's per-entry cap before any bytes are produced.
-        let docx = Data(ZIPBuilder.make(entries: [
+    // MARK: - iWork
+
+    @Test func extractsIWorkTextSkippingStylesheets() {
+        let pages = zip([
+            ("index.xml", """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <sl:document xmlns:sl="http://schemas.apple.com/standards/2006">
+            <sf:stylesheet xmlns:sf="http://schemas.apple.com/2008/sf">
+            <sl:SFTCellStyleProxy-2>HelveticaBold</sl:SFTCellStyleProxy-2>
+            </sf:stylesheet>
+            <sf:text-storage xmlns:sf="http://schemas.apple.com/2008/sf">
+            <sf:section><sf:layout>
+            <sf:p><sf:span>Agenda for Friday</sf:span></sf:p>
+            <sf:p>Budget<sf:br/>review<sf:tab/>Q4</sf:p>
+            </sf:layout></sf:section>
+            </sf:text-storage>
+            </sl:document>
+            """),
+        ])
+        #expect(OfficeExtract.iWorkText(pages) == "Agenda for Friday\nBudget\nreview\tQ4")
+    }
+
+    @Test func extractsIWorkTableCells() {
+        let numbers = zip([
+            ("index.xml", """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <sl:document xmlns:sl="http://schemas.apple.com/standards/2006"
+              xmlns:sf="http://schemas.apple.com/2008/sf">
+            <sf:stylesheet><sl:SFTTableStyle-0>Solid</sl:SFTTableStyle-0></sf:stylesheet>
+            <sf:document>
+            <sf:table><sf:tc>
+            <sf:cell><sf:p>Q4 total</sf:p></sf:cell>
+            <sf:cell><sf:p>4200</sf:p></sf:cell>
+            </sf:tc></sf:table>
+            </sf:document>
+            </sl:document>
+            """),
+        ])
+        #expect(OfficeExtract.iWorkText(numbers) == "Q4 total\n4200")
+    }
+
+    @Test func rejectsBinaryIWorkIndex() {
+        // iWork '13+ stores a binary index.xml; XMLParser must reject it and
+        // the extractor must hand back nothing rather than garbage.
+        let binary = Data([0x0A, 0x05, 0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x12, 0x04, 0x00, 0xFF, 0xFE, 0x00])
+        let pages = zipData([
+            ("index.xml", binary),
+            ("Metadata.plist", Data("<plist/>".utf8)),
+        ])
+        #expect(OfficeExtract.iWorkText(pages) == nil)
+    }
+
+    @Test func rejectsIWorkPackageWithoutIndexXML() {
+        let modern = zip([
+            ("Index.zip", "binary"),
+            ("preview.pdf", "%PDF-1.5 junk"),
+            ("Metadata.plist", "<plist/>"),
+        ])
+        #expect(OfficeExtract.iWorkText(modern) == nil)
+    }
+
+    @Test func rejectsIWorkWrongCRC() {
+        var pages = [UInt8](zip([
+            ("index.xml", """
+            <sl:document xmlns:sf="http://schemas.apple.com/2008/sf"><sf:text-storage>
+            <sf:section><sf:layout><sf:p><sf:span>Agenda</sf:span></sf:p>
+            </sf:layout></sf:section></sf:text-storage></sl:document>
+            """),
+        ]))
+        // "index.xml" is 9 bytes: data starts at 30 + 9 = 39; flip inside it.
+        pages[50] ^= 0xFF
+        #expect(OfficeExtract.iWorkText(Data(pages)) == nil)
+    }
+
+    @Test func iWorkAttachmentLimitsRejectLyingSizes() {
+        let pages = Data(ZIPBuilder.make(entries: [
             .stored(
-                "word/document.xml",
-                Array("<w:document xmlns:w=\"urn\"><w:body><w:p><w:r><w:t>Hi</w:t></w:r></w:p></w:body></w:document>".utf8),
+                "index.xml",
+                Array("<sl:document><sf:text-storage><sf:section><sf:layout><sf:p><sf:span>Hi</sf:span></sf:p></sf:layout></sf:section></sf:text-storage></sl:document>".utf8),
                 declaredInflatedSize: 40_000_000
             ),
         ]))
-        #expect(OfficeExtract.openXMLText(docx) == nil)
+        #expect(OfficeExtract.iWorkText(pages) == nil)
     }
 }

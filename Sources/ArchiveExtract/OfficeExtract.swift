@@ -1,7 +1,8 @@
 // Attachment text extraction for container formats (DESIGN 6A, M2.3).
 //
-// The extractor turns Office Open XML (.docx/.xlsx/.pptx) and OpenDocument
-// (.odt/.ods/.odp/.odg) attachment bytes into plain search text. It is a
+// The extractor turns Office Open XML (.docx/.xlsx/.pptx), OpenDocument
+// (.odt/.ods/.odp/.odg), and iWork (.pages/.key/.numbers, index.xml era)
+// attachment bytes into plain search text. It is a
 // preview extractor: it never rewrites stored bytes, and anything it cannot
 // read strictly — a wrong CRC, a lying size, malformed XML — yields no text
 // rather than text that may not match the document. Extraction runs with the
@@ -81,6 +82,19 @@ public enum OfficeExtract {
         return nil
     }
 
+    /// Text preview of an iWork package (.pages/.key/.numbers): the text
+    /// inside paragraph and span elements of the package's index.xml, with
+    /// style, theme, and font subtrees skipped. iWork '13 and later store a
+    /// binary index.xml that the XML parser rejects, so those packages yield
+    /// no text rather than garbage.
+    public static func iWorkText(_ data: Data, limits: ZIP.Limits = .attachments) -> String? {
+        guard let entries = try? ZIP.open(data, limits: limits) else { return nil }
+        for entry in entries where entry.name == "index.xml" {
+            return XMLTextSink(kind: .iwork).run(entry.data)
+        }
+        return nil
+    }
+
     /// Order "slide2.xml" before "slide10.xml": numeric suffix when both
     /// names end in digits, plain lexicographic otherwise.
     private static func numericNameOrder(_ a: String, _ b: String) -> Bool {
@@ -118,7 +132,7 @@ public enum OfficeExtract {
 /// only inside the elements each format defines as content; a parse error
 /// poisons the whole result.
 private final class XMLTextSink: NSObject, XMLParserDelegate {
-    enum Kind { case docx, pptx, xlsx, sharedStrings, odf }
+    enum Kind { case docx, pptx, xlsx, sharedStrings, odf, iwork }
 
     private let kind: Kind
     private var pieces: [String] = []
@@ -206,6 +220,8 @@ private final class XMLTextSink: NSObject, XMLParserDelegate {
             return localName == "t" && parentName == "is"
         case .odf:
             return localName == "p" || localName == "h" || localName == "span"
+        case .iwork:
+            return (localName == "p" || localName == "span") && skipDepth == 0
         }
     }
 
@@ -250,6 +266,16 @@ private final class XMLTextSink: NSObject, XMLParserDelegate {
             case "tab": capture("\t")
             case "s": capture(" ")
             default: break
+            }
+        case .iwork:
+            if Self.isStyleContainer(name) {
+                skipDepth += 1
+            } else if skipDepth == 0 {
+                switch name {
+                case "br": capture("\n")
+                case "tab": capture("\t")
+                default: break
+                }
             }
         case .xlsx:
             if name == "c" {
@@ -296,6 +322,12 @@ private final class XMLTextSink: NSObject, XMLParserDelegate {
             }
         case .odf:
             if name == "p" || name == "h" { closePiece() }
+        case .iwork:
+            if Self.isStyleContainer(name) {
+                skipDepth = max(0, skipDepth - 1)
+            } else if name == "p", skipDepth == 0 {
+                closePiece()
+            }
         }
         if !stack.isEmpty { stack.removeLast() }
     }
@@ -348,6 +380,13 @@ private final class XMLTextSink: NSObject, XMLParserDelegate {
 
     private static func local(_ elementName: String) -> String {
         elementName.split(separator: ":").last.map(String.init) ?? elementName
+    }
+
+    /// Style, theme, and font subtrees hold design data, not document text:
+    /// skipping them keeps font names and style labels out of the index.
+    private static func isStyleContainer(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        return lowered.contains("style") || lowered == "theme" || lowered == "fonts"
     }
 }
 

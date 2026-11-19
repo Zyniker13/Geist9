@@ -276,10 +276,10 @@ public enum MailBridge {
     }
 
     /// Container attachment formats whose text we extract (DESIGN 6A,
-    /// M2.3): Office Open XML packages and OpenDocument packages, keyed by
-    /// MIME type first and filename extension as a fallback for broken
-    /// MIME parts. PDF, images and iWork previews return nil until their
-    /// extractors land; the attachment row still lists the part.
+    /// M2.3): Office Open XML packages, OpenDocument packages, and iWork
+    /// packages, keyed by MIME type first and filename extension as a
+    /// fallback for broken MIME parts. PDF and images return nil until
+    /// their extractors land; the attachment row still lists the part.
     static func containerAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
         let ooxmlTypes: Set<String> = [
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -292,6 +292,11 @@ public enum MailBridge {
             "application/vnd.oasis.opendocument.presentation",
             "application/vnd.oasis.opendocument.graphics",
         ]
+        let iWorkTypes: Set<String> = [
+            "application/vnd.apple.pages",
+            "application/vnd.apple.keynote",
+            "application/vnd.apple.numbers",
+        ]
         let extensionName = filename
             .flatMap { $0.split(separator: ".").last.map(String.init) }
             .map { $0.lowercased() }
@@ -301,6 +306,9 @@ public enum MailBridge {
         }
         if odfTypes.contains(main) || ["odt", "ods", "odp", "odg"].contains(extensionName ?? "") {
             return OfficeExtract.openDocumentText(payload)
+        }
+        if iWorkTypes.contains(main) || ["pages", "key", "numbers"].contains(extensionName ?? "") {
+            return OfficeExtract.iWorkText(payload)
         }
         return nil
     }

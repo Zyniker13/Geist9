@@ -110,6 +110,37 @@ final class ContainerAttachmentTests: XCTestCase {
             """),
         ])
 
+        static let pages: Data = zip([
+            ("index.xml", """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <sl:document xmlns:sl="http://schemas.apple.com/standards/2006">
+            <sf:stylesheet xmlns:sf="http://schemas.apple.com/2008/sf">
+            <sl:SFTCellStyleProxy-2>HelveticaBold</sl:SFTCellStyleProxy-2>
+            </sf:stylesheet>
+            <sf:text-storage xmlns:sf="http://schemas.apple.com/2008/sf">
+            <sf:section><sf:layout>
+            <sf:p><sf:span>Agenda for Friday</sf:span></sf:p>
+            </sf:layout></sf:section>
+            </sf:text-storage>
+            </sl:document>
+            """),
+        ])
+
+        static let numbers: Data = zip([
+            ("index.xml", """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <sl:document xmlns:sl="http://schemas.apple.com/standards/2006"
+              xmlns:sf="http://schemas.apple.com/2008/sf">
+            <sf:document>
+            <sf:table><sf:tc>
+            <sf:cell><sf:p>Q4 total</sf:p></sf:cell>
+            <sf:cell><sf:p>4200</sf:p></sf:cell>
+            </sf:tc></sf:table>
+            </sf:document>
+            </sl:document>
+            """),
+        ])
+
         static func corrupt(_ data: Data) -> Data {
             var bytes = [UInt8](data)
             bytes[bytes.count / 2] ^= 0xFF
@@ -207,6 +238,51 @@ final class ContainerAttachmentTests: XCTestCase {
         XCTAssertTrue(text == nil || !text!.contains("Quarterly"), "corrupt container must not produce text: \(text ?? "nil")")
     }
 
+    // MARK: - iWork
+
+    func testPagesAttachmentTextIsIndexed() throws {
+        let data = Data(Container.message(
+            id: "pages-1@example.com", mimeType: "application/vnd.apple.pages",
+            filename: "plan.pages", attachment: Container.pages
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Agenda for Friday"), "got: \(attachments)")
+        XCTAssertFalse(attachments.contains("HelveticaBold"), "style text must not be indexed: \(attachments)")
+    }
+
+    func testNumbersAttachmentTextIsIndexed() throws {
+        let data = Data(Container.message(
+            id: "numbers-1@example.com", mimeType: "application/vnd.apple.numbers",
+            filename: "budget.numbers", attachment: Container.numbers
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Q4 total"), "got: \(attachments)")
+        XCTAssertTrue(attachments.contains("4200"), "got: \(attachments)")
+    }
+
+    func testPagesFallbackByFilename() throws {
+        let data = Data(Container.message(
+            id: "pages-2@example.com", mimeType: "application/octet-stream",
+            filename: "plan.pages", attachment: Container.pages
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Agenda for Friday"), "got: \(attachments)")
+    }
+
+    func testCorruptPagesYieldsNoText() throws {
+        let data = Data(Container.message(
+            id: "pages-corrupt@example.com", mimeType: "application/vnd.apple.pages",
+            filename: "broken.pages", attachment: Container.corrupt(Container.pages)
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        XCTAssertEqual(parsed.attachments.first?.size, Container.corrupt(Container.pages).count)
+        let text = parsed.searchText.attachments
+        XCTAssertTrue(text == nil || !text!.contains("Agenda"), "corrupt container must not produce text: \(text ?? "nil")")
+    }
+
     // MARK: - Backfill (version bump)
 
     func testVersionBumpBackfillsContainerText() throws {
@@ -252,6 +328,52 @@ final class ContainerAttachmentTests: XCTestCase {
         XCTAssertTrue(
             attachments.contains("quarterly numbers"),
             "the v7 backfill must restore container text: \(attachments)"
+        )
+    }
+
+    func testVersionBumpBackfillsIWorkText() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-iwork-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try ArchiveStore.create(at: tempDir.appendingPathComponent("C.emailarchive"), appVersion: "0.1.0")
+
+        let data = Data(Container.message(
+            id: "backfill-pages@example.com", mimeType: "application/vnd.apple.pages",
+            filename: "plan.pages", attachment: Container.pages
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let message = IngestedMessage(
+            record: parsed.record,
+            data: data,
+            memberships: [Membership(mailbox: "INBOX", flags: [])],
+            labels: [],
+            attachments: parsed.attachments,
+            providerThreadID: nil,
+            searchText: parsed.searchText
+        )
+        let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+        guard case .created(let id) = try store.ingest(message, into: account) else {
+            return XCTFail("ingest must create")
+        }
+
+        // Simulate the previous pipeline: mark the row older than current
+        // and blank the attachment text the old row could not have had.
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE message SET textVersion = textVersion - 1 WHERE id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE message_text SET attachments = 'plan pages' WHERE rowid = ?", arguments: [id])
+        }
+        let processed = try store.reindexOutdated()
+        XCTAssertEqual(processed, 1)
+        let got = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT attachments FROM message_text WHERE rowid = ?", arguments: [id]
+            )
+        }
+        let attachments = try XCTUnwrap(got)
+        XCTAssertTrue(
+            attachments.contains("agenda for friday"),
+            "the v8 backfill must restore iWork text: \(attachments)"
         )
     }
 }
