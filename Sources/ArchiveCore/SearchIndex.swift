@@ -21,16 +21,21 @@ public struct SearchHit: Sendable, Equatable {
     /// True when the hit came from the trigram fallback (a substring or
     /// CJK match) rather than the exact token index (DESIGN 6A, M2.1).
     public var viaTrigram: Bool
+    /// True when the hit came from the one-edit typo rescue (decision 0035):
+    /// the exact index and the trigram fallback both found nothing, so the
+    /// query's terms were corrected against the vocabulary and re-matched.
+    public var viaTypo: Bool
 
     public init(
         messageID: Int64, rank: Double? = nil, threadID: Int64? = nil,
-        snippet: String? = nil, viaTrigram: Bool = false
+        snippet: String? = nil, viaTrigram: Bool = false, viaTypo: Bool = false
     ) {
         self.messageID = messageID
         self.rank = rank
         self.threadID = threadID
         self.snippet = snippet
         self.viaTrigram = viaTrigram
+        self.viaTypo = viaTypo
     }
 }
 
@@ -52,17 +57,29 @@ public enum SearchExecutor {
                 leaf.expression, in: db, limit: limit, offset: offset,
                 withSnippets: withSnippets, groupByThread: groupByThread
             )
+            if !hits.isEmpty { return hits }
             // Zero exact hits and a trigram fallback exists: retry as a
             // plain substring match over the trigram table (DESIGN 6A,
             // M2.1). Hits keep the same shape and carry viaTrigram so
             // callers can say honestly where they came from.
-            if hits.isEmpty, let fallback = leaf.trigramFallback {
-                return try ranked(
+            if let fallback = leaf.trigramFallback {
+                let trigramHits = try ranked(
                     fallback, in: db, limit: limit, offset: offset,
                     withSnippets: withSnippets, groupByThread: groupByThread,
                     table: "message_trigram", weightSQL: trigramWeights,
                     viaTrigram: true
                 )
+                if !trigramHits.isEmpty { return trigramHits }
+            }
+            // Zero hits from the exact index and the trigram fallback: the
+            // last resort is the one-edit typo rescue (decision 0035). It
+            // corrects the query's single term against the vocabulary and
+            // re-matches; hits carry viaTypo.
+            if let typoHits = try typoRescue(
+                for: leaf, in: db, limit: limit, offset: offset,
+                withSnippets: withSnippets, groupByThread: groupByThread
+            ) {
+                return typoHits
             }
             return hits
         }
@@ -173,7 +190,8 @@ public enum SearchExecutor {
     static func ranked(
         _ expression: String, in db: Database, limit: Int, offset: Int,
         withSnippets: Bool, groupByThread: Bool,
-        table: String = "message_text", weightSQL: String? = nil, viaTrigram: Bool = false
+        table: String = "message_text", weightSQL: String? = nil, viaTrigram: Bool = false,
+        viaTypo: Bool = false
     ) throws -> [SearchHit] {
         let weights = weightSQL
             ?? QueryCompiler.bm25Weights
@@ -230,7 +248,7 @@ public enum SearchExecutor {
             let id: Int64 = row["id"] ?? 0
             return SearchHit(
                 messageID: id, rank: row["score"], threadID: row["threadID"],
-                viaTrigram: viaTrigram
+                viaTrigram: viaTrigram, viaTypo: viaTypo
             )
         }
         guard withSnippets, !hits.isEmpty else { return hits }
@@ -255,6 +273,82 @@ public enum SearchExecutor {
             hits[index].snippet = snippets[hits[index].messageID]
         }
         return hits
+    }
+
+    // MARK: Typo rescue (decision 0035)
+
+    /// The one-edit typo rescue: the exact index and the trigram fallback
+    /// both found nothing, so the query's single term is corrected against
+    /// the vocabulary and re-matched. It runs only for plain single-term
+    /// text leaves (a phrase's tokens are meaningful only together, and a
+    /// multi-word query is better served by the trigram substring fallback).
+    /// The corrections are matched against exactly the columns the leaf
+    /// searched, so a rescued query keeps its field filter (DESIGN 6A).
+    /// Returns nil when the leaf is not a single-term text leaf or no
+    /// correction is a real term.
+    static func typoRescue(
+        for leaf: FTSLeaf, in db: Database, limit: Int, offset: Int,
+        withSnippets: Bool, groupByThread: Bool
+    ) throws -> [SearchHit]? {
+        guard let expression = try typoRescueExpression(for: leaf, in: db) else {
+            return nil
+        }
+        return try ranked(
+            expression, in: db, limit: limit, offset: offset,
+            withSnippets: withSnippets, groupByThread: groupByThread,
+            viaTypo: true
+        )
+    }
+
+    /// The rescued FTS expression for a leaf, or nil when the rescue does
+    /// not apply: the leaf must be a single-term text leaf and at least one
+    /// one-edit variant must be a real indexed term. Shared by the ranked
+    /// path (`typoRescue`) and the facet-count path, so facets describe the
+    /// same rescued set the hits show.
+    static func typoRescueExpression(
+        for leaf: FTSLeaf, in db: Database
+    ) throws -> String? {
+        guard leaf.terms.count == 1, let term = leaf.terms.first,
+              let columns = leaf.rescueColumns else { return nil }
+        let candidates = Typo.oneEditVariants(of: term)
+        guard !candidates.isEmpty else { return nil }
+        let found = try vocabularyTerms(among: candidates, in: db)
+        guard !found.isEmpty else { return nil }
+        // Match the corrections against exactly the columns the leaf
+        // searched, so a rescued query keeps its field filter and never
+        // reaches quoted text (DESIGN 6A). Quoted so a correction is
+        // always a single term.
+        let quoted = found.map { ftsQuote($0) }.joined(separator: " OR ")
+        return "\(columns) : (\(quoted))"
+    }
+
+    /// The subset of `candidates` that are real indexed terms (present in
+    /// the vocabulary with a positive document frequency). The vocabulary is
+    /// the filter that keeps the rescue small and honest: only corrections
+    /// that actually occur in the archive survive. Chunked so a long term's
+    /// ~400 one-edit variants never exceed SQLite's bind-parameter limit.
+    static func vocabularyTerms(among candidates: [String], in db: Database) throws -> [String] {
+        var found: Set<String> = []
+        let chunkSize = 400
+        var i = 0
+        while i < candidates.count {
+            let chunk = Array(candidates[i ..< min(i + chunkSize, candidates.count)])
+            let placeholders = String(repeating: "?,", count: chunk.count).dropLast()
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT term FROM vocabulary WHERE term IN (\(placeholders)) AND doc > 0",
+                arguments: StatementArguments(chunk)
+            )
+            for row in rows { found.insert(row["term"]) }
+            i += chunkSize
+        }
+        return Array(found)
+    }
+
+    /// Quotes a term as an FTS5 string literal (a single term), escaping
+    /// embedded double quotes so a correction is always one token.
+    private static func ftsQuote(_ term: String) -> String {
+        return "\"" + term.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
     // MARK: Predicate path

@@ -372,6 +372,27 @@ final class SearchTests: XCTestCase {
         try assertHits("\"budget looks fine\"", ["m5"])
     }
 
+    // MARK: Typo rescue (decision 0035)
+
+    func testTypoRescueFindsOneEditCorrections() throws {
+        // "shiping" is one insertion away from "shipping", which appears in
+        // m2 (body), m4 (subject+body) and m12, m13 (subject). The exact
+        // index and the trigram fallback both miss it — "shiping" is not a
+        // substring of "shipping" — so only the one-edit vocabulary rescue
+        // can find it, and it must return exactly the corrected query's set.
+        try assertHits("shiping", ["m2", "m4", "m12", "m13"])
+        // Rescue hits are flagged so callers can say honestly where they
+        // came from; exact hits are not. The rescue keeps the field filter:
+        // a subject-only typo is rescued within subject only.
+        let rescued = try hits("shiping")
+        XCTAssertFalse(rescued.isEmpty)
+        XCTAssertTrue(rescued.allSatisfy(\.viaTypo), "query: shiping")
+        XCTAssertTrue(try hits("shipping").allSatisfy { !$0.viaTypo })
+        try assertHits("subject:shiping", ["m4", "m12", "m13"])
+        // A typo with no real one-edit neighbours stays an honest zero.
+        try assertHits("xqzzjq", [])
+    }
+
     // MARK: Field operators
 
     func testSubjectOperator() throws {

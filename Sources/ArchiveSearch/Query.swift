@@ -947,7 +947,14 @@ public enum QueryCompiler {
             // nested FTS5 column filters intersect. No outer wrap.
             expression: expression,
             trigramFallback: TrigramPlan.fallback(columns: String(inner), phrases: fallbackPhrases),
-            trigramEager: TokenPipeline.containsCJK(raw)
+            trigramEager: TokenPipeline.containsCJK(raw),
+            // The typo rescue corrects single words, not phrases: a phrase's
+            // tokens are only meaningful together, so it carries no terms.
+            terms: phrase ? [] : tokens,
+            // The rescue re-matches its corrections against exactly the
+            // columns this leaf searches, so a rescued query keeps its
+            // field filter and never reaches quoted text (DESIGN 6A).
+            rescueColumns: phrase ? nil : columns
         ))
     }
 

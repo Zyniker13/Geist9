@@ -95,13 +95,29 @@ extension ArchiveStore {
         let language = Stemming.detectLanguage(query)
         let compiled = try QueryCompiler.compile(node, language: language)
         var predicate = SearchExecutor.predicate(for: compiled.root)
-        let any = try Int.fetchOne(
+        var any = try Int.fetchOne(
             db,
             sql: "SELECT EXISTS(SELECT 1 FROM message m WHERE \(predicate.sql))",
             arguments: StatementArguments(predicate.arguments)
         ) ?? 0
         if any == 0, SearchExecutor.hasFallbackableLeaf(compiled.root) {
             predicate = SearchExecutor.predicate(for: compiled.root, useFallbacks: true)
+            any = try Int.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM message m WHERE \(predicate.sql))",
+                arguments: StatementArguments(predicate.arguments)
+            ) ?? 0
+        }
+        // Third rung, mirroring the ranked path (decision 0035): when even
+        // the trigram fallback found nothing and the query is a single-term
+        // text leaf, facets describe the typo-rescued set, so the counts on
+        // screen always belong to the hits on screen.
+        if any == 0, case .fts(let leaf) = compiled.root,
+           let rescue = try SearchExecutor.typoRescueExpression(for: leaf, in: db) {
+            predicate = (
+                "m.id IN (SELECT rowid FROM message_text WHERE message_text MATCH ?)",
+                [rescue]
+            )
         }
         return predicate
     }

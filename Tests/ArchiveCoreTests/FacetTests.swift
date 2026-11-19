@@ -6,8 +6,9 @@ import XCTest
 /// query's full match set, the facet says how many messages carry each
 /// entity kind, and the drill-in says which values dominate one kind.
 /// Counts cover the whole match set — not one result page — and follow
-/// the same zero-hit trigram retry as the hits, so facets always
-/// describe the set the person is actually looking at.
+/// the same zero-hit fallback ladder as the hits (trigram retry, then the
+/// one-edit typo rescue), so facets always describe the set the person is
+/// actually looking at.
 final class FacetTests: XCTestCase {
     private var tempDir: URL!
 
@@ -112,6 +113,18 @@ final class FacetTests: XCTestCase {
         XCTAssertEqual(hits.map(\.messageID), [mailServerID])
         XCTAssertTrue(hits.allSatisfy(\.viaTrigram))
         XCTAssertEqual(try store.entityFacets(matching: "2214"), [.amount: 1, .domain: 1])
+    }
+
+    func testFacetsFollowTheTypoRescue() throws {
+        let (store, _) = try makeFixture()
+        // "inoice" is one edit from "invoice" and not a substring of it, so
+        // only the one-edit vocabulary rescue can correct it — to the two
+        // "Order invoice" subjects. The facets must describe that rescued
+        // set, not a fresh exact match or an honest zero.
+        let hits = try store.search("inoice").hits
+        XCTAssertEqual(Set(hits.map(\.messageID)).count, 2)
+        XCTAssertTrue(hits.allSatisfy(\.viaTypo))
+        XCTAssertEqual(try store.entityFacets(matching: "inoice"), [.amount: 2, .date: 1])
     }
 
     func testFacetsAreEmptyWithoutMatches() throws {

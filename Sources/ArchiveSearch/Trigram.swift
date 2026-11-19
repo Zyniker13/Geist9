@@ -20,13 +20,26 @@ public struct FTSLeaf: Sendable, Equatable {
     /// the query's segmentation can differ from the indexed text's, and the
     /// predicate path has no zero-hit retry to fall back on.
     public var trigramEager: Bool
+    /// The folded query tokens of a non-phrase text leaf, in order. Empty
+    /// for phrases and for leaves that are not plain text (from/to
+    /// addresses). The typo rescue (decision 0035) generates one-edit
+    /// variants of these and checks them against the vocabulary.
+    public var terms: [String]
+    /// The brace-wrapped message_text columns this leaf searches, or nil
+    /// for phrases and non-text leaves. The typo rescue re-matches its
+    /// corrections against exactly these columns, so a rescued query keeps
+    /// its field filter and never reaches quoted text (DESIGN 6A).
+    public var rescueColumns: String?
 
     public init(
-        expression: String, trigramFallback: String? = nil, trigramEager: Bool = false
+        expression: String, trigramFallback: String? = nil, trigramEager: Bool = false,
+        terms: [String] = [], rescueColumns: String? = nil
     ) {
         self.expression = expression
         self.trigramFallback = trigramFallback
         self.trigramEager = trigramEager
+        self.terms = terms
+        self.rescueColumns = rescueColumns
     }
 }
 
