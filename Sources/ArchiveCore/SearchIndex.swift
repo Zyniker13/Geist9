@@ -353,14 +353,17 @@ extension ArchiveStore {
     /// malformed query so callers can surface it; an empty query returns
     /// no hits rather than everything. With `groupByThread`, results
     /// collapse to conversations: one hit per thread, the thread's best.
+    /// Natural-language dates resolve against `now` (defaults to the
+    /// current time; tests pin it).
     public func search(
         _ query: String,
         limit: Int = 200,
         offset: Int = 0,
         withSnippets: Bool = false,
-        groupByThread: Bool = false
+        groupByThread: Bool = false,
+        now: Date? = nil
     ) throws -> SearchResults {
-        guard let node = try QueryParser.parse(query) else {
+        guard let node = try QueryParser.parse(query, now: now) else {
             return SearchResults(hits: [], warnings: [])
         }
         // Stemming (DESIGN 6A, decision 0026): detect the query's language
@@ -399,9 +402,10 @@ extension ArchiveStore {
     /// alongside the completions. A committed query (ending in whitespace, a
     /// quote, or another terminator) runs the ranked search without
     /// completions, as if entered; a malformed in-flight query returns empty
-    /// rather than raising, so typing never surfaces an error.
-    public func searchAsYouType(_ query: String, limit: Int = 200) throws -> AsYouTypeResults {
-        guard let node = try? QueryParser.parse(query) else {
+    /// rather than raising, so typing never surfaces an error. Natural
+    /// language dates resolve against `now` (defaults to the current time).
+    public func searchAsYouType(_ query: String, limit: Int = 200, now: Date? = nil) throws -> AsYouTypeResults {
+        guard let node = try? QueryParser.parse(query, now: now) else {
             return AsYouTypeResults(completions: [], matchSet: 0, ranked: [])
         }
         // Stemming (DESIGN 6A, decision 0026): detect the query's language

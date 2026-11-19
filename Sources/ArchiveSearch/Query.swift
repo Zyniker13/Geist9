@@ -86,11 +86,17 @@ public enum Clause: Sendable, Equatable {
 public enum QueryParser {
     /// Parses one query line. Returns nil for an empty (or all-whitespace)
     /// query, which callers treat as "browse everything".
-    public static func parse(_ query: String) throws -> SearchNode? {
+    ///
+    /// `now` pins the instant natural-language dates resolve against
+    /// ("last March", "this week"); it defaults to the current time and
+    /// threads down to every date operator, so one line parses as one
+    /// moment.
+    public static func parse(_ query: String, now: Date? = nil) throws -> SearchNode? {
+        let now = now ?? Date()
         let tokens = scan(query)
         guard !tokens.isEmpty else { return nil }
         var index = 0
-        let node = try parseOr(tokens, &index)
+        let node = try parseOr(tokens, &index, now)
         guard index == tokens.count else { throw QueryError.unbalancedParenthesis }
         return node
     }
@@ -160,7 +166,7 @@ public enum QueryParser {
     // MARK: Grammar
 
     /// or := and (OR and)*  — OR binds loosest.
-    static func parseOr(_ tokens: [ScanToken], _ index: inout Int) throws -> SearchNode {
+    static func parseOr(_ tokens: [ScanToken], _ index: inout Int, _ now: Date) throws -> SearchNode {
         var alternatives: [SearchNode] = []
         var current: [SearchNode] = []
         var sawOR = false
@@ -182,7 +188,7 @@ public enum QueryParser {
                 }
                 continue
             }
-            current.append(try parseAtom(tokens, &index))
+            current.append(try parseAtom(tokens, &index, now))
         }
         if sawOR && alternatives.isEmpty { throw QueryError.danglingOR }
         flush()
@@ -205,14 +211,14 @@ public enum QueryParser {
         return false
     }
 
-    static func parseAtom(_ tokens: [ScanToken], _ index: inout Int) throws -> SearchNode {
+    static func parseAtom(_ tokens: [ScanToken], _ index: inout Int, _ now: Date) throws -> SearchNode {
         switch tokens[index] {
         case .open:
             index += 1
             guard index < tokens.count, !isClose(tokens[index]) else {
                 throw QueryError.emptyGroup
             }
-            let inner = try parseOr(tokens, &index)
+            let inner = try parseOr(tokens, &index, now)
             guard index < tokens.count, isClose(tokens[index]) else {
                 throw QueryError.unbalancedParenthesis
             }
@@ -223,20 +229,20 @@ public enum QueryParser {
             return textClause(text, quoted: true)
         case .word(let word):
             index += 1
-            return try parseWord(word, tokens, &index)
+            return try parseWord(word, tokens, &index, now)
         case .close:
             throw QueryError.unbalancedParenthesis
         }
     }
 
     /// One word: a negation, an operator with a value, or a plain term.
-    static func parseWord(_ word: String, _ tokens: [ScanToken], _ index: inout Int) throws -> SearchNode {
+    static func parseWord(_ word: String, _ tokens: [ScanToken], _ index: inout Int, _ now: Date) throws -> SearchNode {
         if word == "-" {
             guard index < tokens.count else { throw QueryError.missingOperatorValue(op: "-") }
-            return .not(try parseAtom(tokens, &index))
+            return .not(try parseAtom(tokens, &index, now))
         }
         if word.hasPrefix("-") {
-            return .not(try parseWord(String(word.dropFirst()), tokens, &index))
+            return .not(try parseWord(String(word.dropFirst()), tokens, &index, now))
         }
 
         guard let colon = word.firstIndex(of: ":") else {
@@ -259,7 +265,7 @@ public enum QueryParser {
                 throw QueryError.missingOperatorValue(op: op)
             }
         }
-        return .clause(try clause(for: op, value: trimming(value)))
+        return .clause(try clause(for: op, value: trimming(value), now: now))
     }
 
     static func trimming(_ value: String) -> String {
@@ -289,7 +295,7 @@ public enum QueryParser {
         "archive", "calendar", "contact", "text", "audio", "video",
     ]
 
-    static func clause(for op: String, value: String) throws -> Clause {
+    static func clause(for op: String, value: String, now: Date) throws -> Clause {
         func bad(_ reason: String) -> QueryError {
             .badOperatorValue(op: op, value: value, reason: reason)
         }
@@ -320,10 +326,10 @@ public enum QueryParser {
                 throw bad("known states: \(FlagKind.allCases.map(\.rawValue).joined(separator: ", "))")
             }
             return .flag(kind)
-        case "before": return .before(try dateBound(value, op: op))
-        case "after": return .after(try dateBound(value, op: op))
-        case "on": return .on(try dateSpan(value, op: op))
-        case "during": return .during(try dateSpan(value, op: op))
+        case "before": return .before(try dateBound(value, op: op, now: now))
+        case "after": return .after(try dateBound(value, op: op, now: now))
+        case "on": return .on(try dateSpan(value, op: op, now: now))
+        case "during": return .during(try dateSpan(value, op: op, now: now))
         case "larger": return .larger(try byteSize(value, op: op))
         case "smaller": return .smaller(try byteSize(value, op: op))
         case "domain": return .domain(value)
@@ -337,9 +343,22 @@ public enum QueryParser {
     /// Parses `2019`, `2019-06`, `2019-06-01`, each optionally with a
     /// `T12:30[:ss]` time, into an ISO-8601 UTC instant string that sorts
     /// the same way the stored date columns do.
-    static func dateBound(_ value: String, op: String) throws -> String {
+    static func dateBound(_ value: String, op: String, now: Date) throws -> String {
         func bad(_ reason: String) -> QueryError {
             .badOperatorValue(op: op, value: value, reason: reason)
+        }
+        // Natural forms ("last March") resolve to a span; before and after
+        // take its start instant (DESIGN 6A, decision 0034).
+        switch NaturalDate.resolve(value, now: now) {
+        case .span(let range):
+            guard let start = range.start else {
+                throw bad("expected a date, optionally with a time")
+            }
+            return start
+        case .invalid(let reason):
+            throw bad(reason)
+        case .notNatural:
+            break
         }
         let normalized = value.replacingOccurrences(of: " ", with: "T")
         let parts = normalized.split(separator: "T", omittingEmptySubsequences: false)
@@ -359,9 +378,20 @@ public enum QueryParser {
 
     /// Parses `2019`, `2019-06`, `2019-06-01` into the half-open span those
     /// words cover. Times are not accepted here.
-    static func dateSpan(_ value: String, op: String) throws -> DateRange {
+    static func dateSpan(_ value: String, op: String, now: Date) throws -> DateRange {
         func bad(_ reason: String) -> QueryError {
             .badOperatorValue(op: op, value: value, reason: reason)
+        }
+        // Natural forms ("last March", "this month") resolve first; the
+        // numeric grammar keeps ownership of everything else (DESIGN 6A,
+        // decision 0034).
+        switch NaturalDate.resolve(value, now: now) {
+        case .span(let range):
+            return range
+        case .invalid(let reason):
+            throw bad(reason)
+        case .notNatural:
+            break
         }
         guard !value.contains("T"), !value.contains(" ") else {
             throw bad("on and during take a date without a time")

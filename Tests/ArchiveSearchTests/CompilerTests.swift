@@ -225,4 +225,129 @@ final class CompilerTests: XCTestCase {
         XCTAssertTrue(filter.arguments.isEmpty)
         XCTAssertFalse(compiled.warnings.isEmpty)
     }
+
+    // MARK: Natural-language dates
+
+    // Natural dates resolve in UTC against a caller-supplied `now`, so the
+    // same query compiles the same way no matter when it runs (DESIGN 6A).
+    private func utc(_ iso: String) -> Date {
+        let format = DateFormatter()
+        format.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        format.timeZone = TimeZone(identifier: "UTC")
+        format.locale = Locale(identifier: "en_US_POSIX")
+        return format.date(from: iso)!
+    }
+
+    // A bare month names the most recent occurrence of that month whose
+    // first day is on or before today: from November 2026, "march" is
+    // March 2026.
+    func testBareMonthPicksTheMostRecentOccurrence() throws {
+        let node = try QueryParser.parse("during:march", now: utc("2026-11-19T15:00:00Z"))
+        XCTAssertEqual(node, .clause(.during(DateRange(
+            start: "2026-03-01T00:00:00Z", end: "2026-04-01T00:00:00Z"))))
+    }
+
+    // Early in the year the most recent occurrence is the year before.
+    func testBareMonthWrapsToThePreviousYear() throws {
+        let node = try QueryParser.parse("during:march", now: utc("2026-02-05T09:00:00Z"))
+        XCTAssertEqual(node, .clause(.during(DateRange(
+            start: "2025-03-01T00:00:00Z", end: "2025-04-01T00:00:00Z"))))
+    }
+
+    // "last March" from November 2026 is March 2026, as people use it.
+    func testLastMonthNameAgreesWithTheBareMonth() throws {
+        let node = try QueryParser.parse("during:\"last march\"", now: utc("2026-11-19T15:00:00Z"))
+        XCTAssertEqual(node, .clause(.during(DateRange(
+            start: "2026-03-01T00:00:00Z", end: "2026-04-01T00:00:00Z"))))
+    }
+
+    // Month with an explicit year pins the year exactly.
+    func testMonthWithYearPinsTheYear() throws {
+        let node = try QueryParser.parse("during:\"March 2019\"", now: utc("2026-11-19T15:00:00Z"))
+        XCTAssertEqual(node, .clause(.during(DateRange(
+            start: "2019-03-01T00:00:00Z", end: "2019-04-01T00:00:00Z"))))
+    }
+
+    // Three-letter abbreviations and "sept" work; the month is the most
+    // recent occurrence, so September from September 2021 is this year's.
+    func testMonthAbbreviationsResolveLikeFullNames() throws {
+        let node = try QueryParser.parse("during:sept", now: utc("2021-09-10T09:00:00Z"))
+        XCTAssertEqual(node, .clause(.during(DateRange(
+            start: "2021-09-01T00:00:00Z", end: "2021-10-01T00:00:00Z"))))
+    }
+
+    func testTodayAndYesterdayResolveToCalendarDays() throws {
+        let now = utc("2026-11-19T15:27:09Z")
+        XCTAssertEqual(
+            try QueryParser.parse("during:today", now: now),
+            .clause(.during(DateRange(
+                start: "2026-11-19T00:00:00Z", end: "2026-11-20T00:00:00Z"))))
+        XCTAssertEqual(
+            try QueryParser.parse("during:yesterday", now: now),
+            .clause(.during(DateRange(
+                start: "2026-11-18T00:00:00Z", end: "2026-11-19T00:00:00Z"))))
+    }
+
+    // Weeks start Monday (ISO), even though the pinned day is a Thursday.
+    func testWeeksStartMonday() throws {
+        let now = utc("2026-11-19T15:27:09Z")
+        XCTAssertEqual(
+            try QueryParser.parse("during:\"this week\"", now: now),
+            .clause(.during(DateRange(
+                start: "2026-11-16T00:00:00Z", end: "2026-11-23T00:00:00Z"))))
+        XCTAssertEqual(
+            try QueryParser.parse("during:\"last week\"", now: now),
+            .clause(.during(DateRange(
+                start: "2026-11-09T00:00:00Z", end: "2026-11-16T00:00:00Z"))))
+    }
+
+    func testThisAndLastMonthAndYearAreCalendarSpans() throws {
+        let now = utc("2026-11-19T15:27:09Z")
+        XCTAssertEqual(
+            try QueryParser.parse("during:\"this month\"", now: now),
+            .clause(.during(DateRange(
+                start: "2026-11-01T00:00:00Z", end: "2026-12-01T00:00:00Z"))))
+        XCTAssertEqual(
+            try QueryParser.parse("during:\"last month\"", now: now),
+            .clause(.during(DateRange(
+                start: "2026-10-01T00:00:00Z", end: "2026-11-01T00:00:00Z"))))
+        XCTAssertEqual(
+            try QueryParser.parse("during:\"this year\"", now: now),
+            .clause(.during(DateRange(
+                start: "2026-01-01T00:00:00Z", end: "2027-01-01T00:00:00Z"))))
+        XCTAssertEqual(
+            try QueryParser.parse("during:\"last year\"", now: now),
+            .clause(.during(DateRange(
+                start: "2025-01-01T00:00:00Z", end: "2026-01-01T00:00:00Z"))))
+    }
+
+    // before:/after: with a natural value take the span's start instant.
+    func testBeforeAndAfterUseTheSpanStart() throws {
+        let now = utc("2026-11-19T15:27:09Z")
+        XCTAssertEqual(
+            try QueryParser.parse("before:\"last march\"", now: now),
+            .clause(.before("2026-03-01T00:00:00Z")))
+        XCTAssertEqual(
+            try QueryParser.parse("after:\"last march\"", now: now),
+            .clause(.after("2026-03-01T00:00:00Z")))
+    }
+
+    // The numeric grammar keeps ownership of its forms unchanged.
+    func testNumericDatesStillParseAsBefore() throws {
+        let now = utc("2026-11-19T15:27:09Z")
+        XCTAssertEqual(
+            try QueryParser.parse("during:2019-06", now: now),
+            .clause(.during(DateRange(
+                start: "2019-06-01T00:00:00Z", end: "2019-07-01T00:00:00Z"))))
+        XCTAssertEqual(
+            try QueryParser.parse("before:2019-06-15T12:30", now: now),
+            .clause(.before("2019-06-15T12:30:00Z")))
+    }
+
+    func testInvalidNaturalDatesExplainThemselves() {
+        let now = utc("2026-11-19T15:27:09Z")
+        XCTAssertThrowsError(try QueryParser.parse("during:\"last march 2019\"", now: now))
+        XCTAssertThrowsError(try QueryParser.parse("during:\"march 19\"", now: now))
+        XCTAssertThrowsError(try QueryParser.parse("during:smarch", now: now))
+    }
 }

@@ -28,10 +28,11 @@ extension ArchiveStore {
     /// For each entity kind, how many messages in the query's full match
     /// set carry at least one entity of that kind. Kinds with no matching
     /// messages are absent from the dictionary, not zero. An empty or
-    /// malformed query yields an empty dictionary.
-    public func entityFacets(matching query: String) throws -> [EntityKind: Int] {
+    /// malformed query yields an empty dictionary. Natural-language dates
+    /// resolve against `now` (defaults to the current time).
+    public func entityFacets(matching query: String, now: Date? = nil) throws -> [EntityKind: Int] {
         try db.read { db in
-            let predicate = try facetPredicate(matching: query, in: db)
+            let predicate = try facetPredicate(matching: query, in: db, now: now)
             let sql = """
                 SELECT e.kind AS k, COUNT(DISTINCT e.messageID) AS n
                 FROM message_entity e
@@ -55,11 +56,13 @@ extension ArchiveStore {
     /// set, ranked by how many messages carry each value and then by
     /// value, so the ranking is deterministic. At most `limit` values
     /// come back; the written form is the display value.
+    /// Natural-language dates resolve against `now` (defaults to the
+    /// current time).
     public func entityValues(
-        _ kind: EntityKind, matching query: String, limit: Int = 20
+        _ kind: EntityKind, matching query: String, limit: Int = 20, now: Date? = nil
     ) throws -> [EntityValueCount] {
         try db.read { db in
-            let predicate = try facetPredicate(matching: query, in: db)
+            let predicate = try facetPredicate(matching: query, in: db, now: now)
             let sql = """
                 SELECT e.value AS v, COUNT(DISTINCT e.messageID) AS n
                 FROM message_entity e
@@ -84,9 +87,9 @@ extension ArchiveStore {
     /// nothing and the tree can fall back, the trigram-fallback tree — so
     /// facet counts describe the same set the hits come from.
     private func facetPredicate(
-        matching query: String, in db: Database
+        matching query: String, in db: Database, now: Date? = nil
     ) throws -> (sql: String, arguments: [String]) {
-        guard let node = try QueryParser.parse(query) else {
+        guard let node = try QueryParser.parse(query, now: now) else {
             return ("1 = 0", [])
         }
         let language = Stemming.detectLanguage(query)

@@ -317,16 +317,24 @@ final class SearchTests: XCTestCase {
         }
     }
 
-    private func hits(_ query: String, withSnippets: Bool = false) throws -> [SearchHit] {
-        try store.search(query, withSnippets: withSnippets).hits
+    private func utc(_ iso: String) -> Date {
+        let format = DateFormatter()
+        format.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        format.timeZone = TimeZone(identifier: "UTC")
+        format.locale = Locale(identifier: "en_US_POSIX")
+        return format.date(from: iso)!
     }
 
-    private func idsMatching(_ query: String) throws -> Set<Int64> {
-        Set(try hits(query).map(\.messageID))
+    private func hits(_ query: String, withSnippets: Bool = false, now: Date? = nil) throws -> [SearchHit] {
+        try store.search(query, withSnippets: withSnippets, now: now).hits
     }
 
-    private func assertHits(_ query: String, _ expected: [String], file: StaticString = #filePath, line: UInt = #line) throws {
-        let got = try idsMatching(query)
+    private func idsMatching(_ query: String, now: Date? = nil) throws -> Set<Int64> {
+        Set(try hits(query, now: now).map(\.messageID))
+    }
+
+    private func assertHits(_ query: String, _ expected: [String], now: Date? = nil, file: StaticString = #filePath, line: UInt = #line) throws {
+        let got = try idsMatching(query, now: now)
         XCTAssertEqual(got, Set(expected.map { ids[$0]! }), "query: \(query)", file: file, line: line)
     }
 
@@ -483,6 +491,40 @@ final class SearchTests: XCTestCase {
         try assertHits("before:2019-07", ["m1", "m6"])
         try assertHits("after:2021-06-02", ["m8", "m9", "m10", "m12", "m13", "m15", "m16"])
         try assertHits("on:2019-06-15", ["m1"])
+    }
+
+    // Natural dates resolve against the pinned `now` threaded through
+    // search, so the spans line up with the fixture corpus.
+    func testNaturalDateFilters() throws {
+        // January 2020: "this month" is January, "last year" is 2019.
+        let jan2020 = utc("2020-01-08T10:00:00Z")
+        try assertHits("during:\"this month\"", ["m3"], now: jan2020)
+        // `after` is a lower bound: January 2020 and everything later.
+        XCTAssertEqual(try idsMatching("after:\"this month\"", now: jan2020),
+                       try idsMatching("after:2020-01-01"))
+        try assertHits("during:\"last year\"", ["m1", "m2", "m6"], now: jan2020)
+        try assertHits("before:\"this year\"", ["m1", "m2", "m6"], now: jan2020)
+        // A bare month is the most recent occurrence: June 2019, not 2020.
+        try assertHits("during:june", ["m1"], now: jan2020)
+        try assertHits("during:\"last may\"", ["m6"], now: jan2020)
+        // No mail in March 2019 (m4 is March 2021): the bare month must not
+        // have reached into the future.
+        try assertHits("during:march", [], now: jan2020)
+
+        // Friday September 10, 2021: last week is Mon Aug 30 – Sun Sep 5.
+        let sep2021 = utc("2021-09-10T09:00:00Z")
+        try assertHits("during:\"last week\"", ["m9", "m10", "m12", "m13", "m15", "m16"], now: sep2021)
+        try assertHits("during:\"this week\"", [], now: sep2021)
+        try assertHits("during:september", ["m9", "m10", "m12", "m13", "m15", "m16"], now: sep2021)
+        try assertHits("during:\"last year\"", ["m3"], now: sep2021)
+    }
+
+    // Facets describe the same set the hits do, so they see the same `now`.
+    func testNaturalDatesReachFacetPredicates() throws {
+        let jan2020 = utc("2020-01-08T10:00:00Z")
+        let natural = try store.entityFacets(matching: "during:\"last year\"", now: jan2020)
+        let numeric = try store.entityFacets(matching: "during:2019")
+        XCTAssertEqual(natural, numeric)
     }
 
     func testSizeFilters() throws {
