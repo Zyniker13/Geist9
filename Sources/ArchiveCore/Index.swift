@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 8
+    public static let version = 9
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -28,6 +28,7 @@ public enum IndexSchema {
         ("core-v6", coreV6),
         ("core-v7", coreV7),
         ("core-v8", coreV8),
+        ("core-v9", coreV9),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -294,6 +295,24 @@ public enum IndexSchema {
             """)
         try db.execute(sql: "DROP TABLE message_text")
         try db.execute(sql: "ALTER TABLE message_text_new RENAME TO message_text")
+    }
+
+    /// core-v9: the persistent vocabulary table (decision 0027). The live
+    /// fts5vocab range scan served 2+-character completions and the
+    /// match-set gate until now, but it walks every FTS segment's b-tree:
+    /// 60 ms at one million messages (35 segments), against the 50 ms
+    /// keystroke budget. The persistent table is keyed on the term, so the
+    /// same range query is a single b-tree walk. It is populated here from
+    /// the current FTS5 vocabulary, then kept exact incrementally: ingest
+    /// applies per-message term deltas in the same transaction that writes
+    /// the message_text rows (decision 0027), and the import/reindex
+    /// refresh rebuilds it from the live FTS5 vocabulary. No stored message
+    /// bytes are touched.
+    private static func coreV9(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE TABLE vocabulary(term TEXT PRIMARY KEY, doc INTEGER NOT NULL) WITHOUT ROWID
+            """)
+        try Vocabulary.rebuildAll(in: db)
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

@@ -111,6 +111,24 @@ struct SearchTokens: Sendable {
         self.trigramQuoted = TokenPipeline.folded(search.quoted ?? "")
         self.trigramAttachments = TokenPipeline.folded(attachmentNames)
     }
+
+    /// The distinct FTS5 terms the message's text rows hold — the set this
+    /// message contributes document frequency to (decision 0027). Every
+    /// column is a space-joined token stream (one whitespace split per
+    /// term) except `fromAddr`, which is stored raw and therefore
+    /// contributes unicode61's view of the folded address.
+    var searchTermSet: Set<String> {
+        var terms = Set<String>()
+        for stream in [subject, fromName, recipients, body, quoted, attachments,
+                       subjectStem, bodyStem, quotedStem] {
+            terms.formUnion(stream.split(separator: " ", omittingEmptySubsequences: true)
+                .map(String.init))
+        }
+        if !fromAddr.isEmpty {
+            terms.formUnion(TokenPipeline.scalars.unicode61Terms(fromAddr))
+        }
+        return terms
+    }
 }
 
 extension ArchiveStore {
@@ -207,6 +225,12 @@ extension ArchiveStore {
             var mailboxCache: [String: Int64] = [:]
             var labelCache: [String: Int64] = [:]
             var addressCache: [String: Int64] = [:]
+            // Transaction-local vocabulary delta (decision 0027): +1 for
+            // every term a message newly adds to the FTS5 index, -1 for
+            // every term a re-indexed message no longer holds. Applied to
+            // the persistent vocabulary table in this same transaction, so
+            // the table can neither lead nor lag the rows it mirrors.
+            var termDelta: [String: Int] = [:]
             for (slotIndex, item) in ordered.enumerated() {
                 slotResults.append(try Self.insertRows(
                     item.message, hash: item.hash, tokens: tokenBuffer[slotIndex],
@@ -214,9 +238,11 @@ extension ArchiveStore {
                     accountEmail: account.email,
                     mailboxCache: &mailboxCache,
                     labelCache: &labelCache,
-                    addressCache: &addressCache
+                    addressCache: &addressCache,
+                    termDelta: &termDelta
                 ))
             }
+            try Vocabulary.applyDeltas(termDelta, in: db)
             return slotResults
         }
         Self.crashHook?("index-commit")
@@ -257,7 +283,8 @@ extension ArchiveStore {
         accountID: Int64, db: Database, nowString: String, accountEmail: String,
         mailboxCache: inout [String: Int64],
         labelCache: inout [String: Int64],
-        addressCache: inout [String: Int64]
+        addressCache: inout [String: Int64],
+        termDelta: inout [String: Int]
     ) throws -> IngestResult {
             var messageID = try Int64.fetchOne(
                 db, sql: "SELECT id FROM message WHERE hash = ?", arguments: [hash.bytes]
@@ -299,12 +326,22 @@ extension ArchiveStore {
             // message the list lacks, and vice versa.
             if isNew {
                 try Self.indexSearchText(tokens, messageRowID: messageRowID, db: db)
+                // Every term this message adds to the FTS5 index gains one
+                // document (decision 0027).
+                Self.recordTermAdditions(tokens.searchTermSet, into: &termDelta)
             } else if try Self.needsTextReindex(messageRowID, db: db) {
                 // The text pipeline moved forward since these bytes were
                 // last indexed (or its text rows were lost): rebuild the
                 // text tables from the incoming parse. The stored message
-                // row and bytes are never rewritten (DESIGN 6A, M2.1).
+                // row and bytes are never rewritten (DESIGN 6A, M2.1). The
+                // old row's term set is read before the rewrite so the
+                // vocabulary delta is exact: terms the message no longer
+                // holds lose a document.
+                let oldTerms = try Self.storedTermSet(messageRowID, db: db)
                 try Self.indexSearchText(tokens, messageRowID: messageRowID, db: db)
+                let newTerms = tokens.searchTermSet
+                Self.recordTermAdditions(newTerms.subtracting(oldTerms), into: &termDelta)
+                Self.recordTermAdditions(oldTerms.subtracting(newTerms), into: &termDelta, docChange: -1)
                 try db.execute(
                     sql: "UPDATE message SET textVersion = ? WHERE id = ?",
                     arguments: [TextIndexVersion.current, messageRowID]
@@ -487,6 +524,51 @@ extension ArchiveStore {
                 tokens.trigramAttachments,
             ]
         )
+    }
+
+    // MARK: Vocabulary deltas (decision 0027)
+
+    /// Adds one term to the transaction-local vocabulary delta per document
+    /// counted in `docChange` (+1 for a term the message newly holds, -1 for
+    /// a term it no longer holds). Terms are distinct within one message, so
+    /// one message contributes at most one unit per term; Vocabulary.
+    /// applyDeltas folds the per-message deltas across the batch.
+    static func recordTermAdditions(
+        _ terms: Set<String>, into delta: inout [String: Int], docChange: Int = 1
+    ) {
+        for term in terms { delta[term, default: 0] += docChange }
+    }
+
+    /// The distinct FTS5 terms the message_text row currently holds for a
+    /// message — the exact set the row would contribute a +1 to if it were
+    /// re-indexed, derived from the stored columns: the token and stem
+    /// columns are space-joined token streams (one whitespace split per
+    /// term), and the folded address column is stored raw, so its terms are
+    /// unicode61's view of it. Returns an empty set when the row is missing
+    /// (a lost text row is re-indexed as if the message held nothing).
+    static func storedTermSet(_ messageRowID: Int64, db: Database) throws -> Set<String> {
+        let row = try Row.fetchOne(
+            db,
+            sql: """
+            SELECT subject, from_name, from_addr, recipients, body, quoted, attachments,
+                   subject_stem, body_stem, quoted_stem
+            FROM message_text WHERE rowid = ?
+            """,
+            arguments: [messageRowID]
+        )
+        guard let row else { return [] }
+        var terms = Set<String>()
+        for column in ["subject", "from_name", "recipients", "body", "quoted", "attachments",
+                       "subject_stem", "body_stem", "quoted_stem"] {
+            guard let stream: String = row[column] else { continue }
+            for term in stream.split(separator: " ", omittingEmptySubsequences: true) {
+                terms.insert(String(term))
+            }
+        }
+        if let address: String = row["from_addr"], !address.isEmpty {
+            terms.formUnion(TokenPipeline.scalars.unicode61Terms(address))
+        }
+        return terms
     }
 
     /// True when a stored message's text index predates the current

@@ -160,12 +160,33 @@ public enum TokenPipeline {
 
     // MARK: - Character classes (shared)
 
-    enum scalars {
+    public enum scalars {
         static let alnum: CharacterSet = {
             var set = CharacterSet.letters
             set.formUnion(.decimalDigits)
             return set
         }()
+
+        /// The terms unicode61 would index for `text`: runs of letters and
+        /// digits, split on every other character, in order, without
+        /// deduplication. Used to compute vocabulary document-frequency
+        /// deltas for columns stored raw rather than as a prepared token
+        /// stream: the folded address column ("a@b.c" indexes as "a", "b",
+        /// "c"; decision 0027).
+        public static func unicode61Terms(_ text: String) -> [String] {
+            var out: [String] = []
+            var current = ""
+            for scalar in text.unicodeScalars {
+                if alnum.contains(scalar) {
+                    current.unicodeScalars.append(scalar)
+                } else if !current.isEmpty {
+                    out.append(current)
+                    current = ""
+                }
+            }
+            if !current.isEmpty { out.append(current) }
+            return out
+        }
 
         /// Han, Hiragana, Katakana, and Hangul: scripts written without
         /// spaces between words.

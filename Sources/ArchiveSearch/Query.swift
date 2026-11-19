@@ -109,7 +109,7 @@ public enum QueryParser {
     static func scan(_ query: String) -> [ScanToken] {
         var tokens: [ScanToken] = []
         var word = String.UnicodeScalarView()
-        var scalars = query.unicodeScalars
+        let scalars = query.unicodeScalars
         var index = scalars.startIndex
 
         func flush() {
