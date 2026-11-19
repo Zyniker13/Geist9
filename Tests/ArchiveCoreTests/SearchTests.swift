@@ -856,9 +856,20 @@ final class SearchTests: XCTestCase {
         """)
         let found = try idsMatching("nordwind versicherung")
         XCTAssertTrue(found.contains(a))
+        #if canImport(NaturalLanguage)
         XCTAssertTrue(
             found.contains(b),
             "the sender name's stem form must reach the sender stem column"
         )
+        #else
+        // Linux has no language detection (decision 0026): the query stems
+        // with English only, which cannot bridge the German plural, and the
+        // sender stem column holds the folded tokens. The first message
+        // keeps the exact path non-empty, so the trigram fallback stays out.
+        XCTAssertFalse(
+            found.contains(b),
+            "without language detection the sender stem column holds folded tokens"
+        )
+        #endif
     }
 }
