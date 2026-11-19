@@ -61,8 +61,15 @@ final class StemmingTests: XCTestCase {
     }
 
     func testDetectLanguageOnConfidentlyDetectableText() {
+        #if canImport(NaturalLanguage)
         XCTAssertEqual(Stemming.detectLanguage("the running studies were relational"), "en")
         XCTAssertEqual(Stemming.detectLanguage("Rechnung ist faellig und muss bezahlt werden"), "de")
+        #else
+        // NaturalLanguage is macOS-only; Linux keeps unstemmed tokens
+        // (decision 0026), so detection reports nothing there.
+        XCTAssertNil(Stemming.detectLanguage("the running studies were relational"))
+        XCTAssertNil(Stemming.detectLanguage("Rechnung ist faellig und muss bezahlt werden"))
+        #endif
     }
 
     func testDetectLanguageGateOnShortOrAmbiguousText() {

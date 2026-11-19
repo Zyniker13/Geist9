@@ -17,3 +17,6 @@ build/
 # The Xcode project is generated from project.yml (XcodeGen), never committed:
 *.xcodeproj/
 
+
+# Core dumps from kill-point tests (Linux containers write them into the workdir)
+/core

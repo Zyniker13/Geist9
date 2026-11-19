@@ -102,10 +102,18 @@ final class AsYouTypeTests: XCTestCase {
         // import filled: meeting, monday, and — decision 0026 — the stem
         // "meet" that the ingest stored alongside "meeting", so a user who
         // types "meet" finds the message through its indexed stem. Ordered
-        // by term on a tie.
+        // by term on a tie. Linux keeps unstemmed tokens (no NaturalLanguage),
+        // so the stem column contributes only on macOS.
+        let expectedTerms: [String] = {
+            #if canImport(NaturalLanguage)
+            return ["meet", "meeting", "monday"]
+            #else
+            return ["meeting", "monday"]
+            #endif
+        }()
         let result = try store.searchAsYouType("m")
-        XCTAssertEqual(result.completions.map(\.term), ["meet", "meeting", "monday"])
-        XCTAssertEqual(result.matchSet, 3)
+        XCTAssertEqual(result.completions.map(\.term), expectedTerms)
+        XCTAssertEqual(result.matchSet, expectedTerms.count)
         XCTAssertEqual(result.ranked.map(\.messageID), [1])
     }
 
