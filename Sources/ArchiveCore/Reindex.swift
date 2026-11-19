@@ -49,6 +49,11 @@ extension ArchiveStore {
                 processed += 1
             }
         }
+        if processed > 0 {
+            // The backfill re-indexed messages; refresh the as-you-type
+            // vocabulary tables built from their text (decision 0025).
+            try refreshAsYouTypeVocabulary()
+        }
         return processed
     }
 

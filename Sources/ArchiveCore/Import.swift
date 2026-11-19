@@ -263,6 +263,9 @@ public enum MailImporter {
             }
         }
         report.duration = Date().timeIntervalSince(start)
+        // As-you-type vocabulary (decision 0025): refresh the first-letter
+        // tables now that every row of this import is in the index.
+        try store.refreshAsYouTypeVocabulary()
         return report
     }
 
@@ -293,6 +296,9 @@ public enum MailImporter {
             report.failedFiles = [url.lastPathComponent]
         }
         report.duration = Date().timeIntervalSince(start)
+        // As-you-type vocabulary (decision 0025): refresh the first-letter
+        // tables now that every row of this import is in the index.
+        try store.refreshAsYouTypeVocabulary()
         return report
     }
 
@@ -350,6 +356,10 @@ public enum MailImporter {
         // span when it finds the first boundary, which happens inside next().
         report.skippedLeadingBytes = splitter.skippedLeadingBytes
         report.duration = Date().timeIntervalSince(start)
+        // As-you-type vocabulary (decision 0025): refresh the first-letter
+        // tables now that every row of this import is in the index. Kept
+        // out of the reported duration, which measures message ingestion.
+        try store.refreshAsYouTypeVocabulary()
         return report
     }
 
@@ -420,6 +430,11 @@ public enum MailImporter {
                 }
             }
             report.duration = Date().timeIntervalSince(start)
+            // As-you-type vocabulary (decision 0025): refresh the
+            // first-letter tables now that every row of this import is in
+            // the index. (The legacy-mbox path refreshes inside
+            // importMboxFile.)
+            try store.refreshAsYouTypeVocabulary()
             return report
         }
 
@@ -467,6 +482,9 @@ public enum MailImporter {
             report.failedFiles = [url.lastPathComponent]
         }
         report.duration = Date().timeIntervalSince(start)
+        // As-you-type vocabulary (decision 0025): refresh the first-letter
+        // tables now that every row of this import is in the index.
+        try store.refreshAsYouTypeVocabulary()
         return report
     }
 

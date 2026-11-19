@@ -495,11 +495,33 @@ public enum QueryCompiler {
     /// reply's quoted text — at quoted's low rank (DESIGN 6A).
     static let phraseColumns = "{subject from_name from_addr recipients body quoted attachments}"
 
-    public static func compile(_ node: SearchNode) throws -> CompiledQuery {
+    /// Compiles a parsed query. With `asYouType` the last text or phrase
+    /// clause in reading order carries the active prefix: its final token
+    /// compiles as an FTS5 prefix match (`kickof*`), so the ranked path
+    /// covers the word being typed while the gate allows it (decision 0025).
+    public static func compile(_ node: SearchNode, asYouType: Bool = false) throws -> CompiledQuery {
         var warnings: [String] = []
         let merged = Self.mergeAdjacentText(node)
-        let root = try compileNode(merged, into: &warnings)
+        let textCount = Self.countTextClauses(merged)
+        let prefixLast: Int? = asYouType && textCount > 0 ? textCount - 1 : nil
+        var seen = 0
+        let root = try compileNode(merged, prefixLast: prefixLast, seen: &seen, into: &warnings)
         return CompiledQuery(root: root, warnings: warnings)
+    }
+
+    /// Number of text and phrase clauses in a query tree, counted in
+    /// depth-first, left-to-right order.
+    static func countTextClauses(_ node: SearchNode) -> Int {
+        switch node {
+        case .and(let children), .or(let children):
+            return children.reduce(0) { $0 + countTextClauses($1) }
+        case .not(let inner):
+            return countTextClauses(inner)
+        case .clause(.text), .clause(.phrase):
+            return 1
+        case .clause:
+            return 0
+        }
     }
 
     /// Merges runs of adjacent unfielded free-text clauses into one clause,
@@ -546,27 +568,31 @@ public enum QueryCompiler {
         }
     }
 
-    static func compileNode(_ node: SearchNode, into warnings: inout [String]) throws -> CompiledNode {
+    static func compileNode(_ node: SearchNode, prefixLast: Int?, seen: inout Int, into warnings: inout [String]) throws -> CompiledNode {
         switch node {
         case .and(let children):
-            return .and(try children.map { try compileNode($0, into: &warnings) })
+            return .and(try children.map { try compileNode($0, prefixLast: prefixLast, seen: &seen, into: &warnings) })
         case .or(let children):
-            return .or(try children.map { try compileNode($0, into: &warnings) })
+            return .or(try children.map { try compileNode($0, prefixLast: prefixLast, seen: &seen, into: &warnings) })
         case .not(let inner):
-            return .not(try compileNode(inner, into: &warnings))
+            return .not(try compileNode(inner, prefixLast: prefixLast, seen: &seen, into: &warnings))
         case .clause(let clause):
-            return try compileClause(clause, into: &warnings)
+            return try compileClause(clause, prefixLast: prefixLast, seen: &seen, into: &warnings)
         }
     }
 
     // MARK: Clauses
 
-    static func compileClause(_ clause: Clause, into warnings: inout [String]) throws -> CompiledNode {
+    static func compileClause(_ clause: Clause, prefixLast: Int?, seen: inout Int, into warnings: inout [String]) throws -> CompiledNode {
         switch clause {
         case .text(let field, let raw):
-            return try textNode(field: field, raw: raw, phrase: false)
+            let prefix = seen == prefixLast
+            seen += 1
+            return try textNode(field: field, raw: raw, phrase: false, prefixLast: prefix)
         case .phrase(let field, let raw):
-            return try textNode(field: field, raw: raw, phrase: true)
+            let prefix = seen == prefixLast
+            seen += 1
+            return try textNode(field: field, raw: raw, phrase: true, prefixLast: prefix)
         case .from(let value):
             return fromNode(value)
         case .recipient(let kind, let value):
@@ -636,7 +662,7 @@ public enum QueryCompiler {
         }
     }
 
-    static func textNode(field: SearchField, raw: String, phrase: Bool) throws -> CompiledNode {
+    static func textNode(field: SearchField, raw: String, phrase: Bool, prefixLast: Bool = false) throws -> CompiledNode {
         let tokens = TokenPipeline.tokens(for: raw, field: textColumn(field))
         guard !tokens.isEmpty else {
             // Pure punctuation or noise: honest zero results, not "match all".
@@ -651,9 +677,19 @@ public enum QueryCompiler {
         case .body: columns = "{body}"
         }
         let inner = columns.dropFirst().dropLast()
-        let expression = phrase
-            ? "\"\(tokens.joined(separator: " "))\""
-            : tokens.joined(separator: " AND ")
+        let expression: String
+        if phrase {
+            let terms = tokens.joined(separator: " ")
+            // A phrase prefix puts the marker on the last token, outside
+            // the quotes, the FTS5 way: "budget looks fi"*.
+            expression = prefixLast ? "\"\(terms)\"*" : "\"\(terms)\""
+        } else if prefixLast {
+            var pieces = tokens
+            pieces[pieces.count - 1].append("*")
+            expression = pieces.joined(separator: " AND ")
+        } else {
+            expression = tokens.joined(separator: " AND ")
+        }
         // The trigram fallback matches substrings, so it works on the raw
         // text's folded form (punctuation survives), not on the query's
         // tokens alone: CJK tokens are two-character pairs, below the

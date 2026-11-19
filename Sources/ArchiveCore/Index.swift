@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 6
+    public static let version = 7
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -26,6 +26,7 @@ public enum IndexSchema {
         ("core-v4", coreV4),
         ("core-v5", coreV5),
         ("core-v6", coreV6),
+        ("core-v7", coreV7),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -232,6 +233,33 @@ public enum IndexSchema {
             SELECT id, threadID, julianday(COALESCE(dateSent, dateReceived))
             FROM message
             """)
+    }
+
+    /// core-v7: the as-you-type vocabulary tables (decision 0025). The
+    /// first_letter table holds, per leading letter, the total document
+    /// frequency of every term starting with that letter — the match-set
+    /// size the full ranked search gates on for a one-character prefix.
+    /// first_letter_terms holds the top-N terms per letter (by document
+    /// frequency) so the first keystroke returns completions from a small
+    /// indexed table instead of scanning the live FTS5 vocabulary. Both are
+    /// rebuilt from the current FTS5 vocabulary at the end of an import and
+    /// by the backfill; they never touch stored message rows.
+    private static func coreV7(_ db: Database) throws {
+        try db.create(table: "first_letter") { t in
+            t.column("letter", .text).notNull().primaryKey()
+            t.column("total_doc", .integer).notNull().defaults(to: 0)
+        }
+        try db.create(table: "first_letter_terms") { t in
+            t.column("letter", .text).notNull()
+            t.column("ord", .integer).notNull()
+            t.column("term", .text).notNull()
+            t.column("doc", .integer).notNull()
+            t.primaryKey(["letter", "ord"])
+        }
+        // Populate from the current vocabulary right away: an upgraded
+        // archive answers the first keystroke without waiting for the next
+        // import or backfill (decision 0025).
+        try Vocabulary.rebuildFirstLetterTable(in: db)
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

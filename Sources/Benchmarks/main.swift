@@ -4,17 +4,22 @@
 // then times two-word ranked queries against the live FTS5 index.
 //
 // Usage:
-//   bench-search prepare <archive-dir> <count> [seed]
-//   bench-search search  <archive-dir> [repeats]
-//   bench-search both    <archive-dir> <count> [repeats]
+//   bench-search prepare     <archive-dir> <count> [seed]
+//   bench-search search      <archive-dir> [repeats]
+//   bench-search both        <archive-dir> <count> [repeats]
+//   bench-search as-you-type <archive-dir> [repeats]
 //
 // `prepare` resumes: already-present messages count as duplicates and cost
 // only a hash lookup, so a killed run can be re-run with the same arguments.
 // Search budget verified here (ROADMAP M1 / DESIGN 6A): a full ranked page
 // (two-word query, limit 25) under 200 ms. The limit-10 pass is the same
-// shape and is informational only: DESIGN 6A's "first keystroke results
-// under 50 ms" budget is the as-you-type prefix-query path, which the
-// search core does not implement yet (M2 work) — not this shape.
+// shape and is informational only.
+//
+// As-you-type budget (DESIGN 6A): first-keystroke results under 50 ms on a
+// 1M-message archive. The phase measures 1-character (pure completion from
+// the first-letter table), 2-character (pure completion from fts5vocab),
+// and 4-character (gated ranked prefix search) prefixes, each cycling
+// through 20 queries and repeating 300 times.
 
 import ArchiveCore
 import Foundation
@@ -406,6 +411,109 @@ func searchPhase(_ archiveDir: String, _ repeats: Int) throws {
     if !rankedOK { exit(1) }
 }
 
+/// DESIGN 6A first-keystroke budget: results under 50 ms on a 1M-message
+/// archive. Measures three shapes:
+///   1-char — pure completion from the first-letter table (gate always
+///           blocks ranked; the match set is huge).
+///   2-char — pure completion from a live fts5vocab range (gate still
+///           blocks on a 1M archive, but the path is different).
+///   4-char — gated ranked prefix search (the prefix's match set is small
+///            enough that the gate lets it through).
+func asYouTypePhase(_ archiveDir: String, _ repeats: Int) throws {
+    let url = URL(fileURLWithPath: archiveDir)
+    let store = try ArchiveStore.open(at: url)
+    let total = try store.countMessages()
+    print("== archive: \(total) messages")
+
+    // The import path rebuilds the first-letter table at the end of the
+    // import (decision 0025); do the same here so that any archive —
+    // including ones prepared before core-v7 — can serve 1-character
+    // completions.
+    try store.refreshAsYouTypeVocabulary()
+
+    // Build three deterministic query sets from the corpus vocabulary.
+    let words = makeVocabulary()
+    // 1-char: first-letter of the first 20 vocabulary words (head → common).
+    var oneChar: [String] = []
+    for i in 0..<20 {
+        let c = String(words[i].prefix(1))
+        if !oneChar.contains(c) { oneChar.append(c) }
+    }
+    // 2-char: first two letters of the first 20 vocabulary words.
+    var twoChar: [String] = []
+    for i in 0..<20 {
+        let p = String(words[i].prefix(2))
+        if !twoChar.contains(p) { twoChar.append(p) }
+    }
+    // 4-char: first four letters of the last 20 vocabulary words (tail → rare).
+    var fourChar: [String] = []
+    for i in (words.count - 20)..<words.count {
+        let p = String(words[i].prefix(4))
+        if !fourChar.contains(p) { fourChar.append(p) }
+    }
+
+    // Warm-up pass: one timed call per query to prime caches.
+    for q in oneChar + twoChar + fourChar {
+        _ = try store.searchAsYouType(q)
+    }
+
+    // Timed passes.
+    var oneCharMs: [Double] = []
+    var oneCharCompletions = 0
+    var oneCharRanked = 0
+    var twoCharMs: [Double] = []
+    var twoCharCompletions = 0
+    var twoCharRanked = 0
+    var fourCharMs: [Double] = []
+    var fourCharCompletions = 0
+    var fourCharRanked = 0
+
+    for i in 0..<repeats {
+        let q1 = oneChar[i % oneChar.count]
+        let t1a = monotonicMs()
+        let r1 = try store.searchAsYouType(q1)
+        let t1b = monotonicMs()
+        oneCharMs.append(t1b - t1a)
+        oneCharCompletions += r1.completions.count
+        if !r1.ranked.isEmpty { oneCharRanked += 1 }
+
+        let q2 = twoChar[i % twoChar.count]
+        let t2a = monotonicMs()
+        let r2 = try store.searchAsYouType(q2)
+        let t2b = monotonicMs()
+        twoCharMs.append(t2b - t2a)
+        twoCharCompletions += r2.completions.count
+        if !r2.ranked.isEmpty { twoCharRanked += 1 }
+
+        let q4 = fourChar[i % fourChar.count]
+        let t4a = monotonicMs()
+        let r4 = try store.searchAsYouType(q4)
+        let t4b = monotonicMs()
+        fourCharMs.append(t4b - t4a)
+        fourCharCompletions += r4.completions.count
+        if !r4.ranked.isEmpty { fourCharRanked += 1 }
+    }
+
+    let oneP95 = percentile(oneCharMs.sorted(), 95)
+    let twoP95 = percentile(twoCharMs.sorted(), 95)
+    let fourP95 = percentile(fourCharMs.sorted(), 95)
+
+    report("1-char completion (first keystroke)", oneCharMs)
+    report("2-char completion (fts5vocab range)", twoCharMs)
+    report("4-char prefix (gated ranked)", fourCharMs)
+
+    print(String(format: "1-char: %d completions total, %d gate-passed (ranked)", oneCharCompletions, oneCharRanked))
+    print(String(format: "2-char: %d completions total, %d gate-passed (ranked)", twoCharCompletions, twoCharRanked))
+    print(String(format: "4-char: %d completions total, %d gate-passed (ranked)", fourCharCompletions, fourCharRanked))
+
+    let budget = 50.0
+    let oneOK = oneP95 < budget
+    let twoOK = twoP95 < budget
+    let fourOK = fourP95 < budget
+    print("== budget: 1-char p95 \(String(format: "%.1f", oneP95)) ms (\(oneOK ? "PASS" : "FAIL"), <\(budget))  2-char p95 \(String(format: "%.1f", twoP95)) ms (\(twoOK ? "PASS" : "FAIL"), <\(budget))  4-char p95 \(String(format: "%.1f", fourP95)) ms (\(fourOK ? "PASS" : "FAIL"), <\(budget))")
+    if !oneOK || !twoOK || !fourOK { exit(1) }
+}
+
 func maxRSSKB() -> Int {
     #if canImport(Darwin)
     var info = mach_task_basic_info_data_t()
@@ -469,7 +577,7 @@ func parseCrashStage(_ args: [String]) -> ([String], String?) {
 }
 
 guard let command = args.first else {
-    print("usage: bench-search prepare|search|both <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]")
+    print("usage: bench-search prepare|search|both|as-you-type <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]")
     exit(2)
 }
 do {
@@ -495,6 +603,8 @@ do {
         try searchPhase(parsed[1], parsed.count > 3 ? Int(parsed[3])! : 300)
     case "import":
         try importFixture(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42, killAfter: killAfter, crashStage: crashStage)
+    case "as-you-type":
+        try asYouTypePhase(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 300)
     default:
         print("unknown command: \(command)")
         exit(2)

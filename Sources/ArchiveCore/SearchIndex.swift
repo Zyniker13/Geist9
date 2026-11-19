@@ -372,4 +372,93 @@ extension ArchiveStore {
         }
         return SearchResults(hits: hits, warnings: compiled.warnings)
     }
+
+    /// The as-you-type search answer (decision 0025): term completions for
+    /// the active prefix, the match-set size (the gate), and ranked hits when
+    /// the gate passes. The first keystroke returns completions under 50 ms;
+    /// full ranked results come once the prefix narrows the match set.
+    public struct AsYouTypeResults: Sendable, Equatable {
+        public var completions: [TermCompletion]
+        public var matchSet: Int
+        public var ranked: [SearchHit]
+
+        public init(completions: [TermCompletion], matchSet: Int, ranked: [SearchHit]) {
+            self.completions = completions
+            self.matchSet = matchSet
+            self.ranked = ranked
+        }
+    }
+
+    /// Parses and runs one as-you-type query (decision 0025). The active
+    /// prefix is the last token of the last text clause; completions are
+    /// served from the vocabulary. If the match-set size is at or below the
+    /// gate threshold, the full ranked search runs and its hits are returned
+    /// alongside the completions. A committed query (ending in whitespace, a
+    /// quote, or another terminator) runs the ranked search without
+    /// completions, as if entered; a malformed in-flight query returns empty
+    /// rather than raising, so typing never surfaces an error.
+    public func searchAsYouType(_ query: String, limit: Int = 200) throws -> AsYouTypeResults {
+        guard let node = try? QueryParser.parse(query) else {
+            return AsYouTypeResults(completions: [], matchSet: 0, ranked: [])
+        }
+        guard let prefix = Self.activePrefix(of: node), !Self.isCommitted(query) else {
+            // No active prefix: the query is committed (it ends in a
+            // terminator, so its last term is final) or it has no text
+            // clause. Either way the ranked search runs as if the query had
+            // been entered; matchSet 0 means "not computed" — callers use
+            // `ranked`, not the gate.
+            let compiled = try QueryCompiler.compile(node)
+            let hits = try db.read { db in
+                try SearchExecutor.run(compiled.root, in: db, limit: limit)
+            }
+            return AsYouTypeResults(completions: [], matchSet: 0, ranked: hits)
+        }
+        let completion = try db.read { db in
+            try Vocabulary.complete(prefix: prefix, in: db)
+        }
+        var ranked: [SearchHit] = []
+        if completion.matchSet <= Vocabulary.gateThreshold {
+            let compiled = try QueryCompiler.compile(node, asYouType: true)
+            ranked = try db.read { db in
+                try SearchExecutor.run(compiled.root, in: db, limit: limit)
+            }
+        }
+        return AsYouTypeResults(
+            completions: completion.completions,
+            matchSet: completion.matchSet,
+            ranked: ranked
+        )
+    }
+
+    /// True when the query ends in a terminator rather than mid-word: the
+    /// last term is final, so no completions are offered for it.
+    static func isCommitted(_ query: String) -> Bool {
+        guard let scalar = query.unicodeScalars.last else { return true }
+        return !CharacterSet.alphanumerics.contains(scalar)
+    }
+
+    /// The active prefix: the last token of the last text clause in the query
+    /// tree, in reading order. nil when the query has no text clause.
+    private static func activePrefix(of node: SearchNode) -> String? {
+        switch node {
+        case .and(let children), .or(let children):
+            var last: String? = nil
+            for child in children {
+                if let prefix = activePrefix(of: child) {
+                    last = prefix
+                }
+            }
+            return last
+        case .not(let child):
+            return activePrefix(of: child)
+        case .clause(let clause):
+            switch clause {
+            case .text(_, let raw), .phrase(_, let raw):
+                let tokens = TokenPipeline.tokens(for: raw, field: .body)
+                return tokens.last
+            default:
+                return nil
+            }
+        }
+    }
 }
