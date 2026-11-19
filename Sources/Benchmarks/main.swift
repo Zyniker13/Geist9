@@ -409,7 +409,12 @@ func maxRSSKB() -> Int {
     return result == KERN_SUCCESS ? Int(info.resident_size) : 0
     #else
     var usage = rusage()
+    // Linux: RUSAGE_SELF is a __rusage_who enum; the C function wants Int32.
+    #if os(Linux)
+    getrusage(__rusage_who_t(RUSAGE_SELF.rawValue), &usage)
+    #else
     getrusage(RUSAGE_SELF, &usage)
+    #endif
     return Int(usage.ru_maxrss)
     #endif
 }
