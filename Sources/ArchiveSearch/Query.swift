@@ -76,7 +76,8 @@ public enum Clause: Sendable, Equatable {
     case smaller(Int)
     /// Exact domain of the From address (subdomains excluded).
     case domain(String)
-    /// Money amounts: accepted by the grammar, unbacked in M1.
+    /// Money amounts and currencies: extracted at ingest into the entity
+    /// store (DESIGN 6A), queried with numeric comparisons.
     case amount(String)
 }
 
@@ -471,7 +472,8 @@ public indirect enum CompiledNode: Sendable, Equatable {
 
 public struct CompiledQuery: Sendable, Equatable {
     public var root: CompiledNode
-    /// Operators that parse but have nothing behind them yet (e.g. amount).
+    /// Operators whose value parsed to nothing usable (e.g. an unparseable
+    /// `amount:` value); each such clause matches nothing on its own.
     public var warnings: [String]
 
     public init(root: CompiledNode, warnings: [String]) {
@@ -711,9 +713,66 @@ public enum QueryCompiler {
                 sql: "m.fromEmail LIKE ? ESCAPE '\\'",
                 arguments: ["%@\(escapeLike(TokenPipeline.folded(value)))"]
             ))
-        case .amount:
-            warnings.append("amount: searches extracted entities, which are not indexed yet; this part matches nothing")
-            return .filter(SQLFilter(sql: "1 = 0", arguments: []))
+        case .amount(let raw):
+            guard let comparison = AmountComparison(raw) else {
+                warnings.append(
+                    "amount: expected a number, optionally preceded by >, >=, <, <= or = (like amount:>100); this part matches nothing"
+                )
+                return .filter(SQLFilter(sql: "1 = 0", arguments: []))
+            }
+            return .filter(SQLFilter(
+                sql: """
+                EXISTS (SELECT 1 FROM message_entity e WHERE e.messageID = m.id \
+                AND e.kind = 'amount' AND e.normalized \(comparison.op) ?)
+                """,
+                arguments: [comparison.bound]
+            ))
+        }
+    }
+
+    /// The parsed value of an `amount:` query: an optional comparison
+    /// operator (defaults to equals) and a decimal number. Thousands
+    /// separators in the query are accepted and dropped; anything else —
+    /// "abc", ">", "" — fails to parse and the compiler warns.
+    struct AmountComparison: Equatable, Sendable {
+        /// One of "=", ">", "<", ">=", "<=", substituted into the SQL
+        /// predicate from this closed set.
+        var op: String
+        var value: Double
+
+        /// The parameter bound into SQL: fixed six-decimal form so the
+        /// query path never depends on Double's default description.
+        var bound: String { String(format: "%.6f", value) }
+
+        init?(_ raw: String) {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            var op = "="
+            var rest = trimmed[...]
+            for candidate in [">=", "<=", ">", "<", "="] where trimmed.hasPrefix(candidate) {
+                op = candidate
+                rest = trimmed.dropFirst(candidate.count)
+                break
+            }
+            let numberText = rest.trimmingCharacters(in: .whitespaces)
+                .replacingOccurrences(of: ",", with: "")
+            guard Self.isPlainNumber(numberText), let value = Double(numberText) else {
+                return nil
+            }
+            self.op = op
+            self.value = value
+        }
+
+        private static func isPlainNumber(_ s: String) -> Bool {
+            var dots = 0
+            for character in s {
+                if character == "." {
+                    dots += 1
+                    if dots > 1 { return false }
+                    continue
+                }
+                guard character.isASCII, character.isNumber else { return false }
+            }
+            return !s.isEmpty
         }
     }
 

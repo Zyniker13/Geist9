@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 10
+    public static let version = 11
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -30,6 +30,7 @@ public enum IndexSchema {
         ("core-v8", coreV8),
         ("core-v9", coreV9),
         ("core-v10", coreV10),
+        ("core-v11", coreV11),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -346,6 +347,30 @@ public enum IndexSchema {
             """)
         try db.execute(sql: "DROP TABLE message_text")
         try db.execute(sql: "ALTER TABLE message_text_new RENAME TO message_text")
+    }
+
+    /// core-v11: the entity store (DESIGN 6A, M2). Entities recognized at
+    /// ingest — the first kind is amounts and currencies — live in their own
+    /// relational table so numeric comparisons (`amount:>100`) can run as
+    /// plain SQL EXISTS predicates alongside the FTS5 text match. Rows
+    /// cascade with their message; the text pipeline version bump
+    /// (TextIndexVersion.v6) makes the backfill re-index older rows from
+    /// their stored bytes to populate the table. No stored message bytes
+    /// are touched.
+    private static func coreV11(_ db: Database) throws {
+        try db.create(table: "message_entity") { t in
+            t.column("messageID", .integer).notNull().references("message", onDelete: .cascade)
+            t.column("kind", .text).notNull()
+            t.column("value", .text).notNull()
+            t.column("normalized", .double).notNull()
+            t.column("currency", .text)
+        }
+        try db.create(
+            index: "message_entity_lookup", on: "message_entity", columns: ["kind", "normalized"]
+        )
+        try db.create(
+            index: "message_entity_message", on: "message_entity", columns: ["messageID"]
+        )
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

@@ -507,10 +507,10 @@ final class SearchTests: XCTestCase {
         XCTAssertTrue(try hits("subject:zzz").isEmpty)
     }
 
-    func testAmountOperatorWarnsAndMatchesNothing() throws {
+    func testAmountOperatorWithNoEntityRowsIsQuiet() throws {
         let results = try store.search("amount:3")
         XCTAssertTrue(results.hits.isEmpty)
-        XCTAssertFalse(results.warnings.isEmpty)
+        XCTAssertTrue(results.warnings.isEmpty)
     }
 
     // MARK: Duplicate ingest

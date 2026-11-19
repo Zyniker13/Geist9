@@ -195,4 +195,34 @@ final class CompilerTests: XCTestCase {
         let leaf = try leaf("from:meetings")
         XCTAssertEqual(leaf.expression, "({from_name from_addr} : meetings OR {from_name_stem} : meet)")
     }
+
+    // Decision 0031: `amount:` compiles to an EXISTS subquery over the
+    // entity table so it runs as one indexed lookup, not a table scan.
+    func testAmountCompilesToIndexedEntitySubquery() throws {
+        let node = try QueryParser.parse("amount:>1,234.5")
+        let compiled = try QueryCompiler.compile(node!)
+        guard case .filter(let filter) = compiled.root else {
+            XCTFail("expected a filter for amount:, got \(compiled.root)")
+            return
+        }
+        XCTAssertEqual(
+            filter.sql,
+            "EXISTS (SELECT 1 FROM message_entity e WHERE e.messageID = m.id"
+                + " AND e.kind = 'amount' AND e.normalized > ?)")
+        XCTAssertEqual(filter.arguments, ["1234.500000"])
+    }
+
+    // A value that parses to no comparison warns and matches nothing,
+    // rather than being treated as text.
+    func testUnparseableAmountMatchesNothingWithAWarning() throws {
+        let node = try QueryParser.parse("amount:abc")
+        let compiled = try QueryCompiler.compile(node!)
+        guard case .filter(let filter) = compiled.root else {
+            XCTFail("expected a filter for amount:, got \(compiled.root)")
+            return
+        }
+        XCTAssertEqual(filter.sql, "1 = 0")
+        XCTAssertTrue(filter.arguments.isEmpty)
+        XCTAssertFalse(compiled.warnings.isEmpty)
+    }
 }

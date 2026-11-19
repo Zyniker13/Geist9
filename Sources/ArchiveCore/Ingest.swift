@@ -45,6 +45,12 @@ struct SearchTokens: Sendable {
     /// are high-signal text whose morphology queries must reach.
     var fromNameStem = ""
 
+    /// Entities (DESIGN 6A, M2): amounts and currencies recognized in the
+    /// message's subject and search text, stored in message_entity for the
+    /// amount: operator. Extracted here, where tokenization happens, so
+    /// ingest and backfill share one path.
+    var entities: [EntityHit] = []
+
     init() {}
 
     init(_ message: IngestedMessage) {
@@ -128,6 +134,13 @@ struct SearchTokens: Sendable {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         self.trigramAttachments = TokenPipeline.folded(attachmentSource)
+
+        // Entities (DESIGN 6A, M2): extracted from the same text the index
+        // gets — subject plus the search text — as pure CPU, no extra pass
+        // over the stored bytes.
+        self.entities = EntityExtraction.entities(
+            forSubject: message.record.subject, searchText: search
+        )
     }
 
     /// The distinct FTS5 terms the message's text rows hold — the set this
@@ -543,6 +556,27 @@ extension ArchiveStore {
                 tokens.trigramAttachments,
             ]
         )
+        // Entities (DESIGN 6A, M2): rows cascade with the message, so the
+        // delete is a formality for re-ingests — kept explicit so a re-index
+        // of one message can never leave a stale entity row behind.
+        try db.execute(
+            sql: "DELETE FROM message_entity WHERE messageID = ?", arguments: [messageRowID]
+        )
+        for entity in tokens.entities {
+            try db.execute(
+                sql: """
+                INSERT INTO message_entity (messageID, kind, value, normalized, currency)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    messageRowID,
+                    entity.kind.rawValue,
+                    entity.value,
+                    entity.normalized,
+                    entity.currency,
+                ]
+            )
+        }
     }
 
     // MARK: Vocabulary deltas (decision 0027)
