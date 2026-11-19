@@ -6,6 +6,7 @@
 
 import Foundation
 import MailMIME
+import ArchiveExtract
 
 /// The text the search index gets from one message: the body a person
 /// wrote (ranks high) and quoted or signature text (ranks low). The
@@ -18,8 +19,9 @@ public struct SearchText: Sendable, Equatable {
     public var body: String?
     /// Quoted replies and signature lines; nil when empty.
     public var quoted: String?
-    /// The searchable text of the message's text/* attachment parts
-    /// (decision 0029); nil when there is none.
+    /// The searchable text of the message's attachment parts: text/*
+    /// parts (decision 0029) and extracted container text (decision 0036);
+    /// nil when there is none.
     public var attachments: String?
 
     public init(body: String?, quoted: String?, attachments: String? = nil) {
@@ -234,23 +236,35 @@ public enum MailBridge {
     /// before this, and the cap bounds ingest cost.
     static let maxAttachmentTextLength = 1_000_000
 
-    /// The searchable text of the message's text/* attachment parts
-    /// (decision 0029): plain text, CSV and other text/* parts in part
-    /// order, HTML reduced, capped at `maxAttachmentTextLength`. Per the
-    /// DESIGN 6 attachment rule a text/* leaf counts as an attachment when
-    /// its disposition says so; text leaves without a disposition are the
-    /// body, which the body columns already cover.
+    /// The searchable text of the message's attachment parts (decision
+    /// 0029, extended by 0036): text/* parts in part order, HTML reduced,
+    /// plus the extracted text of Office Open XML and OpenDocument
+    /// container attachments, capped at `maxAttachmentTextLength`. Per the
+    /// DESIGN 6 attachment rule a leaf counts as an attachment when its
+    /// disposition says so; text leaves without a disposition are the body,
+    /// which the body columns already cover. A container that cannot be
+    /// read strictly yields no text (decision 0036): the part is still
+    /// listed in the attachment row, but nothing silently wrong reaches the
+    /// index.
     static func extractAttachmentText(_ root: MIMEPart) -> String? {
         var pieces: [String] = []
         var total = 0
         walkLeaves(root) { part in
             guard total < Self.maxAttachmentTextLength else { return }
+            guard part.contentDisposition["content-disposition"] == "attachment" else { return }
             let (main, parameters) = part.contentType
-            guard main.hasPrefix("text/"),
-                  part.contentDisposition["content-disposition"] == "attachment"
-            else { return }
-            let decoded = Charset.decode(parameters["charset"], Array(part.decodedBody))
-            let text = main == "text/html" ? htmlToText(decoded) : decoded
+            let text: String
+            if main.hasPrefix("text/") {
+                let decoded = Charset.decode(parameters["charset"], Array(part.decodedBody))
+                text = main == "text/html" ? htmlToText(decoded) : decoded
+            } else {
+                guard let extracted = containerAttachmentText(
+                    main: main,
+                    filename: decodedFilename(part),
+                    data: part.decodedBody
+                ) else { return }
+                text = extracted
+            }
             let remaining = Self.maxAttachmentTextLength - total
             let clipped = text.count > remaining ? String(text.prefix(remaining)) : text
             total += clipped.count
@@ -259,6 +273,36 @@ public enum MailBridge {
         let joined = pieces.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return joined.isEmpty ? nil : joined
+    }
+
+    /// Container attachment formats whose text we extract (DESIGN 6A,
+    /// M2.3): Office Open XML packages and OpenDocument packages, keyed by
+    /// MIME type first and filename extension as a fallback for broken
+    /// MIME parts. PDF, images and iWork previews return nil until their
+    /// extractors land; the attachment row still lists the part.
+    static func containerAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
+        let ooxmlTypes: Set<String> = [
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ]
+        let odfTypes: Set<String> = [
+            "application/vnd.oasis.opendocument.text",
+            "application/vnd.oasis.opendocument.spreadsheet",
+            "application/vnd.oasis.opendocument.presentation",
+            "application/vnd.oasis.opendocument.graphics",
+        ]
+        let extensionName = filename
+            .flatMap { $0.split(separator: ".").last.map(String.init) }
+            .map { $0.lowercased() }
+        let payload = Data(data)
+        if ooxmlTypes.contains(main) || ["docx", "xlsx", "pptx"].contains(extensionName ?? "") {
+            return OfficeExtract.openXMLText(payload)
+        }
+        if odfTypes.contains(main) || ["odt", "ods", "odp", "odg"].contains(extensionName ?? "") {
+            return OfficeExtract.openDocumentText(payload)
+        }
+        return nil
     }
 
     /// Splits body text at the first quote or signature marker: everything

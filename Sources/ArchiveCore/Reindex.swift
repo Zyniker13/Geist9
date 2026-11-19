@@ -30,7 +30,12 @@ enum TextIndexVersion {
     /// land in message_entity; the backfill re-indexes older rows from
     /// their stored bytes to populate it.
     static let v6 = 6
-    static var current: Int { v6 }
+    /// M2.3: the extracted text of Office Open XML and OpenDocument
+    /// container attachments joins the attachments column (decision 0036);
+    /// the backfill re-indexes older rows from their stored bytes to add
+    /// it.
+    static let v7 = 7
+    static var current: Int { v7 }
 }
 
 extension ArchiveStore {

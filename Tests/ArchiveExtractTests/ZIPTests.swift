@@ -234,7 +234,8 @@ struct ZIPTests {
 /// Minimal ZIP writer for test fixtures: stored entries, raw-deflate entries
 /// whose bytes are precomputed, correct CRC-32 fields, and the few header
 /// variations the reader must tolerate (UTF-8 name flag, data descriptors).
-private enum ZIPBuilder {
+/// Shared across the ArchiveExtract test files (internal, not private).
+enum ZIPBuilder {
     struct Entry {
         enum Kind {
             case stored(payload: [UInt8])
@@ -249,10 +250,14 @@ private enum ZIPBuilder {
         let inflatedSize: Int
         let dataDescriptor: Bool
 
-        static func stored(_ name: String, _ payload: [UInt8], utf8Flag: Bool = false) -> Entry {
+        static func stored(
+            _ name: String, _ payload: [UInt8], utf8Flag: Bool = false,
+            declaredInflatedSize: Int? = nil
+        ) -> Entry {
             Entry(
                 name: Array(name.utf8), utf8Flag: utf8Flag, kind: .stored(payload: payload),
-                crc: CRC32.checksum(payload), inflatedSize: payload.count, dataDescriptor: false
+                crc: CRC32.checksum(payload), inflatedSize: declaredInflatedSize ?? payload.count,
+                dataDescriptor: false
             )
         }
 

@@ -82,6 +82,7 @@ let coreTargets: [Target] = [
         .product(name: "Crypto", package: "swift-crypto"),
         "MailMIME",
         "ArchiveSearch",
+        "ArchiveExtract",
     ]),
     // parser, charsets, threading (DESIGN 7)
     .target(name: "MailMIME"),

@@ -54,7 +54,7 @@ public struct ZIPEntry {
 /// offsets, so the reader refuses rather than guess.
 public enum ZIP {
     /// Allocation limits guarding against zip bombs and hostile attachments.
-    public struct Limits {
+    public struct Limits: Sendable {
         /// Cap on the sum of inflated entry sizes across the whole archive.
         public let totalInflatedBytes: Int
         /// Cap on the inflated size of a single entry.
@@ -71,6 +71,16 @@ public enum ZIP {
             self.perEntryInflatedBytes = perEntryInflatedBytes
             self.entryCount = entryCount
         }
+
+        /// Preset for reading message attachments during indexing: far
+        /// tighter than the general default, since a real document package
+        /// is orders of magnitude smaller and a hostile one must be bounded
+        /// before any bytes are inflated (decision 0036).
+        public static let attachments = Limits(
+            totalInflatedBytes: 24_000_000,
+            perEntryInflatedBytes: 12_000_000,
+            entryCount: 256
+        )
     }
 
     /// Reads every entry of the archive.
