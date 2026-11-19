@@ -75,3 +75,45 @@ record does.
   that were never going to be fast enough.
 - Ingest is unaffected; the trigram table stays for substring and CJK
   retrieval, distinct from the as-you-type path.
+
+## Addendum (2026-11-19): spike 002 result
+
+Spike 002 (`Spikes/PrefixWalkSpike`) measured the C top-k walk over the
+public API on the 1M probe corpus (release build, p50 over 5 repeats):
+
+- **1-char prefixes: walk-only floor 766–1748 ms** (15–35× over budget);
+  full scoring 1484–2268 ms. Walk-only skips all scoring, so it is the
+  lower bound of any public-API approach.
+- **2-char prefixes: walk-only floor 110–269 ms** (2–5× over); full
+  scoring 668–1049 ms.
+- Per-instance cost is not the problem (90–500 ns/instance; a
+  single-term walk runs at ~30 ns/doc). The cost is prefix expansion:
+  `c*` expands to 227 of the corpus's 11,980 terms, and the union walk
+  over their posting lists costs ~1.7 µs/doc — ~60× the single-term
+  per-doc cost.
+- The C walk's BM25 mirror matches SQL `bm25()` exactly (tie-aware
+  PASS), so the measurements are on correct results.
+- `fts5vocab` range scans (no postings walked): 22–31 ms for 2-char
+  (under budget), 130–165 ms for 1-char (over budget; the range covers
+  ~227 terms plus an `ORDER BY doc DESC` sort).
+
+**Verdict: the public-API C walk is INVALIDATED as the first-keystroke
+path.** The cheaper per-instance scoring variant named in the spike
+plan (`xInstCount`-only) is moot: the walk-only floor alone is 3–35×
+over budget.
+
+The fallback named in this record is now the design direction:
+**vocabulary-gated as-you-type**. The first-keystroke response is term
+completions (no postings walked): 1-char from a precomputed
+first-letter table (point lookup, sub-ms), 2-char+ from a live
+`fts5vocab` range scan (measured 22–31 ms, under budget). Ranked
+messages remain the committed-query path (200 ms budget; M1 benchmark
+p95 107.6 ms PASS).
+
+**Budget re-frame proposed to the maintainer** (STATUS.md, "Needs the
+Maintainer"): first-keystroke "results" are the completion list; ranked
+prefix results are excluded from the as-you-type budget, because a
+1-char prefix matches ~1M messages and even the bare walk takes 1.5 s —
+no ranked result set for a 1-char prefix can exist under 50 ms on this
+corpus. If the maintainer rejects the re-frame, the as-you-type budget
+is unmeetable as written and the DESIGN 6A line needs a correction.
