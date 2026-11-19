@@ -828,4 +828,37 @@ final class SearchTests: XCTestCase {
             "the backfill must restore attachment text from the stored bytes"
         )
     }
+
+    // Regression (judged set q067, decision 0030): a sender display name's
+    // morphology must be reachable — "nordwind versicherung" must find a
+    // message from "Nordwind Versicherungen". The exact path stays
+    // non-empty here (the first message matches it), so the trigram
+    // fallback must not rescue the second one: only a sender stem column
+    // can.
+    func testSenderNameStemFormIsSearchable() throws {
+        let a = try ingest("""
+        Message-ID: <sender-stem-a@example.org>
+        Date: Fri, 01 Mar 2024 14:35:00 +0000
+        From: Nordwind Versicherungen <claims@nordwind.example.org>
+        To: alice@example.com
+        Subject: Versicherung: Regulierung läuft
+
+        Die Regulierung läuft.
+        """)
+        let b = try ingest("""
+        Message-ID: <sender-stem-b@example.org>
+        Date: Mon, 19 Feb 2024 15:50:00 +0000
+        From: Nordwind Versicherungen <claims@nordwind.example.org>
+        To: alice@example.com
+        Subject: Schadensbericht zum Wasserrohrbruch
+
+        Im Anhang finden Sie den Schadensbericht.
+        """)
+        let found = try idsMatching("nordwind versicherung")
+        XCTAssertTrue(found.contains(a))
+        XCTAssertTrue(
+            found.contains(b),
+            "the sender name's stem form must reach the sender stem column"
+        )
+    }
 }

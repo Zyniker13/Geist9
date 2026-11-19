@@ -38,24 +38,24 @@ final class AsYouTypeCompilerTests: XCTestCase {
         XCTAssertEqual(
             try expressions("kickoff budget", asYouType: true),
             ["((\(QueryCompiler.bareColumns) : kickoff"
-                + " OR {subject_stem body_stem} : kickoff)"
+                + " OR {subject_stem body_stem from_name_stem} : kickoff)"
                 + " AND (\(QueryCompiler.bareColumns) : budget*"
-                + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*)))"])
+                + " OR {subject_stem body_stem from_name_stem} : (budget* OR bud* OR budg*)))"])
     }
 
     func testCommittedCompileNeverMarksAPrefix() throws {
         XCTAssertEqual(
             try expressions("kickoff budget"),
             ["((\(QueryCompiler.bareColumns) : kickoff"
-                + " OR {subject_stem body_stem} : kickoff)"
+                + " OR {subject_stem body_stem from_name_stem} : kickoff)"
                 + " AND (\(QueryCompiler.bareColumns) : budget"
-                + " OR {subject_stem body_stem} : budget))"])
+                + " OR {subject_stem body_stem from_name_stem} : budget))"])
         XCTAssertEqual(
             try expressions("kickoff budget", asYouType: false),
             ["((\(QueryCompiler.bareColumns) : kickoff"
-                + " OR {subject_stem body_stem} : kickoff)"
+                + " OR {subject_stem body_stem from_name_stem} : kickoff)"
                 + " AND (\(QueryCompiler.bareColumns) : budget"
-                + " OR {subject_stem body_stem} : budget))"])
+                + " OR {subject_stem body_stem from_name_stem} : budget))"])
         // Decision 0026: the folded phrase stays adjacent on the original
         // columns; the per-language stem phrase searches the stem columns
         // ("looks" stems to "look", so messages indexed as "budget look fi"
@@ -73,7 +73,7 @@ final class AsYouTypeCompilerTests: XCTestCase {
         XCTAssertEqual(
             try expressions("kick", asYouType: true),
             ["(\(QueryCompiler.bareColumns) : kick*"
-                + " OR {subject_stem body_stem} : (kick* OR kic*))"])
+                + " OR {subject_stem body_stem from_name_stem} : (kick* OR kic*))"])
     }
 
     func testPrefixMarksOnlyTheLastClause() throws {
@@ -81,7 +81,7 @@ final class AsYouTypeCompilerTests: XCTestCase {
             try expressions("subject:kick budget", asYouType: true),
             ["({subject} : kick OR {subject_stem} : kick)",
              "(\(QueryCompiler.bareColumns) : budget*"
-                + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*))"])
+                + " OR {subject_stem body_stem from_name_stem} : (budget* OR bud* OR budg*))"])
     }
 
     func testNegatedEarlierTermStaysExactWhileTheLastGetsThePrefix() throws {
@@ -89,9 +89,9 @@ final class AsYouTypeCompilerTests: XCTestCase {
             try expressions("-kick budget", asYouType: true),
             [
                 "(\(QueryCompiler.bareColumns) : kick"
-                    + " OR {subject_stem body_stem} : kick)",
+                    + " OR {subject_stem body_stem from_name_stem} : kick)",
                 "(\(QueryCompiler.bareColumns) : budget*"
-                    + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*))",
+                    + " OR {subject_stem body_stem from_name_stem} : (budget* OR bud* OR budg*))",
             ])
     }
 
@@ -116,7 +116,7 @@ final class AsYouTypeCompilerTests: XCTestCase {
                 "(\(QueryCompiler.phraseColumns) : \"kickoff meeting\""
                     + " OR {subject_stem body_stem quoted_stem} : \"kickoff meet\")",
                 "(\(QueryCompiler.bareColumns) : budget*"
-                    + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*))",
+                    + " OR {subject_stem body_stem from_name_stem} : (budget* OR bud* OR budg*))",
             ])
     }
 

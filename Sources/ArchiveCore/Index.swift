@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 9
+    public static let version = 10
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -29,6 +29,7 @@ public enum IndexSchema {
         ("core-v7", coreV7),
         ("core-v8", coreV8),
         ("core-v9", coreV9),
+        ("core-v10", coreV10),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -313,6 +314,38 @@ public enum IndexSchema {
             CREATE TABLE vocabulary(term TEXT PRIMARY KEY, doc INTEGER NOT NULL) WITHOUT ROWID
             """)
         try Vocabulary.rebuildAll(in: db)
+    }
+
+    /// core-v10: the sender-name stem column (decision 0030). Decision 0026
+    /// stemmed subject, body, and quoted; sender display names kept only
+    /// their exact folded tokens, so a query form could not reach a
+    /// sender's morphology ("Nordwind Versicherung" could not find a
+    /// sender named "Nordwind Versicherungen"). FTS5 tables cannot be
+    /// widened in place: a wider copy is created, all ten existing columns
+    /// are copied row for row (rowid preserved), and the copy is renamed
+    /// over the original. The new column stays empty here; the text
+    /// pipeline version bump (TextIndexVersion.v5) makes the backfill
+    /// re-index every row from the stored bytes and populate it. No stored
+    /// message bytes are touched.
+    private static func coreV10(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE VIRTUAL TABLE message_text_new USING fts5(
+                subject, from_name, from_addr, recipients, body, quoted, attachments,
+                subject_stem, body_stem, quoted_stem, from_name_stem,
+                tokenize = 'unicode61'
+            )
+            """)
+        try db.execute(sql: """
+            INSERT INTO message_text_new(
+                rowid, subject, from_name, from_addr, recipients, body, quoted, attachments,
+                subject_stem, body_stem, quoted_stem
+            )
+            SELECT rowid, subject, from_name, from_addr, recipients, body, quoted, attachments,
+                   subject_stem, body_stem, quoted_stem
+            FROM message_text
+            """)
+        try db.execute(sql: "DROP TABLE message_text")
+        try db.execute(sql: "ALTER TABLE message_text_new RENAME TO message_text")
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

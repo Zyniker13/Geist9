@@ -23,7 +23,10 @@ enum TextIndexVersion {
     /// attachments column (decision 0029); the backfill re-indexes older
     /// rows from their stored bytes to add it.
     static let v4 = 4
-    static var current: Int { v4 }
+    /// M2.3: sender display names gain a stem column (decision 0030); the
+    /// backfill re-indexes older rows to populate it.
+    static let v5 = 5
+    static var current: Int { v5 }
 }
 
 extension ArchiveStore {

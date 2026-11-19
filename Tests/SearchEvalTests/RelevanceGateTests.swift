@@ -14,17 +14,17 @@ final class RelevanceGateTests: XCTestCase {
     // never to make a failing build pass.
     private var baselineNDCG10: Double {
         #if canImport(NaturalLanguage)
-        0.9882
+        0.9910
         #else
-        0.0  // pending the first Linux measurement
+        0.9788
         #endif
     }
 
     private var baselineRecall50: Double {
         #if canImport(NaturalLanguage)
-        0.9946
+        0.9982
         #else
-        0.0  // pending the first Linux measurement
+        0.9778
         #endif
     }
 

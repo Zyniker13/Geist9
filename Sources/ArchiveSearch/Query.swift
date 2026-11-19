@@ -487,14 +487,14 @@ public enum QueryCompiler {
     /// an exact match always beats a stem-only match.
     static let columns = [
         "subject", "from_name", "from_addr", "recipients", "body", "quoted", "attachments",
-        "subject_stem", "body_stem", "quoted_stem",
+        "subject_stem", "body_stem", "quoted_stem", "from_name_stem",
     ]
     /// Field weights (DESIGN 6A): subject ranks highest, then sender name
     /// and address, then other recipients, then the body; quoted text and
-    /// attachment names barely count. The stem columns (decision 0026) rank
-    /// below their originals: subject_stem 1.0, body_stem 0.2, quoted_stem
-    /// 0.1.
-    public static let bm25Weights = "12.0, 8.0, 6.0, 5.0, 1.0, 0.4, 0.3, 1.0, 0.2, 0.1"
+    /// attachment names barely count. The stem columns (decisions 0026 and
+    /// 0030) rank below their originals: subject_stem 1.0, body_stem 0.2,
+    /// quoted_stem 0.1, from_name_stem 0.5.
+    public static let bm25Weights = "12.0, 8.0, 6.0, 5.0, 1.0, 0.4, 0.3, 1.0, 0.2, 0.1, 0.5"
     /// Fields bare terms search: everything indexed at message level except
     /// quoted text (which only phrase-quoted terms reach, at low weight).
     static let bareColumns = "{subject from_name from_addr recipients body attachments}"
@@ -511,8 +511,9 @@ public enum QueryCompiler {
         switch field {
         case .subject: return "{subject_stem}"
         case .body: return "{body_stem}"
-        case .any: return phrase ? "{subject_stem body_stem quoted_stem}" : "{subject_stem body_stem}"
-        case .sender, .recipient: return nil
+        case .any: return phrase ? "{subject_stem body_stem quoted_stem}" : "{subject_stem body_stem from_name_stem}"
+        case .sender: return "{from_name_stem}"
+        case .recipient: return nil
         }
     }
     /// Joins clause strings with an operator, wrapping the result in
@@ -648,7 +649,7 @@ public enum QueryCompiler {
             seen += 1
             return try textNode(field: field, raw: raw, phrase: true, prefixLast: prefix, detected: detected, english: english)
         case .from(let value):
-            return fromNode(value)
+            return fromNode(value, detected: detected, english: english)
         case .recipient(let kind, let value):
             return recipientNode(kind: kind, value: value)
         case .hasAttachment(let wanted):
@@ -872,8 +873,12 @@ public enum QueryCompiler {
 
     /// from:value with an @ searches the address column as a folded phrase
     /// (so `jane.doe@example.com` matches that exact address); otherwise it
-    /// matches tokens across the sender's name and address.
-    static func fromNode(_ value: String) -> CompiledNode {
+    /// matches tokens across the sender's name and address, each token's
+    /// group adding its stem forms on the sender stem column (decision
+    /// 0030). Addresses never stem.
+    static func fromNode(
+        _ value: String, detected: StemmingSession?, english: StemmingSession?
+    ) -> CompiledNode {
         if value.contains("@") {
             let folded = TokenPipeline.folded(value)
             return .fts(FTSLeaf(
@@ -885,8 +890,16 @@ public enum QueryCompiler {
         guard !tokens.isEmpty else {
             return .filter(SQLFilter(sql: "1 = 0", arguments: []))
         }
+        let tokenExprs = tokens.map { token -> String in
+            var parts = ["{from_name from_addr} : \(token)"]
+            let forms = Stemming.stemForms(token, detected: detected, english: english)
+            if !forms.isEmpty {
+                parts.append("{from_name_stem} : \(Stemming.expression(for: forms))")
+            }
+            return Self.parenthesizedJoin(parts, "OR")
+        }
         return .fts(FTSLeaf(
-            expression: "{from_name from_addr} : \(Self.parenthesizedJoin(tokens, "AND"))",
+            expression: Self.parenthesizedJoin(tokenExprs, "AND"),
             trigramFallback: TrigramPlan.fallback(
                 columns: "from_name from_addr", phrases: tokens
             ),

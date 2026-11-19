@@ -41,6 +41,9 @@ struct SearchTokens: Sendable {
     var subjectStem = ""
     var bodyStem = ""
     var quotedStem = ""
+    /// The sender display name's stem stream (decision 0030): sender names
+    /// are high-signal text whose morphology queries must reach.
+    var fromNameStem = ""
 
     init() {}
 
@@ -87,11 +90,12 @@ struct SearchTokens: Sendable {
         // No stem column for it: attachment text is mostly machine-written
         // data, where stemming adds noise rather than recall.
         let attachmentText = search.attachments ?? ""
+        let fromNameTokens = fieldTokens(message.record.from?.name, .sender)
         let subjectTokens = fieldTokens(message.record.subject, .subject)
         let bodyTokens = fieldTokens(search.body, .body)
         let quotedTokens = fieldTokens(search.quoted, .quoted)
         self.subject = joined(subjectTokens)
-        self.fromName = joined(fieldTokens(message.record.from?.name, .sender))
+        self.fromName = joined(fromNameTokens)
         // The address is stored folded but raw: unicode61 splits it on
         // '@' and '.', which yields exactly the address-aware tokens
         // DESIGN 6A wants, and phrase queries (`from:a@b.c`) reassemble
@@ -106,10 +110,13 @@ struct SearchTokens: Sendable {
         )
 
         // Stem columns (decision 0026): the stemmed stream for subject,
-        // body, and quoted. Sender and recipient have no stem columns.
+        // body, and quoted — plus the sender name (decision 0030).
+        // Recipients have no stem column: their stream mixes display names
+        // with raw addresses, where stemming an address token adds noise.
         self.subjectStem = stemStream(subjectTokens)
         self.bodyStem = stemStream(bodyTokens)
         self.quotedStem = stemStream(quotedTokens)
+        self.fromNameStem = stemStream(fromNameTokens)
 
         self.trigramSubject = TokenPipeline.folded(message.record.subject ?? "")
         self.trigramFromName = TokenPipeline.folded(message.record.from?.name ?? "")
@@ -131,7 +138,7 @@ struct SearchTokens: Sendable {
     var searchTermSet: Set<String> {
         var terms = Set<String>()
         for stream in [subject, fromName, recipients, body, quoted, attachments,
-                       subjectStem, bodyStem, quotedStem] {
+                       subjectStem, bodyStem, quotedStem, fromNameStem] {
             terms.formUnion(stream.split(separator: " ", omittingEmptySubsequences: true)
                 .map(String.init))
         }
@@ -501,8 +508,8 @@ extension ArchiveStore {
             sql: """
             INSERT INTO message_text
                 (rowid, subject, from_name, from_addr, recipients, body, quoted, attachments,
-                 subject_stem, body_stem, quoted_stem)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 subject_stem, body_stem, quoted_stem, from_name_stem)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
                 messageRowID,
@@ -516,6 +523,7 @@ extension ArchiveStore {
                 tokens.subjectStem,
                 tokens.bodyStem,
                 tokens.quotedStem,
+                tokens.fromNameStem,
             ]
         )
         try db.execute(
@@ -562,7 +570,7 @@ extension ArchiveStore {
             db,
             sql: """
             SELECT subject, from_name, from_addr, recipients, body, quoted, attachments,
-                   subject_stem, body_stem, quoted_stem
+                   subject_stem, body_stem, quoted_stem, from_name_stem
             FROM message_text WHERE rowid = ?
             """,
             arguments: [messageRowID]
@@ -570,7 +578,7 @@ extension ArchiveStore {
         guard let row else { return [] }
         var terms = Set<String>()
         for column in ["subject", "from_name", "recipients", "body", "quoted", "attachments",
-                       "subject_stem", "body_stem", "quoted_stem"] {
+                       "subject_stem", "body_stem", "quoted_stem", "from_name_stem"] {
             guard let stream: String = row[column] else { continue }
             for term in stream.split(separator: " ", omittingEmptySubsequences: true) {
                 terms.insert(String(term))
