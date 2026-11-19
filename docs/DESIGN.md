@@ -151,7 +151,7 @@ A login item (`SMAppService.loginItem`, a helper inside the app bundle) runs the
 
 ### Index
 
-GRDB over SQLite in WAL mode. Tables: `account`, `mailbox`, `message` (hash, size, dates, normalized headers, import source, provider thread id), `message_mailbox` (membership, UID, flags, first and last seen), `label`, `thread`, `address`, `attachment`. Migrations are versioned and tested on archives made by every earlier version.
+GRDB over SQLite in WAL mode. Tables: `account`, `mailbox`, `message` (hash, size, dates, normalized headers, import source, provider thread id, `textVersion` recording which text-index pipeline indexed the row), `message_mailbox` (membership, UID, flags, first and last seen), `label`, `thread`, `address`, `attachment`, `saved_search` (sidebar smart folders), `message_text` (FTS5, exact-token index) and `message_trigram` (FTS5 `trigram` tokenizer over the same columns holding raw folded text, for substring and CJK fallback; see 6A and decision 0021). Migrations are versioned and tested on archives made by every earlier version; rows whose `textVersion` is older than the current pipeline are re-indexed from their stored bytes by the background backfill (`reindexOutdated`), never by rewriting the stored files.
 
 ## 6A. Search and Indexing (a Primary Feature)
 

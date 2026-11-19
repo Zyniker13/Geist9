@@ -460,8 +460,9 @@ public struct SQLFilter: Sendable, Equatable {
 
 /// The compiled shape of a query: leaves the executor runs directly.
 public indirect enum CompiledNode: Sendable, Equatable {
-    /// An FTS5 MATCH expression over the message_text columns.
-    case fts(String)
+    /// A text leaf: the exact-token MATCH expression over the message_text
+    /// columns, with its optional trigram fallback (DESIGN 6A, M2.1).
+    case fts(FTSLeaf)
     case filter(SQLFilter)
     case and([CompiledNode])
     case or([CompiledNode])
@@ -604,10 +605,24 @@ public enum QueryCompiler {
         case .recipient: columns = "{recipients}"
         case .body: columns = "{body}"
         }
+        let inner = columns.dropFirst().dropLast()
         let expression = phrase
             ? "\"\(tokens.joined(separator: " "))\""
             : tokens.joined(separator: " AND ")
-        return .fts("{\(columns.dropFirst().dropLast())} : \(expression)")
+        // The trigram fallback matches substrings, so it works on the raw
+        // text's folded form (punctuation survives), not on the query's
+        // tokens alone: CJK tokens are two-character pairs, below the
+        // trigram minimum, while the whole CJK run is a real substring
+        // candidate. CJK spans differently in the query and the indexed
+        // text, so its fallback also runs eagerly in the predicate path,
+        // not only on a zero-hit retry (DESIGN 6A, M2.1).
+        let foldedRaw = TokenPipeline.folded(raw)
+        let fallbackPhrases = phrase ? [foldedRaw] : tokens + [foldedRaw]
+        return .fts(FTSLeaf(
+            expression: "{\(inner)} : \(expression)",
+            trigramFallback: TrigramPlan.fallback(columns: String(inner), phrases: fallbackPhrases),
+            trigramEager: TokenPipeline.containsCJK(raw)
+        ))
     }
 
     static func textColumn(_ field: SearchField) -> TextField {
@@ -624,13 +639,23 @@ public enum QueryCompiler {
     /// matches tokens across the sender's name and address.
     static func fromNode(_ value: String) -> CompiledNode {
         if value.contains("@") {
-            return .fts("{from_addr} : \(quoted(TokenPipeline.folded(value)))")
+            let folded = TokenPipeline.folded(value)
+            return .fts(FTSLeaf(
+                expression: "{from_addr} : \(quoted(folded))",
+                trigramFallback: TrigramPlan.fallback(columns: "from_addr", phrases: [folded])
+            ))
         }
         let tokens = TokenPipeline.tokens(for: value, field: .sender)
         guard !tokens.isEmpty else {
             return .filter(SQLFilter(sql: "1 = 0", arguments: []))
         }
-        return .fts("{from_name from_addr} : \(tokens.joined(separator: " AND "))")
+        return .fts(FTSLeaf(
+            expression: "{from_name from_addr} : \(tokens.joined(separator: " AND "))",
+            trigramFallback: TrigramPlan.fallback(
+                columns: "from_name from_addr", phrases: tokens
+            ),
+            trigramEager: TokenPipeline.containsCJK(value)
+        ))
     }
 
     /// to/cc/bcc with an @ filters exactly on the parsed address rows;
@@ -650,7 +675,11 @@ public enum QueryCompiler {
         guard !tokens.isEmpty else {
             return .filter(SQLFilter(sql: "1 = 0", arguments: []))
         }
-        return .fts("{recipients} : \(tokens.joined(separator: " AND "))")
+        return .fts(FTSLeaf(
+            expression: "{recipients} : \(tokens.joined(separator: " AND "))",
+            trigramFallback: TrigramPlan.fallback(columns: "recipients", phrases: tokens),
+            trigramEager: TokenPipeline.containsCJK(value)
+        ))
     }
 
     static func flagNode(_ kind: FlagKind) -> CompiledNode {

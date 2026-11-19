@@ -150,6 +150,14 @@ public enum TokenPipeline {
         return out
     }
 
+    /// True when any scalar is CJK (Han, Kana, Hangul, and companions):
+    /// such queries also match through the trigram index, because the
+    /// query's segmentation can differ from the indexed text's (DESIGN 6A,
+    /// M2.1). Shared by the compiler's eager fallback and the tests.
+    public static func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalars.cjk.contains($0) }
+    }
+
     // MARK: - Character classes (shared)
 
     enum scalars {

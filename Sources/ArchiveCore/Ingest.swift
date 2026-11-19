@@ -21,6 +21,18 @@ struct SearchTokens: Sendable {
     var quoted = ""
     var attachments = ""
 
+    /// Trigram columns (DESIGN 6A, M2.1): same field split, but raw folded
+    /// text instead of tokens — the trigram tokenizer matches substrings,
+    /// so folding is the only normalization that must agree with the query
+    /// side. Empty exactly when the token column is empty.
+    var trigramSubject = ""
+    var trigramFromName = ""
+    var trigramFromAddr = ""
+    var trigramRecipients = ""
+    var trigramBody = ""
+    var trigramQuoted = ""
+    var trigramAttachments = ""
+
     init() {}
 
     init(_ message: IngestedMessage) {
@@ -48,6 +60,14 @@ struct SearchTokens: Sendable {
         self.body = tokens(search.body, .body)
         self.quoted = tokens(search.quoted, .quoted)
         self.attachments = tokens(attachmentNames, .attachment)
+
+        self.trigramSubject = TokenPipeline.folded(message.record.subject ?? "")
+        self.trigramFromName = TokenPipeline.folded(message.record.from?.name ?? "")
+        self.trigramFromAddr = self.fromAddr
+        self.trigramRecipients = TokenPipeline.folded(recipients.joined(separator: " "))
+        self.trigramBody = TokenPipeline.folded(search.body ?? "")
+        self.trigramQuoted = TokenPipeline.folded(search.quoted ?? "")
+        self.trigramAttachments = TokenPipeline.folded(attachmentNames)
     }
 }
 
@@ -207,8 +227,8 @@ extension ArchiveStore {
                     INSERT INTO message
                         (hash, size, subject, normalizedSubject, dateSent, dateReceived,
                          messageID, inReplyTo, referencesIDs, fromName, fromEmail, listID,
-                         importSource, providerThreadID)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         importSource, providerThreadID, textVersion)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     arguments: [
                         hash.bytes,
@@ -225,6 +245,7 @@ extension ArchiveStore {
                         message.record.listID,
                         message.importSource,
                         message.providerThreadID,
+                        TextIndexVersion.current,
                     ]
                 )
                 messageID = db.lastInsertedRowID
@@ -236,6 +257,16 @@ extension ArchiveStore {
             // message the list lacks, and vice versa.
             if isNew {
                 try Self.indexSearchText(tokens, messageRowID: messageRowID, db: db)
+            } else if try Self.needsTextReindex(messageRowID, db: db) {
+                // The text pipeline moved forward since these bytes were
+                // last indexed (or its text rows were lost): rebuild the
+                // text tables from the incoming parse. The stored message
+                // row and bytes are never rewritten (DESIGN 6A, M2.1).
+                try Self.indexSearchText(tokens, messageRowID: messageRowID, db: db)
+                try db.execute(
+                    sql: "UPDATE message SET textVersion = ? WHERE id = ?",
+                    arguments: [TextIndexVersion.current, messageRowID]
+                )
             }
             try Self.assignThread(
                 message, accountEmail: accountEmail,
@@ -342,13 +373,22 @@ extension ArchiveStore {
 
     // MARK: Search + threading (run inside the ingest transaction)
 
-    /// Writes the pre-tokenized text columns into the FTS5 table (DESIGN 6A).
-    /// The rowid is the message row's id, which is what makes MATCH results
-    /// joinable to `message` without a mapping table. Tokenization happened
-    /// earlier (parallel in batch ingest); this only inserts.
+    /// Writes the pre-tokenized text columns into the FTS5 tables (DESIGN
+    /// 6A): message_text with the token columns, message_trigram with the
+    /// raw folded text. Both use the message row's id as their rowid, which
+    /// is what makes MATCH results joinable to `message` without a mapping
+    /// table. Both tables are rebuilt idempotently — any earlier text rows
+    /// for the same message (a re-ingest healing a stale index, or the
+    /// backfill queue) are replaced, never duplicated. Tokenization happened
+    /// earlier (parallel in batch ingest); this only writes.
     static func indexSearchText(
         _ tokens: SearchTokens, messageRowID: Int64, db: Database
     ) throws {
+        for table in ["message_text", "message_trigram"] {
+            try db.execute(
+                sql: "DELETE FROM \(table) WHERE rowid = ?", arguments: [messageRowID]
+            )
+        }
         try db.execute(
             sql: """
             INSERT INTO message_text
@@ -366,6 +406,34 @@ extension ArchiveStore {
                 tokens.attachments,
             ]
         )
+        try db.execute(
+            sql: """
+            INSERT INTO message_trigram
+                (rowid, subject, from_name, from_addr, recipients, body, quoted, attachments)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                messageRowID,
+                tokens.trigramSubject,
+                tokens.trigramFromName,
+                tokens.trigramFromAddr,
+                tokens.trigramRecipients,
+                tokens.trigramBody,
+                tokens.trigramQuoted,
+                tokens.trigramAttachments,
+            ]
+        )
+    }
+
+    /// True when a stored message's text index predates the current
+    /// pipeline: either the version column is missing (archives written
+    /// before it existed) or it records an older version.
+    static func needsTextReindex(_ messageRowID: Int64, db: Database) throws -> Bool {
+        let version = try Int.fetchOne(
+            db, sql: "SELECT textVersion FROM message WHERE id = ?", arguments: [messageRowID]
+        )
+        guard let version else { return true }
+        return version < TextIndexVersion.current
     }
 
     /// Joins the message to its thread (DESIGN 7). Order: provider thread id

@@ -18,14 +18,19 @@ public struct SearchHit: Sendable, Equatable {
     public var rank: Double?
     public var threadID: Int64?
     public var snippet: String?
+    /// True when the hit came from the trigram fallback (a substring or
+    /// CJK match) rather than the exact token index (DESIGN 6A, M2.1).
+    public var viaTrigram: Bool
 
     public init(
-        messageID: Int64, rank: Double? = nil, threadID: Int64? = nil, snippet: String? = nil
+        messageID: Int64, rank: Double? = nil, threadID: Int64? = nil,
+        snippet: String? = nil, viaTrigram: Bool = false
     ) {
         self.messageID = messageID
         self.rank = rank
         self.threadID = threadID
         self.snippet = snippet
+        self.viaTrigram = viaTrigram
     }
 }
 
@@ -42,40 +47,53 @@ public enum SearchExecutor {
         withSnippets: Bool = false,
         groupByThread: Bool = false
     ) throws -> [SearchHit] {
-        if case .fts(let expression) = node {
-            return try ranked(
-                expression, in: db, limit: limit, offset: offset,
+        if case .fts(let leaf) = node {
+            let hits = try ranked(
+                leaf.expression, in: db, limit: limit, offset: offset,
                 withSnippets: withSnippets, groupByThread: groupByThread
             )
-        }
-        let (whereSQL, arguments) = predicate(for: node)
-        let selected = "m.id AS id, m.threadID AS threadID"
-        let rows: [Row]
-        if groupByThread {
-            // Window-function dedup: the best hit per thread (a thread with
-            // no row keeps its own partition via the COALESCE) survives, so
-            // paging stays correct no matter how much collapses.
-            rows = try Row.fetchAll(
-                db,
-                sql: """
-                SELECT id, threadID FROM (
-                    SELECT \(selected),
-                           COALESCE(m.dateSent, m.dateReceived) AS sent,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY COALESCE(m.threadID, -m.id)
-                               ORDER BY COALESCE(m.dateSent, m.dateReceived) DESC, m.id DESC
-                           ) AS rn
-                    FROM message m
-                    WHERE \(whereSQL)
+            // Zero exact hits and a trigram fallback exists: retry as a
+            // plain substring match over the trigram table (DESIGN 6A,
+            // M2.1). Hits keep the same shape and carry viaTrigram so
+            // callers can say honestly where they came from.
+            if hits.isEmpty, let fallback = leaf.trigramFallback {
+                return try ranked(
+                    fallback, in: db, limit: limit, offset: offset,
+                    withSnippets: withSnippets, groupByThread: groupByThread,
+                    table: "message_trigram", weightSQL: trigramWeights,
+                    viaTrigram: true
                 )
-                WHERE rn = 1
-                ORDER BY sent DESC, id DESC
-                LIMIT \(max(0, limit)) OFFSET \(max(0, offset))
-                """,
-                arguments: StatementArguments(arguments)
-            )
-        } else {
-            rows = try Row.fetchAll(
+            }
+            return hits
+        }
+        let (whereSQL0, arguments0) = predicate(for: node)
+        let selected = "m.id AS id, m.threadID AS threadID"
+        func fetch(_ whereSQL: String, _ arguments: [String]) throws -> [Row] {
+            if groupByThread {
+                // Window-function dedup: the best hit per thread (a thread with
+                // no row keeps its own partition via the COALESCE) survives, so
+                // paging stays correct no matter how much collapses.
+                return try Row.fetchAll(
+                    db,
+                    sql: """
+                    SELECT id, threadID FROM (
+                        SELECT \(selected),
+                               COALESCE(m.dateSent, m.dateReceived) AS sent,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY COALESCE(m.threadID, -m.id)
+                                   ORDER BY COALESCE(m.dateSent, m.dateReceived) DESC, m.id DESC
+                               ) AS rn
+                        FROM message m
+                        WHERE \(whereSQL)
+                    )
+                    WHERE rn = 1
+                    ORDER BY sent DESC, id DESC
+                    LIMIT \(max(0, limit)) OFFSET \(max(0, offset))
+                    """,
+                    arguments: StatementArguments(arguments)
+                )
+            }
+            return try Row.fetchAll(
                 db,
                 sql: """
                 SELECT \(selected)
@@ -87,9 +105,22 @@ public enum SearchExecutor {
                 arguments: StatementArguments(arguments)
             )
         }
+        var rows = try fetch(whereSQL0, arguments0)
+        var viaTrigram = false
+        if rows.isEmpty, hasFallbackableLeaf(node) {
+            // Whole-tree zero-hit retry: the exact form found nothing, so
+            // every text leaf that carries a trigram fallback unions it in
+            // (DESIGN 6A, M2.1 — "acct 4417"). Exact matching stays
+            // preferred: the retry only rescues queries that found nothing
+            // at all, and the hits say honestly that they came from the
+            // trigram.
+            let (whereSQL, arguments) = predicate(for: node, useFallbacks: true)
+            rows = try fetch(whereSQL, arguments)
+            viaTrigram = true
+        }
         return rows.map { row -> SearchHit in
             let id: Int64 = row["id"] ?? 0
-            return SearchHit(messageID: id, threadID: row["threadID"])
+            return SearchHit(messageID: id, threadID: row["threadID"], viaTrigram: viaTrigram)
         }
     }
 
@@ -109,31 +140,40 @@ public enum SearchExecutor {
             0.0))
         """
 
-    /// A single text leaf: one ranked FTS5 query. The bm25 field weights
-    /// times the recency factor order the rows; a lower value is a better
-    /// match. `rank` on the hit is the raw bm25 score.
+    /// Field weights for the trigram fallback: all columns equal, because a
+    /// substring hit carries no per-field strength the exact path's weights
+    /// would agree with.
+    private static let trigramWeights = Array(repeating: "1.0", count: 7).joined(separator: ", ")
+
+    /// A single text leaf: one ranked FTS5 query over `table`. The bm25
+    /// field weights times the recency factor order the rows; a lower value
+    /// is a better match. `rank` on the hit is the raw bm25 score. The
+    /// exact path runs over message_text with the tuned weights; the
+    /// trigram fallback runs over message_trigram with equal weights.
     static func ranked(
         _ expression: String, in db: Database, limit: Int, offset: Int,
-        withSnippets: Bool, groupByThread: Bool
+        withSnippets: Bool, groupByThread: Bool,
+        table: String = "message_text", weightSQL: String? = nil, viaTrigram: Bool = false
     ) throws -> [SearchHit] {
-        let weightSQL = QueryCompiler.bm25Weights
-            .split(separator: ",")
-            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-            .map { String(format: "%.1f", $0) }
-            .joined(separator: ", ")
+        let weights = weightSQL
+            ?? QueryCompiler.bm25Weights
+                .split(separator: ",")
+                .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                .map { String(format: "%.1f", $0) }
+                .joined(separator: ", ")
         let snippetColumn = withSnippets
-            ? ", snippet(message_text, -1, '[[', ']]', ' … ', 16) AS snip"
+            ? ", snippet(\(table), -1, '[[', ']]', ' … ', 16) AS snip"
             : ""
         // bm25() with the field weights both scores and orders the rows;
         // the implicit `rank` column would rank with default weights (all
         // fields equal), which the search contract does not want.
         let base = """
             SELECT m.id AS id, m.threadID AS threadID,
-                   bm25(message_text, \(weightSQL)) AS score,
-                   bm25(message_text, \(weightSQL)) * \(recencyFactorSQL) AS final\(snippetColumn)
-            FROM message_text
-            JOIN message m ON m.id = message_text.rowid
-            WHERE message_text MATCH ?
+                   bm25(\(table), \(weights)) AS score,
+                   bm25(\(table), \(weights)) * \(recencyFactorSQL) AS final\(snippetColumn)
+            FROM \(table)
+            JOIN message m ON m.id = \(table).rowid
+            WHERE \(table) MATCH ?
             """
         let outer = withSnippets ? "id, threadID, score, snip" : "id, threadID, score"
         let sql: String
@@ -165,7 +205,7 @@ public enum SearchExecutor {
             let snippet: String? = withSnippets ? row["snip"] : nil
             return SearchHit(
                 messageID: id, rank: row["score"], threadID: row["threadID"],
-                snippet: snippet
+                snippet: snippet, viaTrigram: viaTrigram
             )
         }
     }
@@ -173,38 +213,78 @@ public enum SearchExecutor {
     // MARK: Predicate path
 
     /// Builds the WHERE clause for a compiled tree. Text leaves contribute
-    /// rowid-set subqueries over the FTS table; filters contribute their
-    /// SQL verbatim. Boolean structure groups with parentheses.
-    static func predicate(for node: CompiledNode) -> (sql: String, arguments: [String]) {
+    /// rowid-set subqueries over the FTS table (CJK leaves union their
+    /// trigram match eagerly); filters contribute their SQL verbatim.
+    /// Boolean structure groups with parentheses.
+    static func predicate(
+        for node: CompiledNode, useFallbacks: Bool = false
+    ) -> (sql: String, arguments: [String]) {
         switch node {
-        case .fts(let expression):
+        case .fts(let leaf):
+            guard let trigram = leaf.trigramFallback else {
+                return (
+                    "m.id IN (SELECT rowid FROM message_text WHERE message_text MATCH ?)",
+                    [leaf.expression]
+                )
+            }
+            // Two cases union the trigram match in: a CJK leaf always (the
+            // query's segmentation can differ from the indexed text's, so
+            // its exact match is unreliable — DESIGN 6A, M2.1), and any
+            // other fallback-able leaf when the whole exact tree found
+            // nothing and the zero-hit retry substituted fallbacks.
+            guard useFallbacks || leaf.trigramEager else {
+                return (
+                    "m.id IN (SELECT rowid FROM message_text WHERE message_text MATCH ?)",
+                    [leaf.expression]
+                )
+            }
             return (
-                "m.id IN (SELECT rowid FROM message_text WHERE message_text MATCH ?)",
-                [expression]
+                """
+                m.id IN (SELECT rowid FROM message_text WHERE message_text MATCH ?)
+                OR m.id IN (SELECT rowid FROM message_trigram WHERE message_trigram MATCH ?)
+                """,
+                [leaf.expression, trigram]
             )
         case .filter(let filter):
             return (filter.sql, filter.arguments)
         case .and(let children):
-            let parts = children.map { wrap($0) }
+            let parts = children.map { wrap($0, useFallbacks: useFallbacks) }
             return (
                 parts.map(\.sql).joined(separator: " AND "),
                 parts.flatMap(\.arguments)
             )
         case .or(let children):
-            let parts = children.map { wrap($0) }
+            let parts = children.map { wrap($0, useFallbacks: useFallbacks) }
             return (
                 parts.map(\.sql).joined(separator: " OR "),
                 parts.flatMap(\.arguments)
             )
         case .not(let inner):
-            let (sql, arguments) = wrap(inner)
+            let (sql, arguments) = wrap(inner, useFallbacks: useFallbacks)
             return ("NOT (\(sql))", arguments)
         }
     }
 
+    /// Whether any text leaf in the tree carries a trigram fallback — the
+    /// condition for the predicate path's whole-tree zero-hit retry.
+    static func hasFallbackableLeaf(_ node: CompiledNode) -> Bool {
+        switch node {
+        case .fts(let leaf):
+            return leaf.trigramFallback != nil
+        case .filter:
+            return false
+        case .and(let children), .or(let children):
+            return children.contains { hasFallbackableLeaf($0) }
+        case .not(let inner):
+            return hasFallbackableLeaf(inner)
+        }
+    }
+
     /// Parenthesized form, for nesting under OR and NOT.
-    static func wrap(_ node: CompiledNode) -> (sql: String, arguments: [String]) {
-        let (sql, arguments) = predicate(for: node)
+    static func wrap(
+        _ node: CompiledNode, useFallbacks: Bool = false
+    ) -> (sql: String, arguments: [String]) {
+        let (sql, arguments) = predicate(for: node, useFallbacks: useFallbacks)
         return ("(\(sql))", arguments)
     }
 }

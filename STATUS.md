@@ -1,9 +1,9 @@
 # Status
 
-- **Current milestone:** M1 (Local Archive and Search Core)
-- **Last done:** M1 app-shell gaps closed: saved searches (core-v4 `saved_search` table, CRUD + validation, sidebar save button), sidebar Accounts/Labels rows that run live `label:`/`account:` searches, attachment preview moved to the system Quick Look panel through a public QuickLookUI responder-chain bridge (the SwiftUI `quickLookPreview` modifier lives in the private `_QuickLook_SwiftUI` module and does not compile from the app target), and a Whole Archive section in the Export menu. check.sh green; decision 0020.
-- **Next step:** confirm the 1M-message benchmark result for the ROADMAP M1 "Done when" line, then M2 (deep search).
-- **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
+- **Current milestone:** M2 (Deep Search) — M1 closed 2026-11-18 (1M benchmark: ranked p95 167 ms < 200 ms).
+- **Last done:** M2.1 trigram fallback index: `core-v5` adds `message_trigram` (FTS5 trigram tokenizer, seven columns, raw folded text) + `message.textVersion`; ingest writes trigram content idempotently (delete-before-insert) in the ingest transaction; compiler emits per-leaf trigram MATCH phrases (CJK runs kept whole, raw text included); executor runs fallbacks — ranked path on exact zero-hit, predicate path eager for CJK leaves and via a whole-tree zero-hit retry otherwise; `reindexOutdated` backfills rows older than `TextIndexVersion.current` from stored bytes. 11 trigram tests, 122 total green; decision 0021.
+- **Next step:** commit M2.1 once check.sh + CI confirm, then the first-ten budget work (p95 167 ms vs 50 ms on 1M — first M2 optimization target), then M2.2 stemming.
+- **Blocked on:** nothing. CI fix for the Linux `getrusage` enum pushed as `10fc3fc`, watching the run. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer
 
@@ -18,8 +18,12 @@
 | 20k messages | Ingest | 410 msg/s (parallel token precompute, name caches, fsync) |
 | 20k messages | Search (ranked p95) | 4 ms (budget: <200 ms) |
 | 20k messages | Search (first-ten p95) | 3.1 ms (budget: <50 ms) |
+| 1M messages | Search (two-word ranked p95) | 167 ms (budget: <200 ms) — **met**, closes M1 |
+| 1M messages | Search (first-ten p95) | 167 ms (budget: <50 ms) — **open**, first M2 optimization target |
 
-20k benchmark dir: `/tmp/bench-smoke5`. 1M benchmark pending.
+20k benchmark dir: `/tmp/bench-smoke5`. 1M benchmark dir: `/tmp/bench-1m`
+(`bench-search both /tmp/bench-1m 1000000 200`; run under heavy machine
+load, ~74 load on 12 cores, so quiet-machine numbers should improve).
 
 ## Log
 
@@ -59,3 +63,5 @@
 |- 2026-11-18: M1 ingest optimization: parallel token precompute (Stage 1.5, `runParallel` over `SearchTokens`), transaction-local name caches (mailbox/label/address with scoped string keys), and `fsync` instead of `F_FULLFSYNC` — throughput 410 msg/s (20k corpus), up from 203 (token+cache only) → 143 (batch only) → 70 (pre-batch). Search budgets well under target: ranked p95 4 ms, first-ten p95 3.1 ms. Benchmark harness (`bench-search` executable) added.
 - 2026-11-18: Kill/crash tests complete (8 passing): 5 crash points in batch ingest (kill-after, files-written, dir-fsync, index-commit, multi-cycle) plus 3 crash-during-import tests through a new `bench-search import` mode, which counts per-message file-write boundaries for kill-after and raises at exact stage boundaries. Post-crash scrub semantics pinned: hashMismatches/missingFiles/corruptLayout empty (data intact), isClean only after resume completes. Docs claims verified: README build requirements corrected (macOS 15 / Xcode 26 / Swift 6.2); durability and ingest-ordering docs consistent with the batch design.
 - 2026-11-18: M1 app-shell gaps closed. Saved searches: index schema `core-v4` adds `saved_search` (name UNIQUE, query, createdAt) with CRUD + validation in the query layer (4 tests); a bookmark button saves the current query and sidebar rows run it live. Sidebar Accounts/Labels: `listAccounts`/`listLabels` summaries feed rows that run `account:`/`label:` live searches; query text built centrally in `ArchiveModel` so active-row highlighting matches what runs. Quick Look: the SwiftUI `quickLookPreview` modifier is in the private `_QuickLook_SwiftUI` module (swift build cannot see it; xcodebuild refused it), so the system `QLPreviewPanel` is driven through a public QuickLookUI responder-chain bridge (NSViewRepresentable + `acceptsPreviewPanelControl`/`beginPreviewPanelControl`, data source serves the temp-written attachment, previous temp file unlinked). Whole-archive export: Export menu split into Selected/Whole Archive sections; whole-archive runs the read-only exporter off the main actor. Decision 0020 recorded; check.sh green.
+- 2026-11-18: M1 closed. 1M benchmark (`bench-search both /tmp/bench-1m 1000000 200`): two-word ranked p95 167 ms < 200 ms budget — the M1 "Done when" line is met. First-ten p95 came back at 167 ms vs the 50 ms as-you-type budget, recorded as the first M2 optimization target rather than an M1 gap (budget belongs to DESIGN 6A, enforced on the 1M corpus by the M2 Done-when line). CI on `11d1838`/`6822c83` was red twice on Linux-only Benchmarks issues: `fflush(stdout)` under Swift 6 strict concurrency (fixed `6822c83`), then `getrusage(RUSAGE_SELF, …)` — Linux types the constant as an enum, so it is now passed as `Int32` (`10fc3fc`).
+- 2026-11-18: M2.1 trigram fallback index (decision 0021): `core-v5` adds `message_trigram` (FTS5 trigram tokenizer over the same seven columns, raw folded text) and `message.textVersion`; ingest writes trigram content in the ingest transaction, delete-before-insert for idempotency; per-leaf trigram MATCH phrases split into maximal same-script runs (CJK runs stay whole, raw text included for sub-trigram CJK); ranked path falls back on exact zero-hit; predicate path unions trigram eagerly for CJK leaves and retries the whole tree with fallbacks only when the exact tree matched nothing; `reindexOutdated` backfills rows older than `TextIndexVersion.current` (2) from their stored bytes. 11 trigram tests (substring, cross-token phrase, CJK, AND/NOT trees, v4→v5 migration backfill, re-ingest idempotency, 1M index re-open), 122 total, green.

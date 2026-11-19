@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 4
+    public static let version = 5
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -24,6 +24,7 @@ public enum IndexSchema {
         ("core-v2", coreV2),
         ("core-v3", coreV3),
         ("core-v4", coreV4),
+        ("core-v5", coreV5),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -183,6 +184,30 @@ public enum IndexSchema {
             t.column("query", .text).notNull()
             t.column("createdAt", .text).notNull()
             t.uniqueKey(["name"])
+        }
+    }
+
+    /// core-v5: the trigram index (DESIGN 6A, M2.1) and the text pipeline
+    /// version column. message_trigram holds the same seven columns as
+    /// message_text but with raw folded text under the FTS5 trigram
+    /// tokenizer, so substring and partial-word queries and CJK queries
+    /// whose segmentation differs from the indexed text still find
+    /// messages. message.textVersion records which text pipeline version
+    /// indexed each row; rows older than the current version are re-indexed
+    /// from the stored bytes by the backfill queue, never by rewriting
+    /// stored files. Existing rows get no trigram content until the
+    /// backfill runs (reindexOutdated).
+    private static func coreV5(_ db: Database) throws {
+        try db.execute(
+            sql: """
+            CREATE VIRTUAL TABLE IF NOT EXISTS message_trigram USING fts5(
+                subject, from_name, from_addr, recipients, body, quoted, attachments,
+                tokenize = 'trigram'
+            )
+            """
+        )
+        try db.alter(table: "message") { t in
+            t.add(column: "textVersion", .integer)
         }
     }
 
