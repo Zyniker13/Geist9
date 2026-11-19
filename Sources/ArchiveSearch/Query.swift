@@ -497,8 +497,53 @@ public enum QueryCompiler {
 
     public static func compile(_ node: SearchNode) throws -> CompiledQuery {
         var warnings: [String] = []
-        let root = try compileNode(node, into: &warnings)
+        let merged = Self.mergeAdjacentText(node)
+        let root = try compileNode(merged, into: &warnings)
         return CompiledQuery(root: root, warnings: warnings)
+    }
+
+    /// Merges runs of adjacent unfielded free-text clauses into one clause,
+    /// so "budget review notes" compiles to ONE text leaf and runs as one
+    /// ranked FTS5 MATCH (DESIGN 6A). The parser makes one clause per word;
+    /// compiled per-word leaves would AND as rowid subqueries in the
+    /// predicate path — correct matches, but no relevance ranking and a
+    /// posting walk plus date sort per word. Phrases, field filters,
+    /// negations, and CJK terms break a run: each keeps its own semantics
+    /// (column sets, quoted-column reach, eager trigram fallbacks). CJK
+    /// terms stay unmerged so each keeps its whole-run fallback phrase.
+    static func mergeAdjacentText(_ node: SearchNode) -> SearchNode {
+        switch node {
+        case .clause:
+            return node
+        case .not(let inner):
+            return .not(mergeAdjacentText(inner))
+        case .or(let children):
+            return .or(children.map(mergeAdjacentText))
+        case .and(let children):
+            var out: [SearchNode] = []
+            var run: [String] = []
+            func flush() {
+                guard run.count > 1 else {
+                    if let single = run.first { out.append(.clause(.text(.any, single))) }
+                    run = []
+                    return
+                }
+                out.append(.clause(.text(.any, run.joined(separator: " "))))
+                run = []
+            }
+            for child in children {
+                switch child {
+                case .clause(.text(.any, let raw)) where !raw.isEmpty && !TokenPipeline.containsCJK(raw):
+                    run.append(raw)
+                default:
+                    flush()
+                    out.append(mergeAdjacentText(child))
+                }
+            }
+            flush()
+            if out.count == 1 { return out[0] }
+            return .and(out)
+        }
     }
 
     static func compileNode(_ node: SearchNode, into warnings: inout [String]) throws -> CompiledNode {
@@ -617,7 +662,20 @@ public enum QueryCompiler {
         // text, so its fallback also runs eagerly in the predicate path,
         // not only on a zero-hit retry (DESIGN 6A, M2.1).
         let foldedRaw = TokenPipeline.folded(raw)
-        let fallbackPhrases = phrase ? [foldedRaw] : tokens + [foldedRaw]
+        // The folded raw becomes its own trigram phrase only when it is one
+        // run (no whitespace): it rescues punctuation forms ("don't") and
+        // whole CJK runs, whose tokenized pieces fall below the trigram
+        // minimum. For multi-word text the tokens are the phrases — the raw
+        // string would demand adjacency ("hutopuza capu" as one literal
+        // substring), which the fallback must not require.
+        let fallbackPhrases: [String]
+        if phrase {
+            fallbackPhrases = [foldedRaw]
+        } else if foldedRaw.contains(where: \.isWhitespace) {
+            fallbackPhrases = tokens
+        } else {
+            fallbackPhrases = tokens + [foldedRaw]
+        }
         return .fts(FTSLeaf(
             expression: "{\(inner)} : \(expression)",
             trigramFallback: TrigramPlan.fallback(columns: String(inner), phrases: fallbackPhrases),
