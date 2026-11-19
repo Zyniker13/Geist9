@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 7
+    public static let version = 8
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -27,6 +27,7 @@ public enum IndexSchema {
         ("core-v5", coreV5),
         ("core-v6", coreV6),
         ("core-v7", coreV7),
+        ("core-v8", coreV8),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -260,6 +261,39 @@ public enum IndexSchema {
         // archive answers the first keystroke without waiting for the next
         // import or backfill (decision 0025).
         try Vocabulary.rebuildFirstLetterTable(in: db)
+    }
+
+    /// core-v8: the stem columns (decision 0026). Snowball stems cannot be
+    /// interleaved into the original token columns without breaking phrase
+    /// adjacency — a body holding "running budgets" would be indexed as
+    /// "running run budgets budget", and the phrase "running budgets" would
+    /// stop matching. So the stems live in three extra FTS5 columns that
+    /// mirror subject, body, and quoted. The original columns keep the
+    /// folded token stream exactly, so phrases and exact matches stay
+    /// adjacent; the stem columns give term recall. FTS5 tables cannot be
+    /// widened in place, so the table is rebuilt: a wider copy is created,
+    /// the original seven columns are copied row for row (rowid preserved),
+    /// and the copy is renamed over the original. The stem columns are left
+    /// empty here; the text pipeline version bump (TextIndexVersion.v3)
+    /// makes the backfill queue re-index every row from the stored bytes and
+    /// populate them. No stored message bytes are touched.
+    private static func coreV8(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE VIRTUAL TABLE message_text_new USING fts5(
+                subject, from_name, from_addr, recipients, body, quoted, attachments,
+                subject_stem, body_stem, quoted_stem,
+                tokenize = 'unicode61'
+            )
+            """)
+        try db.execute(sql: """
+            INSERT INTO message_text_new(
+                rowid, subject, from_name, from_addr, recipients, body, quoted, attachments
+            )
+            SELECT rowid, subject, from_name, from_addr, recipients, body, quoted, attachments
+            FROM message_text
+            """)
+        try db.execute(sql: "DROP TABLE message_text")
+        try db.execute(sql: "ALTER TABLE message_text_new RENAME TO message_text")
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

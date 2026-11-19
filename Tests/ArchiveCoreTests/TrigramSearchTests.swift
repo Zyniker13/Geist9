@@ -80,14 +80,16 @@ final class TrigramSearchTests: XCTestCase {
 
     func testExactMatchPreferredOverFallback() throws {
         // When the exact FTS match has hits, the trigram fallback must not
-        // widen the answer: "invoice" should not pull in "invoicing" here.
+        // widen the answer. "reinvoice" contains the substring "invoice"
+        // (the fallback would find it) but stems to "reinvoic", a different
+        // family from "invoice" ("invoic"), so it must not surface.
         let store = try makeStore()
         _ = try store.ingest(
             makeMessage(subject: "Invoice 12", body: "Please review the invoice total"),
             into: account
         )
         _ = try store.ingest(
-            makeMessage(subject: "Renewal", body: "Our invoicing system is down today"),
+            makeMessage(subject: "Pricing", body: "We reinvoice quarterly"),
             into: account
         )
         let hits = try search(store, "invoice")

@@ -33,13 +33,46 @@ struct SearchTokens: Sendable {
     var trigramQuoted = ""
     var trigramAttachments = ""
 
+    /// Stem columns (DESIGN 6A, decision 0026): the stemmed token stream
+    /// for subject, body, and quoted, under the message's detected
+    /// language. The original columns keep the folded stream, so phrases
+    /// stay adjacent; the stem columns give term recall. Sender and
+    /// recipient have no stem columns.
+    var subjectStem = ""
+    var bodyStem = ""
+    var quotedStem = ""
+
     init() {}
 
     init(_ message: IngestedMessage) {
         let search = message.searchText ?? SearchText(body: nil, quoted: nil)
-        func tokens(_ text: String?, _ field: TextField) -> String {
-            guard let text, !text.isEmpty else { return "" }
-            return TokenPipeline.tokens(for: text, field: field).joined(separator: " ")
+        // Stemming (DESIGN 6A, decision 0026): detect the message's language
+        // once, on the longest part, and stem subject, body, and quoted
+        // under it. The stems go in the stem columns; the original columns
+        // keep the folded token stream, so phrases stay adjacent and a
+        // wrong language guess can never lose the exact match.
+        let language = Stemming.detectLanguage(
+            body: search.body, quoted: search.quoted, subject: message.record.subject
+        )
+        let session = language.flatMap { StemmingSession(language: $0) }
+        // Tokenize each field once; the original columns keep the folded
+        // stream (phrases stay adjacent) and the stem columns hold the
+        // stems of exactly those tokens, so the two streams never drift.
+        func fieldTokens(_ text: String?, _ field: TextField) -> [String] {
+            guard let text, !text.isEmpty else { return [] }
+            return TokenPipeline.tokens(for: text, field: field)
+        }
+        func joined(_ tokens: [String]) -> String {
+            tokens.joined(separator: " ")
+        }
+        func stemStream(_ tokens: [String]) -> String {
+            guard let session else {
+                // No vendored stemmer for the detected language: the stem
+                // columns hold the folded stream, so a query that searches
+                // the stem columns with the folded form still matches.
+                return joined(tokens)
+            }
+            return tokens.map { session.transform($0) }.joined(separator: " ")
         }
         var recipients: [String] = []
         for recipient in message.record.to + message.record.cc + message.record.bcc {
@@ -49,17 +82,26 @@ struct SearchTokens: Sendable {
         let attachmentNames = message.attachments
             .compactMap { (attachment: AttachmentInfo) -> String? in attachment.filename }
             .joined(separator: " ")
-        self.subject = tokens(message.record.subject, .subject)
-        self.fromName = tokens(message.record.from?.name, .sender)
+        let subjectTokens = fieldTokens(message.record.subject, .subject)
+        let bodyTokens = fieldTokens(search.body, .body)
+        let quotedTokens = fieldTokens(search.quoted, .quoted)
+        self.subject = joined(subjectTokens)
+        self.fromName = joined(fieldTokens(message.record.from?.name, .sender))
         // The address is stored folded but raw: unicode61 splits it on
         // '@' and '.', which yields exactly the address-aware tokens
         // DESIGN 6A wants, and phrase queries (`from:a@b.c`) reassemble
         // them (same pattern as the FTS5 spike).
         self.fromAddr = message.record.from.map { TokenPipeline.folded($0.email) } ?? ""
-        self.recipients = tokens(recipients.joined(separator: " "), .recipient)
-        self.body = tokens(search.body, .body)
-        self.quoted = tokens(search.quoted, .quoted)
-        self.attachments = tokens(attachmentNames, .attachment)
+        self.recipients = joined(fieldTokens(recipients.joined(separator: " "), .recipient))
+        self.body = joined(bodyTokens)
+        self.quoted = joined(quotedTokens)
+        self.attachments = joined(fieldTokens(attachmentNames, .attachment))
+
+        // Stem columns (decision 0026): the stemmed stream for subject,
+        // body, and quoted. Sender and recipient have no stem columns.
+        self.subjectStem = stemStream(subjectTokens)
+        self.bodyStem = stemStream(bodyTokens)
+        self.quotedStem = stemStream(quotedTokens)
 
         self.trigramSubject = TokenPipeline.folded(message.record.subject ?? "")
         self.trigramFromName = TokenPipeline.folded(message.record.from?.name ?? "")
@@ -410,8 +452,9 @@ extension ArchiveStore {
         try db.execute(
             sql: """
             INSERT INTO message_text
-                (rowid, subject, from_name, from_addr, recipients, body, quoted, attachments)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (rowid, subject, from_name, from_addr, recipients, body, quoted, attachments,
+                 subject_stem, body_stem, quoted_stem)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
                 messageRowID,
@@ -422,6 +465,9 @@ extension ArchiveStore {
                 tokens.body,
                 tokens.quoted,
                 tokens.attachments,
+                tokens.subjectStem,
+                tokens.bodyStem,
+                tokens.quotedStem,
             ]
         )
         try db.execute(

@@ -99,10 +99,13 @@ final class AsYouTypeTests: XCTestCase {
         ])
         try store.refreshAsYouTypeVocabulary()
         // "m" completes from the precomputed first-letter table, which the
-        // import filled: meeting and monday, ordered by term on a tie.
+        // import filled: meeting, monday, and — decision 0026 — the stem
+        // "meet" that the ingest stored alongside "meeting", so a user who
+        // types "meet" finds the message through its indexed stem. Ordered
+        // by term on a tie.
         let result = try store.searchAsYouType("m")
-        XCTAssertEqual(result.completions.map(\.term), ["meeting", "monday"])
-        XCTAssertEqual(result.matchSet, 2)
+        XCTAssertEqual(result.completions.map(\.term), ["meet", "meeting", "monday"])
+        XCTAssertEqual(result.matchSet, 3)
         XCTAssertEqual(result.ranked.map(\.messageID), [1])
     }
 
@@ -308,5 +311,36 @@ final class AsYouTypeTests: XCTestCase {
         let u = try store.searchAsYouType("u")
         XCTAssertEqual(u.completions.map(\.term), ["undated"])
         XCTAssertEqual(u.ranked.map(\.messageID), [2])
+    }
+
+    // MARK: Phrase adjacency under stemming (decision 0026)
+
+    func testStemmingNeverBreaksPhraseAdjacency() throws {
+        // Regression for the interleaved-stem design: indexing each token's
+        // stem into the same FTS column turned "running budgets" into
+        // "running run budgets budget", and the phrase "running budgets"
+        // matched nothing. Stems live in separate stem columns now; the
+        // original token stream stays adjacent.
+        let store = try makeStore()
+        try ingest(store, [
+            makeMessage(subject: "Budget review", body: "The running budgets for next quarter arrive Friday"),
+            makeMessage(subject: "Schedule note", body: "budgets running late this week"),
+        ])
+        // The adjacent phrase finds its message…
+        XCTAssertEqual(
+            try store.search("\"running budgets\"").hits.map(\.messageID),
+            [1])
+        // …in the other order the words are not adjacent…
+        XCTAssertEqual(
+            try store.search("\"budgets running\"").hits.map(\.messageID),
+            [2])
+        // …and stemming still supplies term recall: "running" (stem "run")
+        // and "budgets" (stem "budget") each find both messages.
+        XCTAssertEqual(
+            Set(try store.search("running").hits.map(\.messageID)),
+            Set([1, 2]))
+        XCTAssertEqual(
+            Set(try store.search("budgets").hits.map(\.messageID)),
+            Set([1, 2]))
     }
 }

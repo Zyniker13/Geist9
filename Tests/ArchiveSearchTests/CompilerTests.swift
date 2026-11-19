@@ -17,18 +17,30 @@ final class CompilerTests: XCTestCase {
 
     func testAdjacentBareTermsMergeIntoOneLeaf() throws {
         let leaf = try leaf("hutopuza capu")
-        XCTAssertEqual(leaf.expression, "{subject from_name from_addr recipients body attachments} : hutopuza AND capu")
+        XCTAssertEqual(leaf.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : (({subject from_name from_addr recipients body attachments} : hutopuza"
+            + " OR {subject_stem body_stem} : hutopuza)"
+            + " AND ({subject from_name from_addr recipients body attachments} : capu"
+            + " OR {subject_stem body_stem} : capu))")
         XCTAssertNotNil(leaf.trigramFallback)
     }
 
     func testThreeTermsMergeIntoOneLeaf() throws {
         let leaf = try leaf("hutopuza capu zizo")
-        XCTAssertEqual(leaf.expression, "{subject from_name from_addr recipients body attachments} : hutopuza AND capu AND zizo")
+        XCTAssertEqual(leaf.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : (({subject from_name from_addr recipients body attachments} : hutopuza"
+            + " OR {subject_stem body_stem} : hutopuza)"
+            + " AND ({subject from_name from_addr recipients body attachments} : capu"
+            + " OR {subject_stem body_stem} : capu)"
+            + " AND ({subject from_name from_addr recipients body attachments} : zizo"
+            + " OR {subject_stem body_stem} : zizo))")
     }
 
     func testSingleTermStaysOneLeaf() throws {
         let leaf = try leaf("hutopuza")
-        XCTAssertEqual(leaf.expression, "{subject from_name from_addr recipients body attachments} : hutopuza")
+        XCTAssertEqual(leaf.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : ({subject from_name from_addr recipients body attachments} : hutopuza"
+            + " OR {subject_stem body_stem} : hutopuza)")
     }
 
     func testPhraseBreaksTheRun() throws {
@@ -49,7 +61,12 @@ final class CompilerTests: XCTestCase {
             XCTFail("expected text leaf second, got \(children[1])")
             return
         }
-        XCTAssertEqual(termLeaf.expression, "{subject from_name from_addr recipients body attachments} : notes")
+        // Decision 0026: "notes" expands to its forms — the folded form on
+        // the original columns and its English stem "note" on the stem
+        // columns (separate columns keep phrases adjacent).
+        XCTAssertEqual(termLeaf.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : ({subject from_name from_addr recipients body attachments} : notes"
+            + " OR {subject_stem body_stem} : note)")
     }
 
     func testFieldFilterBreaksTheRun() throws {
@@ -70,7 +87,11 @@ final class CompilerTests: XCTestCase {
             XCTFail("expected one merged text leaf, got \(children[1])")
             return
         }
-        XCTAssertEqual(textLeaf.expression, "{subject from_name from_addr recipients body attachments} : hello AND there")
+        XCTAssertEqual(textLeaf.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : (({subject from_name from_addr recipients body attachments} : hello"
+            + " OR {subject_stem body_stem} : hello)"
+            + " AND ({subject from_name from_addr recipients body attachments} : there"
+            + " OR {subject_stem body_stem} : there))")
     }
 
     func testNegationBreaksTheRun() throws {
@@ -84,7 +105,9 @@ final class CompilerTests: XCTestCase {
             XCTFail("expected text leaf first, got \(children[0])")
             return
         }
-        XCTAssertEqual(hello.expression, "{subject from_name from_addr recipients body attachments} : hello")
+        XCTAssertEqual(hello.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : ({subject from_name from_addr recipients body attachments} : hello"
+            + " OR {subject_stem body_stem} : hello)")
         guard case .not(let inner) = children[1] else {
             XCTFail("expected NOT second, got \(children[1])")
             return
@@ -93,7 +116,9 @@ final class CompilerTests: XCTestCase {
             XCTFail("expected NOT of a text leaf, got \(inner)")
             return
         }
-        XCTAssertEqual(excluded.expression, "{subject from_name from_addr recipients body attachments} : world")
+        XCTAssertEqual(excluded.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : ({subject from_name from_addr recipients body attachments} : world"
+            + " OR {subject_stem body_stem} : world)")
     }
 
     func testOrAlternativesKeepTheirOwnRuns() throws {
@@ -109,12 +134,18 @@ final class CompilerTests: XCTestCase {
             XCTFail("expected text leaf first, got \(alternatives[0])")
             return
         }
-        XCTAssertEqual(a.expression, "{subject from_name from_addr recipients body attachments} : a")
+        XCTAssertEqual(a.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : ({subject from_name from_addr recipients body attachments} : a"
+            + " OR {subject_stem body_stem} : a)")
         guard case .fts(let bc) = alternatives[1] else {
             XCTFail("expected merged text leaf second, got \(alternatives[1])")
             return
         }
-        XCTAssertEqual(bc.expression, "{subject from_name from_addr recipients body attachments} : b AND c")
+        XCTAssertEqual(bc.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : (({subject from_name from_addr recipients body attachments} : b"
+            + " OR {subject_stem body_stem} : b)"
+            + " AND ({subject from_name from_addr recipients body attachments} : c"
+            + " OR {subject_stem body_stem} : c))")
     }
 
     func testParenthesizedGroupMergesInside() throws {
@@ -130,12 +161,18 @@ final class CompilerTests: XCTestCase {
             XCTFail("expected merged leaf inside the group, got \(children[0])")
             return
         }
-        XCTAssertEqual(inner.expression, "{subject from_name from_addr recipients body attachments} : x AND y")
+        XCTAssertEqual(inner.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : (({subject from_name from_addr recipients body attachments} : x"
+            + " OR {subject_stem body_stem} : x)"
+            + " AND ({subject from_name from_addr recipients body attachments} : y"
+            + " OR {subject_stem body_stem} : y))")
         guard case .fts(let z) = children[1] else {
             XCTFail("expected separate z leaf, got \(children[1])")
             return
         }
-        XCTAssertEqual(z.expression, "{subject from_name from_addr recipients body attachments} : z")
+        XCTAssertEqual(z.expression, "{subject from_name from_addr recipients body attachments}"
+            + " : ({subject from_name from_addr recipients body attachments} : z"
+            + " OR {subject_stem body_stem} : z)")
     }
 
     func testMergedLeafKeepsTrigramFallback() throws {

@@ -16,7 +16,10 @@ enum TextIndexVersion {
     static let v1 = 1
     /// M2.1: adds the trigram index over raw folded text.
     static let v2 = 2
-    static var current: Int { v2 }
+    /// M2.2: subject, body, and quoted are stemmed under the message's
+    /// detected language (decision 0026).
+    static let v3 = 3
+    static var current: Int { v3 }
 }
 
 extension ArchiveStore {

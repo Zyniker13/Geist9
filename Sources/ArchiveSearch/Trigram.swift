@@ -58,7 +58,7 @@ enum TrigramPlan {
             }
         }
         guard !usable.isEmpty else { return nil }
-        return "{\(columns)} : \(usable.joined(separator: " AND "))"
+        return "{\(columns)} : \(QueryCompiler.parenthesizedJoin(usable, "AND"))"
     }
 
     /// Splits one phrase into maximal runs of a single script class (CJK

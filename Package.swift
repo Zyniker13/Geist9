@@ -88,8 +88,12 @@ let package = Package(
         .target(name: "MailMIME"),
         // IMAP, JMAP, provider database (DESIGN 5)
         .target(name: "MailSync"),
-        // tokenizers, FTS, ranking, facets, query language (DESIGN 6A)
-        .target(name: "ArchiveSearch"),
+        // vendored Snowball stemmers, BSD-3 (Sources/CStemmer/PROVENANCE.md,
+        // decision 0026)
+        .target(name: "CStemmer"),
+        // tokenizers, FTS, ranking, facets, query language (DESIGN 6A);
+        // stems through the vendored Snowball C (decision 0026)
+        .target(name: "ArchiveSearch", dependencies: ["CStemmer"]),
         // attachment text, OCR, entities, embeddings (DESIGN 6A)
         .target(name: "ArchiveExtract"),
         // envelope, SQLCipher glue (DESIGN 10)

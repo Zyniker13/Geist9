@@ -363,7 +363,10 @@ extension ArchiveStore {
         guard let node = try QueryParser.parse(query) else {
             return SearchResults(hits: [], warnings: [])
         }
-        let compiled = try QueryCompiler.compile(node)
+        // Stemming (DESIGN 6A, decision 0026): detect the query's language
+        // once and expand every text token to its forms.
+        let language = Stemming.detectLanguage(query)
+        let compiled = try QueryCompiler.compile(node, language: language)
         let hits = try db.read { db in
             try SearchExecutor.run(
                 compiled.root, in: db, limit: limit, offset: offset,
@@ -401,13 +404,16 @@ extension ArchiveStore {
         guard let node = try? QueryParser.parse(query) else {
             return AsYouTypeResults(completions: [], matchSet: 0, ranked: [])
         }
+        // Stemming (DESIGN 6A, decision 0026): detect the query's language
+        // once; both compile paths below expand text tokens to their forms.
+        let language = Stemming.detectLanguage(query)
         guard let prefix = Self.activePrefix(of: node), !Self.isCommitted(query) else {
             // No active prefix: the query is committed (it ends in a
             // terminator, so its last term is final) or it has no text
             // clause. Either way the ranked search runs as if the query had
             // been entered; matchSet 0 means "not computed" — callers use
             // `ranked`, not the gate.
-            let compiled = try QueryCompiler.compile(node)
+            let compiled = try QueryCompiler.compile(node, language: language)
             let hits = try db.read { db in
                 try SearchExecutor.run(compiled.root, in: db, limit: limit)
             }
@@ -418,7 +424,7 @@ extension ArchiveStore {
         }
         var ranked: [SearchHit] = []
         if completion.matchSet <= Vocabulary.gateThreshold {
-            let compiled = try QueryCompiler.compile(node, asYouType: true)
+            let compiled = try QueryCompiler.compile(node, asYouType: true, language: language)
             ranked = try db.read { db in
                 try SearchExecutor.run(compiled.root, in: db, limit: limit)
             }

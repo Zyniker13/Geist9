@@ -481,12 +481,20 @@ public struct CompiledQuery: Sendable, Equatable {
 }
 
 public enum QueryCompiler {
-    /// message_text column order; the bm25 weight list must match it.
-    static let columns = ["subject", "from_name", "from_addr", "recipients", "body", "quoted", "attachments"]
+    /// message_text column order; the bm25 weight list must match it. The
+    /// three stem columns (decision 0026) mirror subject, body, and quoted
+    /// and hold the Snowball stems; they rank below the original columns so
+    /// an exact match always beats a stem-only match.
+    static let columns = [
+        "subject", "from_name", "from_addr", "recipients", "body", "quoted", "attachments",
+        "subject_stem", "body_stem", "quoted_stem",
+    ]
     /// Field weights (DESIGN 6A): subject ranks highest, then sender name
     /// and address, then other recipients, then the body; quoted text and
-    /// attachment names barely count.
-    public static let bm25Weights = "12.0, 8.0, 6.0, 5.0, 1.0, 0.4, 0.3"
+    /// attachment names barely count. The stem columns (decision 0026) rank
+    /// below their originals: subject_stem 1.0, body_stem 0.2, quoted_stem
+    /// 0.1.
+    public static let bm25Weights = "12.0, 8.0, 6.0, 5.0, 1.0, 0.4, 0.3, 1.0, 0.2, 0.1"
     /// Fields bare terms search: everything indexed at message level except
     /// quoted text (which only phrase-quoted terms reach, at low weight).
     static let bareColumns = "{subject from_name from_addr recipients body attachments}"
@@ -494,18 +502,54 @@ public enum QueryCompiler {
     /// quoted text, so a phrase like `"budget looks fine"` still finds a
     /// reply's quoted text — at quoted's low rank (DESIGN 6A).
     static let phraseColumns = "{subject from_name from_addr recipients body quoted attachments}"
+    /// The stem columns a field's stem forms search (decision 0026). Only
+    /// subject, body, and quoted are stemmed at index time, so sender and
+    /// recipient have no stem columns and their tokens are not stem-expanded.
+    /// For `.any`, a bare term reaches subject and body (not quoted), while a
+    /// phrase also reaches quoted — mirroring bareColumns / phraseColumns.
+    static func stemColumns(field: SearchField, phrase: Bool) -> String? {
+        switch field {
+        case .subject: return "{subject_stem}"
+        case .body: return "{body_stem}"
+        case .any: return phrase ? "{subject_stem body_stem quoted_stem}" : "{subject_stem body_stem}"
+        case .sender, .recipient: return nil
+        }
+    }
+    /// Joins clause strings with an operator, wrapping the result in
+    /// parentheses when more than one clause is joined. FTS5 column filters
+    /// bind only to the phrase or parenthesized group that immediately
+    /// follows them — `{a} : x AND y` searches y across all columns — so a
+    /// compound leaf expression must carry its own parentheses to keep every
+    /// operand inside the field's column set (verified against sqlite3).
+    static func parenthesizedJoin(_ parts: [String], _ op: String) -> String {
+        guard parts.count > 1 else { return parts.first ?? "" }
+        return "(" + parts.joined(separator: " \(op) ") + ")"
+    }
 
     /// Compiles a parsed query. With `asYouType` the last text or phrase
     /// clause in reading order carries the active prefix: its final token
     /// compiles as an FTS5 prefix match (`kickof*`), so the ranked path
     /// covers the word being typed while the gate allows it (decision 0025).
-    public static func compile(_ node: SearchNode, asYouType: Bool = false) throws -> CompiledQuery {
+    /// With `language` (the query's detected language, decision 0026) every
+    /// text token expands to its forms: the folded form, the stem in that
+    /// language, and the stem in English — so a wrong language guess can
+    /// never lose the exact match.
+    public static func compile(
+        _ node: SearchNode, asYouType: Bool = false, language: String? = nil
+    ) throws -> CompiledQuery {
         var warnings: [String] = []
         let merged = Self.mergeAdjacentText(node)
         let textCount = Self.countTextClauses(merged)
         let prefixLast: Int? = asYouType && textCount > 0 ? textCount - 1 : nil
+        // The English stemmer is always available (it is vendored); the
+        // detected-language session only when detection produced one.
+        let detected = language.flatMap { StemmingSession(language: $0) }
+        let english = StemmingSession(language: "en")
         var seen = 0
-        let root = try compileNode(merged, prefixLast: prefixLast, seen: &seen, into: &warnings)
+        let root = try compileNode(
+            merged, prefixLast: prefixLast, seen: &seen,
+            detected: detected, english: english, into: &warnings
+        )
         return CompiledQuery(root: root, warnings: warnings)
     }
 
@@ -568,31 +612,41 @@ public enum QueryCompiler {
         }
     }
 
-    static func compileNode(_ node: SearchNode, prefixLast: Int?, seen: inout Int, into warnings: inout [String]) throws -> CompiledNode {
+    static func compileNode(
+        _ node: SearchNode, prefixLast: Int?, seen: inout Int,
+        detected: StemmingSession?, english: StemmingSession?, into warnings: inout [String]
+    ) throws -> CompiledNode {
         switch node {
         case .and(let children):
-            return .and(try children.map { try compileNode($0, prefixLast: prefixLast, seen: &seen, into: &warnings) })
+            return .and(try children.map {
+                try compileNode($0, prefixLast: prefixLast, seen: &seen, detected: detected, english: english, into: &warnings)
+            })
         case .or(let children):
-            return .or(try children.map { try compileNode($0, prefixLast: prefixLast, seen: &seen, into: &warnings) })
+            return .or(try children.map {
+                try compileNode($0, prefixLast: prefixLast, seen: &seen, detected: detected, english: english, into: &warnings)
+            })
         case .not(let inner):
-            return .not(try compileNode(inner, prefixLast: prefixLast, seen: &seen, into: &warnings))
+            return .not(try compileNode(inner, prefixLast: prefixLast, seen: &seen, detected: detected, english: english, into: &warnings))
         case .clause(let clause):
-            return try compileClause(clause, prefixLast: prefixLast, seen: &seen, into: &warnings)
+            return try compileClause(clause, prefixLast: prefixLast, seen: &seen, detected: detected, english: english, into: &warnings)
         }
     }
 
     // MARK: Clauses
 
-    static func compileClause(_ clause: Clause, prefixLast: Int?, seen: inout Int, into warnings: inout [String]) throws -> CompiledNode {
+    static func compileClause(
+        _ clause: Clause, prefixLast: Int?, seen: inout Int,
+        detected: StemmingSession?, english: StemmingSession?, into warnings: inout [String]
+    ) throws -> CompiledNode {
         switch clause {
         case .text(let field, let raw):
             let prefix = seen == prefixLast
             seen += 1
-            return try textNode(field: field, raw: raw, phrase: false, prefixLast: prefix)
+            return try textNode(field: field, raw: raw, phrase: false, prefixLast: prefix, detected: detected, english: english)
         case .phrase(let field, let raw):
             let prefix = seen == prefixLast
             seen += 1
-            return try textNode(field: field, raw: raw, phrase: true, prefixLast: prefix)
+            return try textNode(field: field, raw: raw, phrase: true, prefixLast: prefix, detected: detected, english: english)
         case .from(let value):
             return fromNode(value)
         case .recipient(let kind, let value):
@@ -662,7 +716,10 @@ public enum QueryCompiler {
         }
     }
 
-    static func textNode(field: SearchField, raw: String, phrase: Bool, prefixLast: Bool = false) throws -> CompiledNode {
+    static func textNode(
+        field: SearchField, raw: String, phrase: Bool, prefixLast: Bool = false,
+        detected: StemmingSession?, english: StemmingSession?
+    ) throws -> CompiledNode {
         let tokens = TokenPipeline.tokens(for: raw, field: textColumn(field))
         guard !tokens.isEmpty else {
             // Pure punctuation or noise: honest zero results, not "match all".
@@ -677,18 +734,99 @@ public enum QueryCompiler {
         case .body: columns = "{body}"
         }
         let inner = columns.dropFirst().dropLast()
+        let stemCols = Self.stemColumns(field: field, phrase: phrase)
+        // Stemming (DESIGN 6A, decision 0026): the folded forms stay in the
+        // original columns, where phrases keep their adjacency; the stems go
+        // in the stem columns, which give term recall. A wrong language guess
+        // can never lose the exact match, because the folded forms are always
+        // searched in the original columns.
+        let folded = tokens
+        let allStems = tokens.map {
+            Stemming.stemForms($0, detected: detected, english: english)
+        }
         let expression: String
         if phrase {
-            let terms = tokens.joined(separator: " ")
-            // A phrase prefix puts the marker on the last token, outside
-            // the quotes, the FTS5 way: "budget looks fi"*.
-            expression = prefixLast ? "\"\(terms)\"*" : "\"\(terms)\""
-        } else if prefixLast {
-            var pieces = tokens
-            pieces[pieces.count - 1].append("*")
-            expression = pieces.joined(separator: " AND ")
+            // A phrase is the OR of the folded phrase (original columns,
+            // adjacency preserved) and one stem phrase per language (stem
+            // columns): "running budgets" matches the indexed stem stream
+            // "run budget". A message's stems are all in its one detected
+            // language, so per-language phrases are the honest matches; a
+            // mixed per-token combination could only match where the stems
+            // coincide, which the pure phrases already cover.
+            let origPhrase = folded.joined(separator: " ")
+            // The prefix marker sits outside the quotes: "phrase"* is the
+            // FTS5 prefix form; "phrase*" would match the literal token
+            // "phrase*".
+            let origPart = prefixLast ? "\"\(origPhrase)\"*" : "\"\(origPhrase)\""
+            var parts = ["{\(inner)} : \(origPart)"]
+            if let stemCols {
+                // An OR group cannot live inside a quoted FTS5 phrase, so
+                // the active prefix emits one phrase per candidate ("runn"
+                // offers "runn" and the stems of its own prefixes, which
+                // reach the indexed stem "run" of "running").
+                let last = tokens.count - 1
+                var stemPhrases: [String] = []
+                for session in [detected, english] {
+                    guard let session else { continue }
+                    let stemTokens = tokens.map { session.transform($0) }
+                    if prefixLast {
+                        let candidates = Stemming.prefixCandidates(
+                            tokens[last], detected: detected, english: english
+                        )
+                        for candidate in candidates {
+                            var withCandidate = stemTokens
+                            withCandidate[last] = candidate
+                            let stemPhrase = withCandidate.joined(separator: " ")
+                            if !stemPhrases.contains(stemPhrase) {
+                                stemPhrases.append(stemPhrase)
+                            }
+                        }
+                    } else {
+                        let stemPhrase = stemTokens.joined(separator: " ")
+                        if !stemPhrases.contains(stemPhrase) {
+                            stemPhrases.append(stemPhrase)
+                        }
+                    }
+                }
+                for stemPhrase in stemPhrases {
+                    let marker = prefixLast ? "*" : ""
+                    parts.append("\(stemCols) : \"\(stemPhrase)\"\(marker)")
+                }
+            }
+            expression = Self.parenthesizedJoin(parts, "OR")
         } else {
-            expression = tokens.joined(separator: " AND ")
+            // A bare term is the AND of per-token groups; each group is the
+            // OR of the folded form (original columns) and the stem forms
+            // (stem columns). The last token is a prefix when prefixLast.
+            let last = tokens.count - 1
+            var tokenExprs: [String] = []
+            for i in 0..<tokens.count {
+                let isPrefix = prefixLast && i == last
+                let origTerm = isPrefix ? "\(folded[i])*" : folded[i]
+                var parts = ["{\(inner)} : \(origTerm)"]
+                if let stemCols {
+                    let stemTerm: String
+                    if isPrefix {
+                        // The typed prefix is rarely a prefix of the indexed
+                        // stem ("runn" vs "run"): offer the stems of the
+                        // prefix's own prefixes as alternates (decision 0026).
+                        let candidates = Stemming.prefixCandidates(
+                            folded[i], detected: detected, english: english
+                        )
+                        stemTerm = Stemming.expression(for: candidates.map { "\($0)*" })
+                    } else if allStems[i].isEmpty {
+                        // No session (should not happen: English is always
+                        // vendored) — fall back to the folded form, which
+                        // the stem columns hold for unstemmed tokens.
+                        stemTerm = folded[i]
+                    } else {
+                        stemTerm = Stemming.expression(for: allStems[i])
+                    }
+                    parts.append("\(stemCols) : \(stemTerm)")
+                }
+                tokenExprs.append(Self.parenthesizedJoin(parts, "OR"))
+            }
+            expression = Self.parenthesizedJoin(tokenExprs, "AND")
         }
         // The trigram fallback matches substrings, so it works on the raw
         // text's folded form (punctuation survives), not on the query's
@@ -744,7 +882,7 @@ public enum QueryCompiler {
             return .filter(SQLFilter(sql: "1 = 0", arguments: []))
         }
         return .fts(FTSLeaf(
-            expression: "{from_name from_addr} : \(tokens.joined(separator: " AND "))",
+            expression: "{from_name from_addr} : \(Self.parenthesizedJoin(tokens, "AND"))",
             trigramFallback: TrigramPlan.fallback(
                 columns: "from_name from_addr", phrases: tokens
             ),
@@ -770,7 +908,7 @@ public enum QueryCompiler {
             return .filter(SQLFilter(sql: "1 = 0", arguments: []))
         }
         return .fts(FTSLeaf(
-            expression: "{recipients} : \(tokens.joined(separator: " AND "))",
+            expression: "{recipients} : \(Self.parenthesizedJoin(tokens, "AND"))",
             trigramFallback: TrigramPlan.fallback(columns: "recipients", phrases: tokens),
             trigramEager: TokenPipeline.containsCJK(value)
         ))
