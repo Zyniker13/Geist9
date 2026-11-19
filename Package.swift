@@ -109,5 +109,13 @@ let package = Package(
         .testTarget(name: "ArchiveSearchTests", dependencies: ["ArchiveSearch"]),
         .testTarget(name: "MailMIMETests", dependencies: ["MailMIME"]),
         .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
+        // Judged relevance set (DESIGN 6A, decision 0028): deterministic
+        // topical corpus, metrics, and the runner the CI gate test drives.
+        .target(
+            name: "SearchEval",
+            dependencies: ["ArchiveCore", "ArchiveSearch", "MailMIME"],
+            resources: [.copy("qrels.json")]
+        ),
+        .testTarget(name: "SearchEvalTests", dependencies: ["SearchEval", "ArchiveCore"]),
     ]
 )
