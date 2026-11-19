@@ -187,6 +187,10 @@ The twenty providers span English, Chinese (QQ, 163), Korean (Naver), Russian (Y
 - Exact phrase and all-terms matches rank above partial matches; typo tolerance (one edit for words of five letters or more, via a spelling vocabulary built from the archive) applies only when exact matching finds little, and the UI says "showing results for ...".
 - **Hybrid semantic search** (on by default once its model is downloaded, off-switchable): each message's subject and opening text get a sentence embedding from an on-device Core ML model (multilingual, small enough to embed 1 million messages overnight on Apple silicon), stored in a vector index beside FTS5 (sqlite-vec, MIT/Apache-2.0, or our own flat index if that is simpler to sandbox). Keyword and semantic results merge by reciprocal rank fusion, so "the email where the landlord agreed to fix the heater" finds it without those words. The model choice and license get a decision record in M0.
 
+### Facets
+
+- The first facet slice stands beside the results for entity kinds (decision 0033): for the query's full match set, `entityFacets(matching:)` returns how many messages carry each entity kind, and `entityValues(_:matching:)` drills into one kind, ranking its written values by message count (deterministic — value-ascending on ties, capped by `limit`). The counts cover the whole match set, not one result page, and follow the same zero-hit trigram retry the hits follow, so the facets always describe the set on screen; kinds with no matching messages are absent, not zero. Account, sender, year-and-month (the draggable timeline histogram), folder or label, and attachment-type facets arrive with their sources in later milestones and run under the same 300 ms faceted-counts budget.
+
 ### Query Language and UI
 
 - Free text plus operators: `from:`, `to:`, `cc:`, `subject:`, `body:`, `has:attachment`, `filename:`, `type:pdf`, `label:`, `folder:`, `account:`, `is:unread`, `is:starred`, `is:sent`, `before:`, `after:`, `on:`, `during:2019`, `larger:5MB`, `smaller:`, `amount:>100`, `domain:`, quoted phrases, `OR`, parentheses, `-` to exclude. Natural dates ("last March", "2019") parse into ranges.

@@ -6,7 +6,9 @@ import Foundation
 /// Kinds: amounts and currencies; dates; phone numbers; tracking numbers;
 /// booking codes; domains. Postal addresses stay out until an operator
 /// needs them.
-enum EntityKind: String, Sendable, Equatable {
+/// The entity kinds recognized at ingest (DESIGN 6A). Rows live in the
+/// message_entity table; operators and facets query them by kind.
+public enum EntityKind: String, Sendable, Hashable {
     /// Money with its currency, normalized to a decimal number.
     case amount
     /// A calendar date, normalized to a UTC epoch. Date-only forms sit at
