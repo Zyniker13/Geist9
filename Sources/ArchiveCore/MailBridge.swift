@@ -18,10 +18,14 @@ public struct SearchText: Sendable, Equatable {
     public var body: String?
     /// Quoted replies and signature lines; nil when empty.
     public var quoted: String?
+    /// The searchable text of the message's text/* attachment parts
+    /// (decision 0029); nil when there is none.
+    public var attachments: String?
 
-    public init(body: String?, quoted: String?) {
+    public init(body: String?, quoted: String?, attachments: String? = nil) {
         self.body = body
         self.quoted = quoted
+        self.attachments = attachments
     }
 }
 
@@ -186,15 +190,18 @@ public enum MailBridge {
                 html = text
             }
         }
+        let attachments = extractAttachmentText(root)
         let source: String
         if let plain, !plain.isEmpty {
             source = plain
         } else if let html, !html.isEmpty {
             source = htmlToText(html)
         } else {
-            return SearchText(body: nil, quoted: nil)
+            return SearchText(body: nil, quoted: nil, attachments: attachments)
         }
-        return splitBodyText(source)
+        var text = splitBodyText(source)
+        text.attachments = attachments
+        return text
     }
 
     /// Leaves only: descends through multipart, never into message/rfc822.
@@ -205,6 +212,53 @@ public enum MailBridge {
         }
         if part.kind == .nestedMessage { return }
         visit(part)
+    }
+
+    /// Every leaf: descends through multipart and into nested messages,
+    /// visiting each leaf. The same traversal the attachment walk uses,
+    /// without paths.
+    private static func walkLeaves(_ part: MIMEPart, _ visit: (MIMEPart) -> Void) {
+        if part.kind == .multipart {
+            for child in part.children { walkLeaves(child, visit) }
+            return
+        }
+        if part.kind == .nestedMessage {
+            if let inner = part.children.first { walkLeaves(inner, visit) }
+            return
+        }
+        visit(part)
+    }
+
+    /// Cap on how much decoded attachment text one message contributes to
+    /// the index (decision 0029): huge text dumps stop adding value long
+    /// before this, and the cap bounds ingest cost.
+    static let maxAttachmentTextLength = 1_000_000
+
+    /// The searchable text of the message's text/* attachment parts
+    /// (decision 0029): plain text, CSV and other text/* parts in part
+    /// order, HTML reduced, capped at `maxAttachmentTextLength`. Per the
+    /// DESIGN 6 attachment rule a text/* leaf counts as an attachment when
+    /// its disposition says so; text leaves without a disposition are the
+    /// body, which the body columns already cover.
+    static func extractAttachmentText(_ root: MIMEPart) -> String? {
+        var pieces: [String] = []
+        var total = 0
+        walkLeaves(root) { part in
+            guard total < Self.maxAttachmentTextLength else { return }
+            let (main, parameters) = part.contentType
+            guard main.hasPrefix("text/"),
+                  part.contentDisposition["content-disposition"] == "attachment"
+            else { return }
+            let decoded = Charset.decode(parameters["charset"], Array(part.decodedBody))
+            let text = main == "text/html" ? htmlToText(decoded) : decoded
+            let remaining = Self.maxAttachmentTextLength - total
+            let clipped = text.count > remaining ? String(text.prefix(remaining)) : text
+            total += clipped.count
+            if !clipped.isEmpty { pieces.append(clipped) }
+        }
+        let joined = pieces.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : joined
     }
 
     /// Splits body text at the first quote or signature marker: everything

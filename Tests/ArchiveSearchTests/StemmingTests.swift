@@ -151,8 +151,7 @@ final class StemmingTests: XCTestCase {
         // nothing).
         XCTAssertEqual(
             try ftsExpressions(of: "\"running budgets notes studies\""),
-            ["{subject from_name from_addr recipients body quoted attachments}"
-                + " : ({subject from_name from_addr recipients body quoted attachments}"
+            ["({subject from_name from_addr recipients body quoted attachments}"
                 + " : \"running budgets notes studies\""
                 + " OR {subject_stem body_stem quoted_stem} : \"run budget note studi\")"])
     }
@@ -163,8 +162,7 @@ final class StemmingTests: XCTestCase {
         // one per language, detected first, never a per-token mixture.
         XCTAssertEqual(
             try ftsExpressions(of: "\"rechnungen studien\"", language: "de"),
-            ["{subject from_name from_addr recipients body quoted attachments}"
-                + " : ({subject from_name from_addr recipients body quoted attachments}"
+            ["({subject from_name from_addr recipients body quoted attachments}"
                 + " : \"rechnungen studien\""
                 + " OR {subject_stem body_stem quoted_stem} : \"rechnung studi\""
                 + " OR {subject_stem body_stem quoted_stem} : \"rechnungen studien\")"])

@@ -82,6 +82,11 @@ struct SearchTokens: Sendable {
         let attachmentNames = message.attachments
             .compactMap { (attachment: AttachmentInfo) -> String? in attachment.filename }
             .joined(separator: " ")
+        // Attachment text (decision 0029): the decoded text of text/*
+        // attachment parts joins the attachments column after the names.
+        // No stem column for it: attachment text is mostly machine-written
+        // data, where stemming adds noise rather than recall.
+        let attachmentText = search.attachments ?? ""
         let subjectTokens = fieldTokens(message.record.subject, .subject)
         let bodyTokens = fieldTokens(search.body, .body)
         let quotedTokens = fieldTokens(search.quoted, .quoted)
@@ -95,7 +100,10 @@ struct SearchTokens: Sendable {
         self.recipients = joined(fieldTokens(recipients.joined(separator: " "), .recipient))
         self.body = joined(bodyTokens)
         self.quoted = joined(quotedTokens)
-        self.attachments = joined(fieldTokens(attachmentNames, .attachment))
+        self.attachments = joined(
+            fieldTokens(attachmentNames, .attachment)
+                + fieldTokens(attachmentText, .attachment)
+        )
 
         // Stem columns (decision 0026): the stemmed stream for subject,
         // body, and quoted. Sender and recipient have no stem columns.
@@ -109,7 +117,10 @@ struct SearchTokens: Sendable {
         self.trigramRecipients = TokenPipeline.folded(recipients.joined(separator: " "))
         self.trigramBody = TokenPipeline.folded(search.body ?? "")
         self.trigramQuoted = TokenPipeline.folded(search.quoted ?? "")
-        self.trigramAttachments = TokenPipeline.folded(attachmentNames)
+        let attachmentSource = [attachmentNames, attachmentText]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        self.trigramAttachments = TokenPipeline.folded(attachmentSource)
     }
 
     /// The distinct FTS5 terms the message's text rows hold — the set this

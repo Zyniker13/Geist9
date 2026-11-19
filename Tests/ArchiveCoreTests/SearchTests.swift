@@ -696,4 +696,136 @@ final class SearchTests: XCTestCase {
         XCTAssertEqual(counts["messages"] as Int64, counts["ranks"] as Int64)
         XCTAssertGreaterThan(counts["messages"] as Int64, 1)
     }
+
+    // Regression (M2 judged set, 2026-11-19): the compiled leaf wrapped the
+    // per-token group in the bare-column filter again, so the nested stem
+    // column filter intersected down to nothing and a query whose only path
+    // to a message is a stem form ("seats" vs "Seat expansion") found
+    // nothing. The stem forms must reach the stem columns.
+    func testStemFormReachesTheStemColumns() throws {
+        let id = try ingest("""
+        Message-ID: <seats-regression@example.com>
+        Date: Tue, 12 Mar 2024 09:00:00 +0000
+        From: Cedar Run Sales <sales@cedarrun.example.com>
+        To: alice@example.com
+        Subject: Seat expansion to 26
+
+        We need a seat expansion from 18 to 26 users for the support team.
+        """)
+        XCTAssertTrue(
+            try idsMatching("seats").contains(id),
+            "\"seats\" must find the message through its stem form \"seat\""
+        )
+    }
+
+    // Regression (M2 judged set, 2026-11-19): text/* attachment parts carry
+    // searchable text (ROADMAP M2: attachment extraction). The attachments
+    // column used to hold only file names, so a token that existed only
+    // inside an attachment was invisible to every query.
+    func testAttachmentTextIsSearchable() throws {
+        let id = try ingest("""
+        Message-ID: <parts-regression@example.com>
+        Date: Tue, 12 Mar 2024 09:00:00 +0000
+        From: Birchline Orders <orders@birchline.example.com>
+        To: alice@example.com
+        Subject: Order BX-2214 confirmation
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary=BOUND
+
+        --BOUND
+        Content-Type: text/plain; charset=utf-8
+
+        Thanks for your order.
+        --BOUND
+        Content-Type: text/csv; charset=utf-8
+        Content-Disposition: attachment; filename="parts-bx-2214.csv"
+
+        part,description,quantity
+        FB-2214A,wheel bearing kit,2
+        --BOUND--
+        """)
+        XCTAssertTrue(
+            try idsMatching("FB-2214A").contains(id),
+            "the part number inside the CSV attachment must be searchable"
+        )
+        XCTAssertTrue(
+            try idsMatching("bearing").contains(id),
+            "attachment text must be searchable"
+        )
+    }
+
+    // Decision 0029: one message contributes at most 1 MB of decoded
+    // attachment text; text past the cap is not indexed.
+    func testAttachmentTextHasACap() throws {
+        let filler = String(repeating: "x", count: 1_100_000)
+        try ingest("""
+        Message-ID: <cap-regression@example.com>
+        Date: Tue, 12 Mar 2024 09:00:00 +0000
+        From: Birchline Orders <orders@birchline.example.com>
+        To: alice@example.com
+        Subject: The big export
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary=BOUND
+
+        --BOUND
+        Content-Type: text/plain; charset=utf-8
+
+        The export is attached.
+        --BOUND
+        Content-Type: text/plain; charset=utf-8
+        Content-Disposition: attachment; filename="big.txt"
+
+        \(filler)unsearchablezq
+        --BOUND--
+        """)
+        XCTAssertTrue(
+            try idsMatching("unsearchablezq").isEmpty,
+            "text past the attachment-text cap must not be indexed"
+        )
+    }
+
+    // Decision 0029: a row indexed by the previous pipeline version gains
+    // the attachment text when the backfill re-indexes it from the stored
+    // bytes. The stored bytes are never rewritten.
+    func testVersionBumpBackfillsAttachmentText() throws {
+        let id = try ingest("""
+        Message-ID: <backfill-regression@example.com>
+        Date: Tue, 12 Mar 2024 09:00:00 +0000
+        From: Birchline Orders <orders@birchline.example.com>
+        To: alice@example.com
+        Subject: Order BX-2214 confirmation
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary=BOUND
+
+        --BOUND
+        Content-Type: text/plain; charset=utf-8
+
+        Thanks for your order.
+        --BOUND
+        Content-Type: text/csv; charset=utf-8
+        Content-Disposition: attachment; filename="parts-bx-2214.csv"
+
+        part,description,quantity
+        FB-2214A,wheel bearing kit,2
+        --BOUND--
+        """)
+        // Simulate the previous pipeline: mark the row older than current
+        // and blank the attachment text the old row could not have had.
+        try store.db.write { db in
+            try db.execute(
+                sql: "UPDATE message SET textVersion = textVersion - 1 WHERE id = ?",
+                arguments: [id]
+            )
+            try db.execute(
+                sql: "UPDATE message_text SET attachments = 'parts bx 2214 csv' WHERE rowid = ?",
+                arguments: [id]
+            )
+        }
+        let processed = try store.reindexOutdated()
+        XCTAssertEqual(processed, 1)
+        XCTAssertTrue(
+            try idsMatching("FB-2214A").contains(id),
+            "the backfill must restore attachment text from the stored bytes"
+        )
+    }
 }

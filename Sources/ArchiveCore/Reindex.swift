@@ -19,7 +19,11 @@ enum TextIndexVersion {
     /// M2.2: subject, body, and quoted are stemmed under the message's
     /// detected language (decision 0026).
     static let v3 = 3
-    static var current: Int { v3 }
+    /// M2.3: the decoded text of text/* attachment parts joins the
+    /// attachments column (decision 0029); the backfill re-indexes older
+    /// rows from their stored bytes to add it.
+    static let v4 = 4
+    static var current: Int { v4 }
 }
 
 extension ArchiveStore {

@@ -37,7 +37,7 @@ final class AsYouTypeCompilerTests: XCTestCase {
         // "budget" also finds messages indexed under a shorter stem.
         XCTAssertEqual(
             try expressions("kickoff budget", asYouType: true),
-            ["\(QueryCompiler.bareColumns) : ((\(QueryCompiler.bareColumns) : kickoff"
+            ["((\(QueryCompiler.bareColumns) : kickoff"
                 + " OR {subject_stem body_stem} : kickoff)"
                 + " AND (\(QueryCompiler.bareColumns) : budget*"
                 + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*)))"])
@@ -46,13 +46,13 @@ final class AsYouTypeCompilerTests: XCTestCase {
     func testCommittedCompileNeverMarksAPrefix() throws {
         XCTAssertEqual(
             try expressions("kickoff budget"),
-            ["\(QueryCompiler.bareColumns) : ((\(QueryCompiler.bareColumns) : kickoff"
+            ["((\(QueryCompiler.bareColumns) : kickoff"
                 + " OR {subject_stem body_stem} : kickoff)"
                 + " AND (\(QueryCompiler.bareColumns) : budget"
                 + " OR {subject_stem body_stem} : budget))"])
         XCTAssertEqual(
             try expressions("kickoff budget", asYouType: false),
-            ["\(QueryCompiler.bareColumns) : ((\(QueryCompiler.bareColumns) : kickoff"
+            ["((\(QueryCompiler.bareColumns) : kickoff"
                 + " OR {subject_stem body_stem} : kickoff)"
                 + " AND (\(QueryCompiler.bareColumns) : budget"
                 + " OR {subject_stem body_stem} : budget))"])
@@ -62,8 +62,7 @@ final class AsYouTypeCompilerTests: XCTestCase {
         // also match).
         XCTAssertEqual(
             try expressions("\"budget looks fi\""),
-            ["\(QueryCompiler.phraseColumns) : (\(QueryCompiler.phraseColumns)"
-                + " : \"budget looks fi\""
+            ["(\(QueryCompiler.phraseColumns) : \"budget looks fi\""
                 + " OR {subject_stem body_stem quoted_stem} : \"budget look fi\")"])
     }
 
@@ -73,15 +72,15 @@ final class AsYouTypeCompilerTests: XCTestCase {
         // 3-letter prefix ("kic" -> "kic"; "kick" stems to itself).
         XCTAssertEqual(
             try expressions("kick", asYouType: true),
-            ["\(QueryCompiler.bareColumns) : (\(QueryCompiler.bareColumns) : kick*"
+            ["(\(QueryCompiler.bareColumns) : kick*"
                 + " OR {subject_stem body_stem} : (kick* OR kic*))"])
     }
 
     func testPrefixMarksOnlyTheLastClause() throws {
         XCTAssertEqual(
             try expressions("subject:kick budget", asYouType: true),
-            ["{subject} : ({subject} : kick OR {subject_stem} : kick)",
-             "\(QueryCompiler.bareColumns) : (\(QueryCompiler.bareColumns) : budget*"
+            ["({subject} : kick OR {subject_stem} : kick)",
+             "(\(QueryCompiler.bareColumns) : budget*"
                 + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*))"])
     }
 
@@ -89,9 +88,9 @@ final class AsYouTypeCompilerTests: XCTestCase {
         XCTAssertEqual(
             try expressions("-kick budget", asYouType: true),
             [
-                "\(QueryCompiler.bareColumns) : (\(QueryCompiler.bareColumns) : kick"
+                "(\(QueryCompiler.bareColumns) : kick"
                     + " OR {subject_stem body_stem} : kick)",
-                "\(QueryCompiler.bareColumns) : (\(QueryCompiler.bareColumns) : budget*"
+                "(\(QueryCompiler.bareColumns) : budget*"
                     + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*))",
             ])
     }
@@ -102,8 +101,7 @@ final class AsYouTypeCompilerTests: XCTestCase {
         // marker.
         XCTAssertEqual(
             try expressions("\"budget looks fi\"", asYouType: true),
-            ["\(QueryCompiler.phraseColumns) : (\(QueryCompiler.phraseColumns)"
-                + " : \"budget looks fi\"*"
+            ["(\(QueryCompiler.phraseColumns) : \"budget looks fi\"*"
                 + " OR {subject_stem body_stem quoted_stem} : \"budget look fi\"*)"])
     }
 
@@ -115,10 +113,9 @@ final class AsYouTypeCompilerTests: XCTestCase {
         XCTAssertEqual(
             try expressions("\"kickoff meeting\" budget", asYouType: true),
             [
-                "\(QueryCompiler.phraseColumns) : (\(QueryCompiler.phraseColumns)"
-                    + " : \"kickoff meeting\""
+                "(\(QueryCompiler.phraseColumns) : \"kickoff meeting\""
                     + " OR {subject_stem body_stem quoted_stem} : \"kickoff meet\")",
-                "\(QueryCompiler.bareColumns) : (\(QueryCompiler.bareColumns) : budget*"
+                "(\(QueryCompiler.bareColumns) : budget*"
                     + " OR {subject_stem body_stem} : (budget* OR bud* OR budg*))",
             ])
     }

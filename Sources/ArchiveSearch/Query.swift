@@ -851,7 +851,11 @@ public enum QueryCompiler {
             fallbackPhrases = tokens + [foldedRaw]
         }
         return .fts(FTSLeaf(
-            expression: "{\(inner)} : \(expression)",
+            // The per-token groups carry their own column filters (original
+            // vs stem columns); wrapping them again in the leaf's base
+            // columns would NARROW the stem half to an empty set, because
+            // nested FTS5 column filters intersect. No outer wrap.
+            expression: expression,
             trigramFallback: TrigramPlan.fallback(columns: String(inner), phrases: fallbackPhrases),
             trigramEager: TokenPipeline.containsCJK(raw)
         ))
