@@ -133,12 +133,22 @@ public enum SearchExecutor {
     /// like 1/(1 + age/30 days); a message without a usable date gets no
     /// boost. Personal boosts (sent, replied, starred) and the semantic
     /// hybrid are later-milestone ranking work.
-    private static let recencyFactorSQL = """
-        (1.0 + 0.10 * COALESCE(
-            1.0 / (1.0 + MAX(0.0, julianday('now')
-                - julianday(COALESCE(m.dateSent, m.dateReceived))) / 30.0),
-            0.0))
-        """
+    ///
+    /// Executor v2: the "now" half is a bound parameter and the day half is
+    /// the precomputed REAL `day` from `message_rank` (migration core-v6),
+    /// so the per-row `julianday()` pair is gone. `dayRef` is `r.day` in
+    /// the flat shape and `day` when the side table's column has been
+    /// projected into a subquery.
+    private static func recencyFactor(_ dayRef: String) -> String {
+        "(1.0 + 0.10 * COALESCE(" +
+            "1.0 / (1.0 + MAX(0.0, :now - \(dayRef)) / 30.0), 0.0))"
+    }
+
+    /// Julian day for the recency bound parameter, matching SQLite's
+    /// `julianday('now')` (2440587.5 = the 1970-01-01 epoch anchor).
+    private static func nowJD() -> Double {
+        2440587.5 + Date().timeIntervalSince1970 / 86400.0
+    }
 
     /// Field weights for the trigram fallback: all columns equal, because a
     /// substring hit carries no per-field strength the exact path's weights
@@ -150,6 +160,16 @@ public enum SearchExecutor {
     /// is a better match. `rank` on the hit is the raw bm25 score. The
     /// exact path runs over message_text with the tuned weights; the
     /// trigram fallback runs over message_trigram with equal weights.
+    ///
+    /// Executor v2 shape (profiled on the 1M corpus): bm25() is called once
+    /// per matched row (the old shape called it twice), the join goes to
+    /// the narrow `message_rank` side table (id, threadID, day) instead of
+    /// the wide `message` row, `now` is a bound parameter instead of a
+    /// per-row `julianday('now')` call, and snippets are computed only for
+    /// the surviving rows in a second pass. The FTS table is referenced
+    /// unaliased: FTS5's aux functions (`bm25`, `snippet`) and MATCH
+    /// resolve the hidden column by the table's real name, never a SQL
+    /// alias.
     static func ranked(
         _ expression: String, in db: Database, limit: Int, offset: Int,
         withSnippets: Bool, groupByThread: Bool,
@@ -161,53 +181,80 @@ public enum SearchExecutor {
                 .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
                 .map { String(format: "%.1f", $0) }
                 .joined(separator: ", ")
-        let snippetColumn = withSnippets
-            ? ", snippet(\(table), -1, '[[', ']]', ' … ', 16) AS snip"
-            : ""
+        let args = StatementArguments(["q": expression, "now": nowJD()])
         // bm25() with the field weights both scores and orders the rows;
         // the implicit `rank` column would rank with default weights (all
         // fields equal), which the search contract does not want.
-        let base = """
-            SELECT m.id AS id, m.threadID AS threadID,
-                   bm25(\(table), \(weights)) AS score,
-                   bm25(\(table), \(weights)) * \(recencyFactorSQL) AS final\(snippetColumn)
-            FROM \(table)
-            JOIN message m ON m.id = \(table).rowid
-            WHERE \(table) MATCH ?
+        let baseCols = """
+            SELECT \(table).rowid AS id, r.threadID AS threadID,
+                   bm25(\(table), \(weights)) AS score
             """
-        let outer = withSnippets ? "id, threadID, score, snip" : "id, threadID, score"
+        let baseFrom = """
+            FROM \(table)
+            JOIN message_rank r ON r.id = \(table).rowid
+            WHERE \(table) MATCH :q
+            """
         let sql: String
         if groupByThread {
             // Same window-function dedup as the predicate path, keyed on
             // rank order: each thread's best-scoring hit survives, and
-            // paging stays correct no matter how much collapses.
+            // paging stays correct no matter how much collapses. The inner
+            // subquery also projects `day`, which the middle level needs
+            // as a plain column to multiply into the recency factor
+            // (SQLite only resolves select-list aliases in ORDER BY and
+            // friends, so the middle level cannot reference `score`
+            // through an alias chain — it can reference it as a column).
             sql = """
-            SELECT \(outer) FROM (
-                SELECT *, ROW_NUMBER() OVER (
-                    PARTITION BY COALESCE(threadID, -id) ORDER BY final
-                ) AS rn
-                FROM (\(base))
-            )
-            WHERE rn = 1
-            ORDER BY final
-            LIMIT \(max(0, limit)) OFFSET \(max(0, offset))
-            """
+                SELECT id, threadID, score FROM (
+                    SELECT id, threadID, score,
+                           score * \(recencyFactor("day")) AS final,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY COALESCE(threadID, -id)
+                               ORDER BY score * \(recencyFactor("day"))
+                           ) AS rn
+                    FROM (\(baseCols), r.day AS day \(baseFrom))
+                )
+                WHERE rn = 1
+                ORDER BY final
+                LIMIT \(max(0, limit)) OFFSET \(max(0, offset))
+                """
         } else {
             sql = """
-            \(base)
-            ORDER BY final
-            LIMIT \(max(0, limit)) OFFSET \(max(0, offset))
-            """
+                \(baseCols) \(baseFrom)
+                ORDER BY score * \(recencyFactor("r.day"))
+                LIMIT \(max(0, limit)) OFFSET \(max(0, offset))
+                """
         }
-        let rows = try Row.fetchAll(db, sql: sql, arguments: [expression])
-        return rows.map { row -> SearchHit in
+        let rows = try Row.fetchAll(db, sql: sql, arguments: args)
+        var hits: [SearchHit] = rows.map { row -> SearchHit in
             let id: Int64 = row["id"] ?? 0
-            let snippet: String? = withSnippets ? row["snip"] : nil
             return SearchHit(
                 messageID: id, rank: row["score"], threadID: row["threadID"],
-                snippet: snippet, viaTrigram: viaTrigram
+                viaTrigram: viaTrigram
             )
         }
+        guard withSnippets, !hits.isEmpty else { return hits }
+        // Deferred snippets: re-run the same MATCH restricted to the
+        // surviving rowids so snippet() sees the query's term offsets (a
+        // rowid-only lookup would produce fallback snippets), then attach.
+        // The FTS scan touches only the survivors.
+        let idsJSON = "[" + hits.map { String($0.messageID) }.joined(separator: ",") + "]"
+        let snipSQL = """
+            SELECT rowid AS rid, snippet(\(table), -1, '[[', ']]', ' … ', 16) AS snip
+            FROM \(table)
+            WHERE \(table) MATCH :q
+              AND rowid IN (SELECT value FROM json_each(:ids))
+            """
+        let snipArgs = StatementArguments(["q": expression, "ids": idsJSON])
+        var snippets: [Int64: String] = [:]
+        for row in try Row.fetchAll(db, sql: snipSQL, arguments: snipArgs) {
+            let id: Int64 = row["rid"] ?? 0
+            snippets[id] = row["snip"]
+        }
+        for index in hits.indices {
+            hits[index].snippet = snippets[hits[index].messageID]
+        }
+        return hits
     }
 
     // MARK: Predicate path

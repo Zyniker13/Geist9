@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 5
+    public static let version = 6
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -25,6 +25,7 @@ public enum IndexSchema {
         ("core-v3", coreV3),
         ("core-v4", coreV4),
         ("core-v5", coreV5),
+        ("core-v6", coreV6),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -209,6 +210,28 @@ public enum IndexSchema {
         try db.alter(table: "message") { t in
             t.add(column: "textVersion", .integer)
         }
+    }
+
+    /// core-v6: the message_rank side table (DESIGN 6A, M2.2). One narrow
+    /// row per message holding just the two columns the ranked executor
+    /// sorts on — the threadID and the recency day — so ranked queries
+    /// join a three-column table by primary key instead of the wide
+    /// message row, and bind "now" as a parameter instead of re-parsing
+    /// every matched message's date per query. Ingest writes the row in
+    /// the same transaction as the message; this backfill covers archives
+    /// created before v6. The expression matches the one ingest uses, so
+    /// both paths compute the same day.
+    private static func coreV6(_ db: Database) throws {
+        try db.create(table: "message_rank") { t in
+            t.column("id", .integer).notNull().primaryKey().references("message", onDelete: .cascade)
+            t.column("threadID", .integer).references("thread", onDelete: .setNull)
+            t.column("day", .double)
+        }
+        try db.execute(sql: """
+            INSERT INTO message_rank (id, threadID, day)
+            SELECT id, threadID, julianday(COALESCE(dateSent, dateReceived))
+            FROM message
+            """)
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

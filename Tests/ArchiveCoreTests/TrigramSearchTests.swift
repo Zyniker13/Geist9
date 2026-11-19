@@ -314,4 +314,86 @@ final class TrigramSearchTests: XCTestCase {
         XCTAssertEqual(try search(store, "rder prj"), [1])
         XCTAssertEqual(try store.reindexOutdated(), 0)
     }
+
+    func testMigrationV5ToV6BackfillsMessageRank() throws {
+        // Simulate an archive written before the ranked executor's side
+        // table existed: a core-v5 index with two messages — one dated
+        // and threaded, one with no dates — and no message_rank table.
+        // Opening it must run core-v6 and backfill one rank row per
+        // message with exactly the day and threadID ingest would have
+        // written, without touching the stored rows.
+        let dbURL = archiveURL.appendingPathComponent(ArchiveStore.indexName)
+        try FileManager.default.createDirectory(
+            at: archiveURL, withIntermediateDirectories: true
+        )
+        let pool = try DatabasePool(path: dbURL.path)
+        try IndexSchema.migrator(through: "core-v5").migrate(pool)
+
+        try ArchiveManifest(createdAt: Date(), appVersion: "0.1.0")
+            .write(to: archiveURL.appendingPathComponent(ArchiveStore.manifestName))
+
+        try pool.write { db in
+            try db.execute(
+                sql: "INSERT INTO thread (id, rootSubject) VALUES (1, 'Kickoff')"
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO message (id, hash, size, subject, normalizedSubject, dateReceived, fromName, fromEmail, threadID)
+                VALUES (1, X'0102030405060708', 10, 'Kickoff', 'kickoff', '2024-03-05T14:23:05Z', 'Alice', 'alice@example.com', 1)
+                """
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO message (id, hash, size, subject, normalizedSubject, fromName, fromEmail)
+                VALUES (2, X'0807060504030201', 12, 'Undated', 'undated', 'Bob', 'bob@example.org')
+                """
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO message_text (rowid, subject, from_name, from_addr, recipients, body, quoted, attachments)
+                VALUES (1, 'kickoff', 'alice', 'alice@example.com', 'bob', 'order prj 2214 confirmed for thursday', '', '')
+                """
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO message_text (rowid, subject, from_name, from_addr, recipients, body, quoted, attachments)
+                VALUES (2, 'undated', 'bob', 'bob@example.org', 'alice', 'no dates on this one', '', '')
+                """
+            )
+        }
+
+        let store = try ArchiveStore.open(at: archiveURL)
+        // The stored rows survived the migration untouched.
+        let rows = try store.db.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, hash, subject FROM message ORDER BY id")
+        }
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0]["subject"] as String?, "Kickoff")
+        XCTAssertEqual(rows[1]["subject"] as String?, "Undated")
+
+        // Every message has a rank row, computed by the same expression
+        // the ingest path uses: day from the first available date, null
+        // when a message has none; threadID copied from the message row.
+        let ranks = try store.db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT r.id, r.day, r.threadID,
+                       julianday(COALESCE(m.dateSent, m.dateReceived)) AS expectedDay,
+                       m.threadID AS expectedThread
+                FROM message m JOIN message_rank r ON r.id = m.id
+                ORDER BY m.id
+                """)
+        }
+        XCTAssertEqual(ranks.count, 2)
+        for rank in ranks {
+            XCTAssertEqual(rank["day"] as Double?, rank["expectedDay"] as Double?)
+            XCTAssertEqual(rank["threadID"] as Int64?, rank["expectedThread"] as Int64?)
+        }
+        XCTAssertNotNil(ranks.first?["day"] as Double?)
+        XCTAssertNil(ranks.last?["day"] as Double?)
+        XCTAssertEqual(ranks.first?["threadID"] as Int64?, 1)
+
+        // Search still resolves through the migrated index.
+        XCTAssertEqual(try search(store, "kickoff"), [1])
+        XCTAssertEqual(try search(store, "undated"), [2])
+    }
 }

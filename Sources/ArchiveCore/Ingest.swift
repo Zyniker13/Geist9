@@ -272,6 +272,24 @@ extension ArchiveStore {
                 message, accountEmail: accountEmail,
                 messageRowID: messageRowID, db: db
             )
+            // Recency and thread columns the ranked executor sorts on live
+            // in the narrow message_rank table (DESIGN 6A, M2.2): one row
+            // per message, written in this same transaction as the message
+            // and its search index. Re-ingesting identical bytes re-runs
+            // thread assignment, so the row is an upsert. day is computed
+            // by SQLite with the same julianday() expression the v6
+            // migration backfills with, so both paths agree exactly.
+            try db.execute(
+                sql: """
+                INSERT INTO message_rank (id, threadID, day)
+                SELECT id, threadID, julianday(COALESCE(dateSent, dateReceived))
+                FROM message WHERE id = ?
+                ON CONFLICT(id) DO UPDATE SET
+                    threadID = excluded.threadID,
+                    day = excluded.day
+                """,
+                arguments: [messageRowID]
+            )
 
             for membership in message.memberships {
                 let mailboxKey = "\(accountID)/\(membership.mailbox)"

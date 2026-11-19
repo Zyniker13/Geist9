@@ -651,4 +651,49 @@ final class SearchTests: XCTestCase {
         XCTAssertTrue(groupedSnippets.allSatisfy { $0.snippet != nil })
         XCTAssertEqual(groupedSnippets.first?.messageID, m17)
     }
+
+    func testIngestWritesMessageRankRow() throws {
+        // The ranked executor sorts on the narrow message_rank side table
+        // (DESIGN 6A, M2.2), so every ingested message must get exactly
+        // one rank row in the same transaction as the message itself:
+        // day equal to what the shared julianday(COALESCE(...)) computes,
+        // threadID equal to the message's thread. Re-ingesting identical
+        // bytes re-runs the write as an upsert and must leave a single
+        // correct row behind.
+        let id = try ingest(Fixtures.m1)
+
+        func rankRow() throws -> Row {
+            try store.db.read { db in
+                try Row.fetchOne(db, sql: """
+                    SELECT m.threadID AS thread, r.threadID AS rankThread,
+                           r.day AS day,
+                           julianday(COALESCE(m.dateSent, m.dateReceived)) AS expectedDay
+                    FROM message m
+                    JOIN message_rank r ON r.id = m.id
+                    WHERE m.id = ?
+                    """,
+                    arguments: [id])!
+            }
+        }
+
+        let first = try rankRow()
+        XCTAssertEqual(first["thread"] as Int64?, first["rankThread"] as Int64?)
+        XCTAssertEqual(first["day"] as Double?, first["expectedDay"] as Double?)
+        XCTAssertNotNil(first["day"] as Double?)
+
+        let again = try ingest(Fixtures.m1)
+        XCTAssertEqual(again, id)
+        XCTAssertEqual(try rankRow(), first)
+
+        let counts = try store.db.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT (SELECT count(*) FROM message) AS messages,
+                       (SELECT count(*) FROM message_rank) AS ranks
+                """)!
+        }
+        // setUp ingests the shared fixtures first; the invariant is one
+        // rank row per message, however many there are.
+        XCTAssertEqual(counts["messages"] as Int64, counts["ranks"] as Int64)
+        XCTAssertGreaterThan(counts["messages"] as Int64, 1)
+    }
 }
