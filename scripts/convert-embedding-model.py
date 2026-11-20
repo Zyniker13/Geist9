@@ -30,9 +30,11 @@ import sys
 import venv
 from pathlib import Path
 
+import numpy as np
+
 MODEL_ID = "BAAI/bge-small-en-v1.5"
 MAX_LEN = 512  # bge-small-en-v1.5 max_position_embeddings
-PINNED = ["torch==2.7.0", "transformers==4.51.3", "coremltools==9.0"]
+PINNED = ["torch==2.7.0", "transformers==4.51.3", "coremltools==9.0", "numpy==2.5.5"]
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUT = SCRIPT_DIR.parent / "tmp-embedding-model"
 
@@ -87,20 +89,21 @@ def convert(out_dir: Path) -> None:
             )
             return hidden.last_hidden_state[:, 0, :]
 
-    traced = torch.jit.trace(CLS(model).eval(), example_inputs=(
+    # torch.export (decomposed) rather than jit.trace: coremltools 9's trace
+    # frontend fails on the embeddings' int cast with a multi-element
+    # constant ("only 0-dimensional arrays can be converted to Python
+    # scalars"); the torch.export frontend handles it. The exported graph
+    # signature carries the input names the Swift adapter looks up, so no
+    # inputs= list is passed here.
+    exported = torch.export.export(CLS(model).eval(), args=(
         torch.zeros((1, MAX_LEN), dtype=torch.int32),
         torch.ones((1, MAX_LEN), dtype=torch.int32),
         torch.zeros((1, MAX_LEN), dtype=torch.int32),
-    ))
+    )).run_decompositions()
 
     print(f"Converting to Core ML (fp16, fixed sequence length {MAX_LEN})")
     mlmodel = ct.convert(
-        traced,
-        inputs=[
-            ct.TensorType(name="input_ids", shape=(1, MAX_LEN), dtype="int32"),
-            ct.TensorType(name="attention_mask", shape=(1, MAX_LEN), dtype="int32"),
-            ct.TensorType(name="token_type_ids", shape=(1, MAX_LEN), dtype="int32"),
-        ],
+        exported,
         outputs=[ct.TensorType(name="cls_hidden_state")],
         compute_precision=ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.macOS14,
@@ -121,7 +124,6 @@ def convert(out_dir: Path) -> None:
             sample["attention_mask"].to(torch.int32),
             zeros,
         )
-    import numpy as np
     pred = mlmodel.predict({
         "input_ids": sample["input_ids"].to(torch.int32).numpy(),
         "attention_mask": sample["attention_mask"].to(torch.int32).numpy(),
@@ -153,11 +155,16 @@ def main() -> None:
         return
 
     python = venv_python(venv_dir)
-    if in_venv(python):
+    if not in_venv(python):
+        print("No virtualenv found; run with --setup first, or pass --venv.", file=sys.stderr)
+        raise SystemExit(2)
+    if python.resolve() != Path(sys.executable).resolve():
+        # Re-exec under the venv interpreter. Skipped when we already are that
+        # interpreter: execv from a job-controlled background shell can wedge
+        # the replacement process before it prints anything.
         os.execv(str(python), [str(python), __file__, *sys.argv[1:]])
         return  # pragma: no cover - execv only returns on failure
-    print("No virtualenv found; run with --setup first, or pass --venv.", file=sys.stderr)
-    raise SystemExit(2)
+    convert(args.out)
 
 
 if __name__ == "__main__":
