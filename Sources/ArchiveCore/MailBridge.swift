@@ -307,7 +307,13 @@ public enum MailBridge {
             guard part.contentDisposition["content-disposition"] == "attachment" else { return }
             let (main, parameters) = part.contentType
             let text: String
-            if main.hasPrefix("text/") {
+            if let extracted = rtfAttachmentText(
+                main: main,
+                filename: decodedFilename(part),
+                data: part.decodedBody
+            ) {
+                text = extracted
+            } else if main.hasPrefix("text/") {
                 let decoded = Charset.decode(parameters["charset"], Array(part.decodedBody))
                 text = main == "text/html" ? htmlToText(decoded) : decoded
             } else if let extracted = pdfAttachmentText(
@@ -373,6 +379,20 @@ public enum MailBridge {
 #else
         return nil
 #endif
+    }
+
+    /// RTF attachment text (M2.3, ROADMAP line 69). `application/rtf` and
+    /// `text/rtf` decode markup to plain text; a `.rtf` filename is the
+    /// fallback for broken MIME parts. This must run before the plain
+    /// `text/*` branch: a `text/rtf` part decoded raw would index control
+    /// words instead of its text.
+    static func rtfAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
+        let extensionName = filename
+            .flatMap { $0.split(separator: ".").last.map(String.init) }
+            .map { $0.lowercased() }
+        guard main == "application/rtf" || main == "text/rtf" || extensionName == "rtf"
+        else { return nil }
+        return RTFText.text(data)
     }
 
     /// Container attachment formats whose text we extract (DESIGN 6A,

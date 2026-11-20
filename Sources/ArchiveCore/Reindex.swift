@@ -53,7 +53,11 @@ enum TextIndexVersion {
     /// 0041) joins the attachments column; the backfill re-indexes older
     /// rows from their stored bytes to add it.
     static let v11 = 11
-    static var current: Int { v11 }
+    /// M2.3: the decoded text of RTF attachments (`application/rtf`,
+    /// `text/rtf`, `.rtf`) joins the attachments column; the backfill
+    /// re-indexes older rows from their stored bytes to add it.
+    static let v12 = 12
+    static var current: Int { v12 }
 }
 
 extension ArchiveStore {
