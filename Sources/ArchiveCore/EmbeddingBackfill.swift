@@ -62,6 +62,12 @@ public enum EmbeddingBackfill {
             }
             written += 1
         }
+        // Decision 0046: after a pass, (re)cluster when enough rows lack an
+        // assignment. Runs inside its own write transaction; zero cost when
+        // the thresholds are not met.
+        try store.db.write { db in
+            _ = try VectorIndex.maybeCluster(db, model: model.identifier)
+        }
         return written
     }
 }

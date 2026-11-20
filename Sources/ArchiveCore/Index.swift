@@ -33,6 +33,7 @@ public enum IndexSchema {
         ("core-v11", coreV11),
         ("core-v12", coreV12),
         ("core-v13", coreV13),
+        ("core-v14", coreV14),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -412,6 +413,29 @@ public enum IndexSchema {
         )
         try db.drop(table: "message_embedding")
         try db.rename(table: "message_embedding_rebuilt", to: "message_embedding")
+    }
+
+    /// core-v14: clustered vector scan (decision 0046). `embedding_cluster`
+    /// holds the per-model k-means centroids; `message_embedding.cluster`
+    /// says which centroid a vector belongs to, or NULL when it is not yet
+    /// assigned. Both start empty: search keeps the exact flat scan until a
+    /// clustering run assigns rows, so existing archives change nothing.
+    private static func coreV14(_ db: Database) throws {
+        try db.create(table: "embedding_cluster") { t in
+            t.column("model", .text).notNull()
+            t.column("cluster", .integer).notNull()
+            t.column("centroid", .blob).notNull()
+            t.column("count", .integer).notNull()
+            t.primaryKey(["model", "cluster"])
+        }
+        try db.alter(table: "message_embedding") { t in
+            t.add(column: "cluster", .integer)
+        }
+        try db.create(
+            index: "message_embedding_cluster",
+            on: "message_embedding",
+            columns: ["model", "cluster", "id"]
+        )
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {
