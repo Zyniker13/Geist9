@@ -215,7 +215,9 @@ public enum VectorIndex {
         var lastID: Int64 = 0
         var keeper = TopKeeper(limit: limit)
         while true {
-            let rows = try Row.fetchAll(
+            var batch: [(id: Int64, blob: Data)] = []
+            batch.reserveCapacity(batchSize)
+            let cursor = try Row.fetchCursor(
                 db,
                 sql: """
                 SELECT id, vector FROM message_embedding
@@ -223,14 +225,11 @@ public enum VectorIndex {
                 """,
                 arguments: [model, lastID, batchSize]
             )
-            if rows.isEmpty { break }
-            let last: Int64 = rows[rows.count - 1]["id"]
-            lastID = last
-            let batch: [(id: Int64, blob: Data)] = rows.map { row in
-                let id: Int64 = row["id"]
-                let blob: Data = row["vector"]
-                return (id, blob)
+            while let row = try cursor.next() {
+                batch.append((row[0], row[1]))
             }
+            if batch.isEmpty { break }
+            lastID = batch[batch.count - 1].id
             score(batch, query: query, into: &keeper)
         }
         return keeper.best()

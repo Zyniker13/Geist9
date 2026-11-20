@@ -620,7 +620,7 @@ func vectorPrepare(_ archiveDir: String, _ count: Int, _ seed: UInt64) throws {
         }
         if Int(i) / batch % 25 == 0 || i == count {
             let mark = monotonicMs()
-            print(String(format: "== %lld rows (%.0f rows/s)", i, Double(i - from) * 1000.0 / max(mark - started, 1)))
+            print(String(format: "== %lld rows (%.0f rows/s so far)", i, Double(i) * 1000.0 / max(mark - started, 1)))
             fflush(nil)
         }
     }
@@ -663,7 +663,7 @@ func vectorSearch(_ archiveDir: String, _ repeats: Int, _ seed: UInt64) throws {
     }
 
     var samples: [Double] = []
-    samples.reserveCapacity(repeats * queries.count)
+    samples.reserveCapacity(repeats)
     var hitTotal = 0
     for r in 0..<repeats {
         let query = queries[r % queries.count]
@@ -675,7 +675,7 @@ func vectorSearch(_ archiveDir: String, _ repeats: Int, _ seed: UInt64) throws {
         samples.append(t1 - t0)
         hitTotal += hits.count
     }
-    print("== average hits per scan: \(hitTotal / max(repeats * queries.count, 1))")
+    print("== average hits per scan: \(hitTotal / max(repeats, 1))")
     print(String(format: "== peak RSS: %.0f MB", Double(maxRSSKB()) / 1024.0))
     report("semantic scan, dim \(vectorDim), limit 20", samples)
 
@@ -684,6 +684,133 @@ func vectorSearch(_ archiveDir: String, _ repeats: Int, _ seed: UInt64) throws {
     let ok = p95 < 300.0
     print(String(format: "== budget: semantic scan p95 %.1f ms — %@ (<300)", p95, ok ? "PASS" : "FAIL"))
     if !ok { exit(1) }
+}
+
+/// Staged timing for the semantic scan (scale-slice diagnostics): the same
+/// batched SELECT without scoring, then the full search, then a batch-size
+/// sweep. The gap between the first two is decode + Accelerate math.
+///
+///   bench-search vector-profile <archive-dir> [seed]
+///
+func vectorProfile(_ archiveDir: String, _ seed: UInt64) throws {
+    let store = try ArchiveStore.open(at: URL(fileURLWithPath: archiveDir))
+    var rng = VectorRNG(seed: seed)
+    let query = rng.vector(vectorDim)
+    let stored = try store.db.read { db in
+        try Int.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM message_embedding WHERE model = ?", arguments: [vectorModel]
+        ) ?? 0
+    }
+    print("== archive: \(stored) embeddings (dim \(vectorDim))")
+    guard stored > 0 else { print("FAIL: run vector-prepare first"); exit(1) }
+
+    var samples: [Double] = []
+    for _ in 0..<3 {
+        let a = monotonicMs()
+        var lastID: Int64 = 0
+        var seen = 0
+        while true {
+            let rows: [(id: Int64, blob: Data)] = try store.db.read { db in
+                let fetched = try Row.fetchAll(
+                    db,
+                    sql: "SELECT id, vector FROM message_embedding WHERE model = ? AND id > ? ORDER BY id LIMIT ?",
+                    arguments: [vectorModel, lastID, VectorIndex.scanBatchSize]
+                )
+                if fetched.isEmpty { return [] }
+                lastID = fetched[fetched.count - 1]["id"]
+                return fetched.map { (id: ($0["id"] as Int64), blob: ($0["vector"] as Data)) }
+            }
+            if rows.isEmpty { break }
+            seen += rows.count
+            for row in rows { _ = row.blob.count }
+        }
+        precondition(seen == stored, "fetch pass saw \(seen) of \(stored) rows")
+        samples.append(monotonicMs() - a)
+    }
+    report("fetch only (batched SELECT + blob touch)", samples)
+
+    samples.removeAll()
+    for _ in 0..<3 {
+        let a = monotonicMs()
+        _ = try store.db.read { db in
+            try VectorIndex.search(db, model: vectorModel, query: query, limit: 20)
+        }
+        samples.append(monotonicMs() - a)
+    }
+    report("full search (default batchSize \(VectorIndex.scanBatchSize))", samples)
+
+    for size in [1024, 2048, 16384, 32768] {
+        var one: [Double] = []
+        for _ in 0..<2 {
+            let a = monotonicMs()
+            _ = try store.db.read { db in
+                try VectorIndex.search(db, model: vectorModel, query: query, limit: 20, batchSize: size)
+            }
+            one.append(monotonicMs() - a)
+        }
+        report("full search, batchSize \(size)", one)
+    }
+
+    // Cursor fetch variant: stream rows instead of materializing them twice,
+    // and read columns by index — the fetch shape the search now uses.
+    var cursorSamples: [Double] = []
+    for _ in 0..<3 {
+        let a = monotonicMs()
+        var lastID: Int64 = 0
+        var seen = 0
+        try store.db.read { db in
+            while true {
+                var batch: [(id: Int64, blob: Data)] = []
+                batch.reserveCapacity(VectorIndex.scanBatchSize)
+                let cursor = try Row.fetchCursor(
+                    db,
+                    sql: "SELECT id, vector FROM message_embedding WHERE model = ? AND id > ? ORDER BY id LIMIT ?",
+                    arguments: [vectorModel, lastID, VectorIndex.scanBatchSize]
+                )
+                while let row = try cursor.next() {
+                    batch.append((row[0], row[1]))
+                }
+                if batch.isEmpty { break }
+                lastID = batch[batch.count - 1].id
+                seen += batch.count
+                for row in batch { _ = row.blob.count }
+            }
+        }
+        precondition(seen == stored, "cursor fetch saw \(seen) of \(stored) rows")
+        cursorSamples.append(monotonicMs() - a)
+    }
+    report("cursor fetch + index access (no mmap)", cursorSamples)
+
+    // Same cursor fetch with a 1 GB mmap window on the reader connection.
+    var mmapSamples: [Double] = []
+    for _ in 0..<3 {
+        let a = monotonicMs()
+        var lastID: Int64 = 0
+        var seen = 0
+        try store.db.read { db in
+            try db.execute(sql: "PRAGMA mmap_size = 1073741824")
+            while true {
+                var batch: [(id: Int64, blob: Data)] = []
+                batch.reserveCapacity(VectorIndex.scanBatchSize)
+                let cursor = try Row.fetchCursor(
+                    db,
+                    sql: "SELECT id, vector FROM message_embedding WHERE model = ? AND id > ? ORDER BY id LIMIT ?",
+                    arguments: [vectorModel, lastID, VectorIndex.scanBatchSize]
+                )
+                while let row = try cursor.next() {
+                    batch.append((row[0], row[1]))
+                }
+                if batch.isEmpty { break }
+                lastID = batch[batch.count - 1].id
+                seen += batch.count
+                for row in batch { _ = row.blob.count }
+            }
+        }
+        precondition(seen == stored, "mmap fetch saw \(seen) of \(stored) rows")
+        mmapSamples.append(monotonicMs() - a)
+    }
+    report("cursor fetch + index access (mmap 1 GB)", mmapSamples)
+    print(String(format: "== peak RSS: %.0f MB", Double(maxRSSKB()) / 1024.0))
 }
 
 // MARK: Entry
@@ -759,6 +886,8 @@ do {
         try vectorPrepare(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42)
     case "vector-search":
         try vectorSearch(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 20, parsed.count > 3 ? UInt64(parsed[3])! : 42)
+    case "vector-profile":
+        try vectorProfile(parsed[1], parsed.count > 2 ? UInt64(parsed[2])! : 42)
     default:
         print("unknown command: \(command)")
         exit(2)

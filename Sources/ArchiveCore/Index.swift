@@ -420,6 +420,15 @@ public enum IndexSchema {
         // WAL mode: readers (search, MCP helper) never block the ingest writer.
         configuration.journalMode = .wal
         configuration.foreignKeysEnabled = true
+        // Memory-map the index file in every connection. The semantic scan
+        // streams ~0.8 KB of blob per message; with the default 0 window each
+        // page crosses the SQLite page cache twice per read, and at one
+        // million vectors that dominates the scan budget (measured ~180 ms
+        // vs ~330 ms fetch time on 1M x 384 float16). Read-only mapping; the
+        // WAL commit path is untouched.
+        configuration.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA mmap_size = 1073741824")
+        }
         let pool = try DatabasePool(path: url.path, configuration: configuration)
         try migrator().migrate(pool)
         return pool
