@@ -14,6 +14,9 @@ build/
 *.provisionprofile
 /TestArchives/
 /Benchmarks/output/
+# Local model conversion output (weights are never committed; see
+# scripts/convert-embedding-model.py):
+/tmp-embedding-model/
 # The Xcode project is generated from project.yml (XcodeGen), never committed:
 *.xcodeproj/
 
