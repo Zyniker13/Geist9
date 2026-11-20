@@ -57,7 +57,7 @@ let appleExtractTargets: [Target]
 appleExtractProducts = [.library(name: "ArchiveExtractApple", targets: ["ArchiveExtractApple"])]
 appleExtractTargets = [
     .target(name: "ArchiveExtractApple"),
-    .testTarget(name: "ArchiveExtractAppleTests", dependencies: ["ArchiveExtractApple"]),
+    .testTarget(name: "ArchiveExtractAppleTests", dependencies: ["ArchiveExtractApple", "ArchiveCore"]),
 ]
 #else
 appleExtractProducts = []
