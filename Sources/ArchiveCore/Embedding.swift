@@ -7,7 +7,16 @@
 public protocol EmbeddingModel: Sendable {
     var identifier: String { get }
     var dimension: Int { get }
+    /// Embeds one text for storage (backfill) — no instruction prefix.
     func embed(_ text: String) -> [Float]?
+    /// Embeds one search query. Some retrieval models (bge) ask for an
+    /// instruction prefix on queries only; the default embeds the query
+    /// exactly like a document, which keeps every existing model correct.
+    func queryEmbed(_ text: String) -> [Float]?
+}
+
+extension EmbeddingModel {
+    public func queryEmbed(_ text: String) -> [Float]? { embed(text) }
 }
 
 /// A deterministic, dependency-free embedding used for tests and dogfood

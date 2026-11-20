@@ -491,7 +491,7 @@ extension ArchiveStore {
                 withSnippets: withSnippets, groupByThread: groupByThread
             )
         }
-        guard let model, let queryVector = model.embed(query) else {
+        guard let model, let queryVector = model.queryEmbed(query) else {
             // Keyword-only (decision 0045): the semantic side can only add
             // hits; with no model, no query embedding, or the off switch
             // set, the answer is exactly the keyword list.

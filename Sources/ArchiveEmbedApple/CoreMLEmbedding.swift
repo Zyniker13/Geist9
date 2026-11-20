@@ -4,7 +4,7 @@ import Foundation
 
 /// Core ML implementation of `EmbeddingModel` for bge-small-en-v1.5
 /// (decisions 0009 and 0045). The model contract is fixed by the
-/// conversion in `scripts/build-embedding-model.sh`: three Int32 inputs
+/// conversion in `scripts/convert-embedding-model.py`: three Int32 inputs
 /// `input_ids`, `attention_mask`, `token_type_ids` shaped [1, S], and
 /// either a `last_hidden_state` output shaped [1, S, D] (CLS pooling
 /// happens here) or an already-pooled output shaped [1, D]. Vectors are
@@ -103,6 +103,14 @@ public final class CoreMLEmbedding: EmbeddingModel, @unchecked Sendable {
         norm = norm.squareRoot()
         guard norm > 0 else { return nil }
         return pooled.map { Float(Double($0) / norm) }
+    }
+
+    /// bge-small-en-v1.5's retrieval guidance asks for an instruction
+    /// prefix on the query side only; document text stays unprefixed, so
+    /// the stored vectors and the query vector live in the same space with
+    /// the query told what it is for (decision 0045).
+    public func queryEmbed(_ text: String) -> [Float]? {
+        embed("Represent this sentence for searching relevant passages: " + text)
     }
 
     public enum EmbeddingError: Error {

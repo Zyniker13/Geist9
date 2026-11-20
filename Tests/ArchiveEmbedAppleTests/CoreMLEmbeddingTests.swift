@@ -152,4 +152,20 @@ final class CoreMLEmbeddingTests: XCTestCase {
         XCTAssertEqual(vector.count, embedding.dimension)
         XCTAssertEqual(embedding.identifier, "toy")
     }
+
+    func testQueryEmbedPrependsTheBgeInstructionPrefix() throws {
+        // bge-small-en-v1.5 wants an instruction prefix on queries only
+        // (decision 0045); the adapter must apply it exactly once, and
+        // document text stays unprefixed. With the toy model the query
+        // vector must equal a document embedding of the prefixed string.
+        let embedding = try makeEmbedding()
+        let query = "zebra quantum pickle"
+        let prefixed = try XCTUnwrap(embedding.queryEmbed(query))
+        let asDocument = try XCTUnwrap(
+            embedding.embed("Represent this sentence for searching relevant passages: " + query)
+        )
+        XCTAssertEqual(prefixed, asDocument)
+        let direct = try XCTUnwrap(embedding.embed(query))
+        XCTAssertNotEqual(prefixed, direct)
+    }
 }

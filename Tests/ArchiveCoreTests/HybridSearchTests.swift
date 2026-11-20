@@ -196,6 +196,46 @@ final class HybridSearchTests: XCTestCase {
         XCTAssertEqual(hybrid, plain)
     }
 
+    /// Records which entry point search used: the query must travel
+    /// through `queryEmbed`, never the document path, so a model like bge
+    /// can put its instruction prefix on queries only (decision 0045).
+    private final class QueryProbeEmbedding: EmbeddingModel, @unchecked Sendable {
+        var identifier: String { "probe-v1" }
+        var dimension: Int { 4 }
+        let documentVector: [Float] = [0, 0, 0, 1]
+        let queryVector: [Float] = [1, 0, 0, 0]
+        private let lock = NSLock()
+        private var queried: [String] = []
+        private var embedded: [String] = []
+        func embed(_ text: String) -> [Float]? {
+            lock.lock(); embedded.append(text); lock.unlock()
+            return documentVector
+        }
+        func queryEmbed(_ text: String) -> [Float]? {
+            lock.lock(); queried.append(text); lock.unlock()
+            return queryVector
+        }
+        var queryCalls: [String] { lock.withLock { queried } }
+        var embedCalls: [String] { lock.withLock { embedded } }
+    }
+
+    func testSearchEmbedsQueryThroughQueryEmbedOnly() throws {
+        let store = try makeStore()
+        let ids = try ingest(store, count: 2)
+        let probe = QueryProbeEmbedding()
+        try store.db.write { db in
+            try VectorIndex.upsert(db, messageID: ids[0], model: probe.identifier, vector: probe.queryVector)
+            try VectorIndex.upsert(db, messageID: ids[1], model: probe.identifier, vector: probe.documentVector)
+        }
+        // The planted vector for message 1 equals queryEmbed("find me");
+        // if search routed the query through the document path, message 2
+        // (the document vector) would rank first instead.
+        let results = try store.search("find me", semanticModel: probe)
+        XCTAssertEqual(results.hits.first?.messageID, ids[0])
+        XCTAssertEqual(probe.queryCalls, ["find me"], "search embeds the query exactly once, via queryEmbed")
+        XCTAssertTrue(probe.embedCalls.isEmpty, "search never embeds message text")
+    }
+
     func testHybridOffsetPagesFusedList() throws {
         let store = try makeStore()
         let ids = try ingest(store, count: 3)

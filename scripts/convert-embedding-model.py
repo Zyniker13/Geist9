@@ -75,13 +75,22 @@ def convert(out_dir: Path) -> None:
             super().__init__()
             self.encoder = encoder
 
-        def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
-            hidden = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        def forward(
+            self, input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            token_type_ids: torch.Tensor,
+        ):
+            hidden = self.encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+            )
             return hidden.last_hidden_state[:, 0, :]
 
     traced = torch.jit.trace(CLS(model).eval(), example_inputs=(
         torch.zeros((1, MAX_LEN), dtype=torch.int32),
         torch.ones((1, MAX_LEN), dtype=torch.int32),
+        torch.zeros((1, MAX_LEN), dtype=torch.int32),
     ))
 
     print(f"Converting to Core ML (fp16, fixed sequence length {MAX_LEN})")
@@ -90,6 +99,7 @@ def convert(out_dir: Path) -> None:
         inputs=[
             ct.TensorType(name="input_ids", shape=(1, MAX_LEN), dtype="int32"),
             ct.TensorType(name="attention_mask", shape=(1, MAX_LEN), dtype="int32"),
+            ct.TensorType(name="token_type_ids", shape=(1, MAX_LEN), dtype="int32"),
         ],
         outputs=[ct.TensorType(name="cls_hidden_state")],
         compute_precision=ct.precision.FLOAT16,
@@ -104,14 +114,18 @@ def convert(out_dir: Path) -> None:
         ["Example document text for the archive index."],
         truncation=True, max_length=MAX_LEN, padding="max_length", return_tensors="pt",
     )
+    zeros = torch.zeros_like(sample["input_ids"]).to(torch.int32)
     with torch.no_grad():
         ref = CLS(model)(
-            sample["input_ids"].to(torch.int32), sample["attention_mask"].to(torch.int32),
+            sample["input_ids"].to(torch.int32),
+            sample["attention_mask"].to(torch.int32),
+            zeros,
         )
     import numpy as np
     pred = mlmodel.predict({
         "input_ids": sample["input_ids"].to(torch.int32).numpy(),
         "attention_mask": sample["attention_mask"].to(torch.int32).numpy(),
+        "token_type_ids": zeros.numpy(),
     })["cls_hidden_state"]
     delta = float(np.abs(np.asarray(ref) - np.asarray(pred)).max())
     print(f"Self-check max |torch - coreml| = {delta:.5f} (fp16 tolerance ~1e-2)")
