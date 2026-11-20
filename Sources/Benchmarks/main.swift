@@ -813,6 +813,140 @@ func vectorProfile(_ archiveDir: String, _ seed: UInt64) throws {
     print(String(format: "== peak RSS: %.0f MB", Double(maxRSSKB()) / 1024.0))
 }
 
+/// Cluster the prepared vector archive and time the clustered scan
+/// (decision 0046). Run after `vector-prepare`.
+///
+///   bench-search vector-cluster <archive-dir> [repeats] [seed]
+///
+/// Reports the cluster-build time, cluster sizes and assignment coverage,
+/// then p50/p95/p99 of the clustered scan at the default nprobe against
+/// the same 300 ms budget the exact scan is held to.
+func vectorCluster(_ archiveDir: String, _ repeats: Int, _ seed: UInt64) throws {
+    let store = try ArchiveStore.open(at: URL(fileURLWithPath: archiveDir))
+    let stored = try store.db.read { db in
+        try Int.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM message_embedding WHERE model = ?", arguments: [vectorModel]
+        ) ?? 0
+    }
+    print("== archive: \(stored) embeddings (dim \(vectorDim), model \(vectorModel))")
+    guard stored > 0 else { print("FAIL: run vector-prepare first"); exit(1) }
+
+    let t0 = monotonicMs()
+    let clusterCount = try store.db.write { db in
+        try VectorIndex.maybeCluster(db, model: vectorModel, seed: seed)
+    }
+    print(String(format: "== buildClusters: %d clusters in %.1f s", clusterCount, monotonicMs() - t0))
+    guard clusterCount > 0 else {
+        print("FAIL: no clusters built (rows \(stored) below clusterMinRows \(VectorIndex.clusterMinRows)?)")
+        exit(1)
+    }
+    let clusters = try store.db.read { db in try VectorIndex.clusters(db, model: vectorModel) }
+    var sizes = clusters.map(\.count)
+    sizes.sort()
+    let covered = sizes.reduce(0, +)
+    print("== coverage \(covered)/\(stored) rows; size min \(sizes.first ?? 0)" +
+        " median \(sizes[sizes.count / 2]) max \(sizes.last ?? 0)")
+    precondition(covered <= stored, "cluster counts exceed row count")
+
+    var rng = VectorRNG(seed: seed)
+    let query0 = rng.vector(vectorDim)
+    let specialRow = Int64(max(1, stored / 2))
+    var queries: [[Float]] = [query0]
+    for _ in 0..<24 { queries.append(rng.vector(vectorDim)) }
+
+    // Same sanity probe as the exact scan: the planted row at rank 1 with
+    // cosine 1.0, now through the clustered path.
+    let probeStart = monotonicMs()
+    let probe = try store.db.read { db in
+        try VectorIndex.search(db, model: vectorModel, query: query0, limit: 5)
+    }
+    let probeMs = monotonicMs() - probeStart
+    let probeOK = probe.first?.messageID == specialRow
+    print(String(format: "== probe: rank1 id %lld (expected %lld), first scan %.1f ms — %@",
+                 probe.first?.messageID ?? -1, specialRow, probeMs, probeOK ? "PASS" : "FAIL"))
+    guard probeOK else { exit(1) }
+
+    _ = try store.db.read { db in
+        try VectorIndex.search(db, model: vectorModel, query: queries[7], limit: 20)
+    }
+
+    var samples: [Double] = []
+    samples.reserveCapacity(max(repeats, 1))
+    var hitTotal = 0
+    for r in 0..<repeats {
+        let query = queries[r % queries.count]
+        let a = monotonicMs()
+        let hits = try store.db.read { db in
+            try VectorIndex.search(db, model: vectorModel, query: query, limit: 20)
+        }
+        samples.append(monotonicMs() - a)
+        hitTotal += hits.count
+    }
+    print("== average hits per scan: \(hitTotal / max(repeats, 1))")
+    print(String(format: "== peak RSS: %.0f MB", Double(maxRSSKB()) / 1024.0))
+    report("clustered scan, dim \(vectorDim), limit 20, nprobe \(VectorIndex.defaultProbeCount)", samples)
+
+    let sorted = samples.sorted()
+    let p95 = percentile(sorted, 95)
+    let ok = p95 < 300.0
+    print(String(format: "== budget: clustered scan p95 %.1f ms — %@ (<300)", p95, ok ? "PASS" : "FAIL"))
+    if !ok { exit(1) }
+}
+
+/// Recall of the clustered scan against the exact scan (decision 0046).
+///
+///   bench-search vector-recall <archive-dir> [queries] [seed]
+///
+/// For each nprobe in a sweep, reports recall@limit — the fraction of the
+/// exact scan's top-limit hits the clustered scan finds — plus p50/p95
+/// latency. The exact baseline is `nprobe: nil`, the pre-0046 full scan.
+func vectorRecall(_ archiveDir: String, _ queryCount: Int, _ seed: UInt64) throws {
+    let store = try ArchiveStore.open(at: URL(fileURLWithPath: archiveDir))
+    let stored = try store.db.read { db in
+        try Int.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM message_embedding WHERE model = ?", arguments: [vectorModel]
+        ) ?? 0
+    }
+    print("== archive: \(stored) embeddings (dim \(vectorDim), model \(vectorModel))")
+    guard stored > 0 else { print("FAIL: run vector-prepare first"); exit(1) }
+    let clusters = try store.db.read { db in try VectorIndex.clusters(db, model: vectorModel) }
+    guard !clusters.isEmpty else { print("FAIL: run vector-cluster first"); exit(1) }
+
+    var rng = VectorRNG(seed: seed)
+    var queries: [[Float]] = []
+    for _ in 0..<max(queryCount, 1) { queries.append(rng.vector(vectorDim)) }
+
+    var exact: [[Int64]] = []
+    for query in queries {
+        let hits = try store.db.read { db in
+            try VectorIndex.search(db, model: vectorModel, query: query, limit: 20, nprobe: nil)
+        }
+        exact.append(hits.map(\.messageID))
+    }
+
+    let sweep = [1, 2, 4, 8, 16, 32, 64].filter { $0 <= clusters.count }
+    for nprobe in sweep {
+        var recall = 0.0
+        var samples: [Double] = []
+        for (i, query) in queries.enumerated() {
+            let a = monotonicMs()
+            let hits = try store.db.read { db in
+                try VectorIndex.search(db, model: vectorModel, query: query, limit: 20, nprobe: nprobe)
+            }
+            samples.append(monotonicMs() - a)
+            let found = Set(hits.map(\.messageID))
+            let want = Set(exact[i])
+            recall += Double(want.intersection(found).count) / Double(max(want.count, 1))
+        }
+        recall /= Double(queries.count)
+        let sorted = samples.sorted()
+        print(String(format: "== nprobe %3d: recall@20 %.3f  p50 %6.1f ms  p95 %6.1f ms  max %6.1f ms",
+                     nprobe, recall, percentile(sorted, 50), percentile(sorted, 95),
+                     sorted[sorted.count - 1]))
+    }
+    print(String(format: "== peak RSS: %.0f MB", Double(maxRSSKB()) / 1024.0))
+}
+
 // MARK: Entry
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -854,7 +988,7 @@ func parseCrashStage(_ args: [String]) -> ([String], String?) {
 }
 
 guard let command = args.first else {
-    print("usage: bench-search prepare|search|both|as-you-type <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search vector-prepare <archive-dir> <count> [seed]\n       bench-search vector-search <archive-dir> [repeats] [seed]  (same seed as vector-prepare)")
+    print("usage: bench-search prepare|search|both|as-you-type <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search vector-prepare <archive-dir> <count> [seed]\n       bench-search vector-search <archive-dir> [repeats] [seed]  (same seed as vector-prepare)\n       bench-search vector-cluster <archive-dir> [repeats] [seed]  (after vector-prepare; decision 0046)\n       bench-search vector-recall <archive-dir> [queries] [seed]  (after vector-cluster; decision 0046)")
     exit(2)
 }
 do {
@@ -888,6 +1022,10 @@ do {
         try vectorSearch(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 20, parsed.count > 3 ? UInt64(parsed[3])! : 42)
     case "vector-profile":
         try vectorProfile(parsed[1], parsed.count > 2 ? UInt64(parsed[2])! : 42)
+    case "vector-cluster":
+        try vectorCluster(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 20, parsed.count > 3 ? UInt64(parsed[3])! : 42)
+    case "vector-recall":
+        try vectorRecall(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 10, parsed.count > 3 ? UInt64(parsed[3])! : 42)
     default:
         print("unknown command: \(command)")
         exit(2)
