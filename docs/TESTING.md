@@ -32,6 +32,10 @@ Targets for the real judged set, enforced in CI from M2 on every change touching
 - A change that drops either metric by more than **0.02** from the recorded baseline fails the build, even if it stays above the target.
 - The budgets above stand unchanged: first keystroke results under 50 ms, a ranked page under 200 ms (the spike's 13–16 ms p95 on 100k synthetic messages leaves the headroom for real text and 1M messages).
 
+### Embedding Model Tests
+
+`ArchiveEmbedApple` (macOS-only, decision 0039) is tested two ways. The toy-model tests run everywhere a Mac runs: a tiny generated Core ML model plus a two-word vocabulary pin the tokenizer, the adapter contract, the truncation path, and the app wiring. The real-weights tests (`RealCoreMLEmbeddingTests`) run the actual converted `bge-small-en-v1.5` package: 384 dimensions, unit-normalized vectors, a query ordering its relevant passage above an unrelated one, and determinism. They are skipped unless `BRISTLECONE_REAL_EMBEDDING_MODEL` points at a directory holding `bge-small-en-v1.5.mlpackage` and `bge-small-en-v1.5-vocab.txt`, as written by `scripts/convert-embedding-model.py`. CI never needs the weights, and the weights are never committed.
+
 
 ## Local Test Servers
 

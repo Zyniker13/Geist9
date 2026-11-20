@@ -169,3 +169,71 @@ final class CoreMLEmbeddingTests: XCTestCase {
         XCTAssertNotEqual(prefixed, direct)
     }
 }
+
+/// End to end against the real bge-small-en-v1.5 weights (decisions 0045
+/// and 0046), as produced by `scripts/convert-embedding-model.py` into a
+/// directory holding `bge-small-en-v1.5.mlpackage` and
+/// `bge-small-en-v1.5-vocab.txt`. Skipped unless the directory is given
+/// through `BRISTLECONE_REAL_EMBEDDING_MODEL`: CI and Linux never need
+/// the weights, and this file's git history must not carry them.
+final class RealCoreMLEmbeddingTests: XCTestCase {
+    private func makeRealEmbedding() throws -> CoreMLEmbedding {
+        guard let directory = ProcessInfo.processInfo.environment["BRISTLECONE_REAL_EMBEDDING_MODEL"],
+              !directory.isEmpty
+        else { throw XCTSkip("BRISTLECONE_REAL_EMBEDDING_MODEL not set; real-weights test skipped") }
+        let url = URL(fileURLWithPath: directory)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("BRISTLECONE_REAL_EMBEDDING_MODEL directory does not exist")
+        }
+        return try XCTUnwrap(
+            CoreMLEmbedding.load(named: "bge-small-en-v1.5", in: [url]),
+            "real model failed to load from \(directory)"
+        )
+    }
+
+    private static func dot(_ a: [Float], _ b: [Float]) -> Float {
+        zip(a, b).reduce(0) { $0 + $1.0 * $1.1 }
+    }
+
+    func testRealModelProducesDimensionAndUnitVectors() throws {
+        let embedding = try makeRealEmbedding()
+        XCTAssertEqual(embedding.identifier, "bge-small-en-v1.5")
+        XCTAssertEqual(embedding.dimension, 384)
+        XCTAssertGreaterThan(embedding.maxSequenceLength, 0)
+        XCTAssertLessThanOrEqual(embedding.maxSequenceLength, 512)
+
+        let vector = try XCTUnwrap(embedding.embed("hello world"))
+        XCTAssertEqual(vector.count, 384)
+        let norm = vector.reduce(0) { $0 + $1 * $1 }
+        XCTAssertEqual(norm, 1.0, accuracy: 0.01)
+    }
+
+    func testRealModelQueryEmbedOrdersRelevantPassageFirst() throws {
+        let embedding = try makeRealEmbedding()
+        let query = try XCTUnwrap(embedding.queryEmbed("where did the invoice attachment go"))
+        let relevant = try XCTUnwrap(
+            embedding.embed("The invoice from Studio Mac arrived as a PDF attachment last week.")
+        )
+        let unrelated = try XCTUnwrap(
+            embedding.embed("The kitten slept on the warm radiator all afternoon.")
+        )
+        XCTAssertEqual(query.count, 384)
+
+        // Unit-normalized vectors, so the dot product is the cosine.
+        let relevantScore = Self.dot(query, relevant)
+        let unrelatedScore = Self.dot(query, unrelated)
+        XCTAssertGreaterThan(
+            relevantScore, unrelatedScore + 0.05,
+            "relevant \(relevantScore) must clearly outrank unrelated \(unrelatedScore)"
+        )
+    }
+
+    func testRealModelIsDeterministic() throws {
+        let embedding = try makeRealEmbedding()
+        let first = try XCTUnwrap(embedding.embed("weekly review"))
+        let second = try XCTUnwrap(embedding.embed("weekly review"))
+        for (a, b) in zip(first, second) {
+            XCTAssertEqual(a, b, accuracy: 0.001)
+        }
+    }
+}
