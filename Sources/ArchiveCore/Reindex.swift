@@ -57,7 +57,12 @@ enum TextIndexVersion {
     /// `text/rtf`, `.rtf`) joins the attachments column; the backfill
     /// re-indexes older rows from their stored bytes to add it.
     static let v12 = 12
-    static var current: Int { v12 }
+    /// v13 (decision 0044): deliberate text for CSV, iCalendar and vCard
+    /// attachments plus the entry names of ZIP attachments. Raw-decoded
+    /// `text/*` was the old behavior for the first three; the backfill
+    /// re-indexes older rows from their stored bytes to replace it.
+    static let v13 = 13
+    static var current: Int { v13 }
 }
 
 extension ArchiveStore {

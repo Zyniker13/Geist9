@@ -281,9 +281,12 @@ public enum MailBridge {
     static let maxAttachmentTextLength = 1_000_000
 
     /// The searchable text of the message's attachment parts (decision
-    /// 0029, extended by 0036): text/* parts in part order, HTML reduced,
-    /// plus the extracted text of Office Open XML and OpenDocument
-    /// container attachments, capped at `maxAttachmentTextLength`. Per the
+    /// 0029, extended by 0036 and 0044): text/* parts in part order,
+    /// HTML reduced, RTF and the structured text formats (CSV,
+    /// iCalendar, vCard) decoded deliberately, the names of ZIP
+    /// attachments, plus the extracted text of Office Open XML,
+    /// OpenDocument and iWork container attachments, capped at
+    /// `maxAttachmentTextLength`. Per the
     /// DESIGN 6 attachment rule a leaf counts as an attachment when its
     /// disposition says so; text leaves without a disposition are the body,
     /// which the body columns already cover. A container that cannot be
@@ -313,6 +316,12 @@ public enum MailBridge {
                 data: part.decodedBody
             ) {
                 text = extracted
+            } else if let extracted = structuredAttachmentText(
+                main: main,
+                filename: decodedFilename(part),
+                data: part.decodedBody
+            ) {
+                text = extracted
             } else if main.hasPrefix("text/") {
                 let decoded = Charset.decode(parameters["charset"], Array(part.decodedBody))
                 text = main == "text/html" ? htmlToText(decoded) : decoded
@@ -323,6 +332,12 @@ public enum MailBridge {
             ) {
                 text = extracted
             } else if let extracted = imageAttachmentText(
+                main: main,
+                filename: decodedFilename(part),
+                data: part.decodedBody
+            ) {
+                text = extracted
+            } else if let extracted = zipAttachmentText(
                 main: main,
                 filename: decodedFilename(part),
                 data: part.decodedBody
@@ -393,6 +408,58 @@ public enum MailBridge {
         guard main == "application/rtf" || main == "text/rtf" || extensionName == "rtf"
         else { return nil }
         return RTFText.text(data)
+    }
+
+    /// Deliberate structured-text formats (decision 0044): CSV,
+    /// iCalendar and vCard get real parsers instead of raw `text/*`
+    /// decoding, keyed by MIME type first and filename extension as a
+    /// fallback for broken MIME parts. This must run before the plain
+    /// `text/*` branch: a raw-decoded `text/calendar` part would index
+    /// property names, identifiers and base64 blobs as if they were
+    /// prose.
+    static func structuredAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
+        let extensionName = filename
+            .flatMap { $0.split(separator: ".").last.map(String.init) }
+            .map { $0.lowercased() }
+        switch main {
+        case "text/csv", "application/csv":
+            return CSVText.text(data)
+        case "text/calendar", "text/x-vcalendar":
+            return ICalText.text(data)
+        case "text/vcard", "text/x-vcard":
+            return VCardText.text(data)
+        default:
+            break
+        }
+        switch extensionName ?? "" {
+        case "csv":
+            return CSVText.text(data)
+        case "ics", "ical":
+            return ICalText.text(data)
+        case "vcf", "vcard":
+            return VCardText.text(data)
+        default:
+            return nil
+        }
+    }
+
+    /// ZIP entry names (decision 0044): the file names inside a ZIP
+    /// attachment are meaningful searchable prose (a scanned bundle of
+    /// "Invoice" and "Contract" files says what the message carries).
+    /// Only the names are indexed, never entry contents. An unreadable
+    /// ZIP yields no text (decision 0036 rule).
+    static func zipAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
+        let extensionName = filename
+            .flatMap { $0.split(separator: ".").last.map(String.init) }
+            .map { $0.lowercased() }
+        guard main == "application/zip"
+            || main == "application/x-zip-compressed"
+            || extensionName == "zip"
+        else { return nil }
+        guard let entries = try? ZIP.open(Data(data), limits: .attachments) else { return nil }
+        let names = entries.map(\.name).filter { !$0.isEmpty }
+        let joined = names.joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
     }
 
     /// Container attachment formats whose text we extract (DESIGN 6A,

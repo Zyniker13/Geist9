@@ -881,4 +881,125 @@ final class ContainerAttachmentTests: XCTestCase {
             "the RTF backfill must restore attachment text: \(attachments)"
         )
     }
+
+    func testCSVAttachmentTextIsIndexed() throws {
+        let csv = "item,amount\nHotel,4200\nFlight,800\n"
+        let data = Data(Container.message(
+            id: "csvattach@example.com",
+            mimeType: "text/csv",
+            filename: "report.csv",
+            attachment: Data(csv.utf8)
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Hotel 4200"), "got \(attachments)")
+        XCTAssertTrue(attachments.contains("Flight 800"), "got \(attachments)")
+        XCTAssertFalse(
+            attachments.contains("item,amount"),
+            "raw CSV source must not reach the index: \(attachments)"
+        )
+    }
+
+    func testICSAttachmentTextIsIndexed() throws {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" +
+            "BEGIN:VEVENT\r\nUID:a1\r\nDTSTART:20261201T090000Z\r\n" +
+            "SUMMARY:Studio review\r\nLOCATION:Studio Mac\r\n" +
+            "END:VEVENT\r\nEND:VCALENDAR\r\n"
+        let data = Data(Container.message(
+            id: "icsattach@example.com",
+            mimeType: "text/calendar",
+            filename: "meeting.ics",
+            attachment: Data(ics.utf8)
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Studio review"), "got \(attachments)")
+        XCTAssertTrue(attachments.contains("Studio Mac"), "got \(attachments)")
+        XCTAssertFalse(attachments.contains("DTSTART"), "calendar machinery must not reach the index")
+        XCTAssertFalse(attachments.contains("a1"), "identifiers must not reach the index")
+    }
+
+    func testVCFAttachmentTextIsIndexed() throws {
+        let vcf = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Alice Example\r\n" +
+            "EMAIL;TYPE=WORK:alice@example.com\r\nNOTE:met at the fair\r\nEND:VCARD\r\n"
+        let data = Data(Container.message(
+            id: "vcfattach@example.com",
+            mimeType: "text/vcard",
+            filename: "contact.vcf",
+            attachment: Data(vcf.utf8)
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Alice Example"), "got \(attachments)")
+        XCTAssertTrue(attachments.contains("alice@example.com"), "got \(attachments)")
+        XCTAssertTrue(attachments.contains("met at the fair"), "got \(attachments)")
+        XCTAssertFalse(attachments.contains("VERSION"), "vCard machinery must not reach the index")
+        XCTAssertFalse(attachments.contains("TYPE=WORK"), "parameters must not reach the index")
+    }
+
+    func testZipEntryNamesAreIndexed() throws {
+        let zip = Container.zip([
+            (name: "Reports/quarterly.md", body: "x"),
+            (name: "notes/budget.txt", body: "y"),
+        ])
+        let data = Data(Container.message(
+            id: "zipattach@example.com",
+            mimeType: "application/zip",
+            filename: "bundle.zip",
+            attachment: zip
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Reports/quarterly.md"), "got \(attachments)")
+        XCTAssertTrue(attachments.contains("notes/budget.txt"), "got \(attachments)")
+    }
+
+    func testVersionBumpBackfillsDeliberateText() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-textfmts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try ArchiveStore.create(at: tempDir.appendingPathComponent("C.emailarchive"), appVersion: "0.1.0")
+
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:plan review\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        let data = Data(Container.message(
+            id: "icsbackfill@example.com",
+            mimeType: "text/calendar",
+            filename: "plan.ics",
+            attachment: Data(ics.utf8)
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let message = IngestedMessage(
+            record: parsed.record,
+            data: data,
+            memberships: [Membership(mailbox: "INBOX", flags: [])],
+            labels: [],
+            attachments: parsed.attachments,
+            providerThreadID: nil,
+            searchText: parsed.searchText
+        )
+        let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+        guard case .created(let id) = try store.ingest(message, into: account) else {
+            return XCTFail("ingest must create")
+        }
+
+        // Simulate the previous pipeline: mark the row older than current
+        // and blank the calendar text the old row could not have had.
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE message SET textVersion = textVersion - 1 WHERE id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE message_text SET attachments = 'old raw' WHERE rowid = ?", arguments: [id])
+        }
+        let processed = try store.reindexOutdated()
+        XCTAssertEqual(processed, 1)
+        let got = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT attachments FROM message_text WHERE rowid = ?", arguments: [id]
+            )
+        }
+        let attachments = try XCTUnwrap(got)
+        XCTAssertTrue(
+            attachments.contains("plan review"),
+            "the backfill must restore deliberate-format text: \(attachments)"
+        )
+    }
 }
