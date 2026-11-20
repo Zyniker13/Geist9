@@ -36,6 +36,10 @@ Targets for the real judged set, enforced in CI from M2 on every change touching
 
 `ArchiveEmbedApple` (macOS-only, decision 0039) is tested two ways. The toy-model tests run everywhere a Mac runs: a tiny generated Core ML model plus a two-word vocabulary pin the tokenizer, the adapter contract, the truncation path, and the app wiring. The real-weights tests (`RealCoreMLEmbeddingTests`) run the actual converted `bge-small-en-v1.5` package: 384 dimensions, unit-normalized vectors, a query ordering its relevant passage above an unrelated one, and determinism. They are skipped unless `BRISTLECONE_REAL_EMBEDDING_MODEL` points at a directory holding `bge-small-en-v1.5.mlpackage` and `bge-small-en-v1.5-vocab.txt`, as written by `scripts/convert-embedding-model.py`. CI never needs the weights, and the weights are never committed.
 
+### Vector Benchmark Modes (decision 0046)
+
+`bench-search` (not part of CI; run by hand on a Mac) has six vector modes. `vector-prepare <dir> <count> <seed>` builds a fresh embedding-only archive of random unit vectors; `vector-cluster <dir> <queries> <seed>` builds the clusters and checks coverage and the 300 ms scan budget; `vector-recall <dir> <queries> <seed>` sweeps `nprobe` against the exact-scan baseline. Random vectors carry no semantic structure, so their recall is a conservative bound. The two `-real` modes measure on real natural-language embeddings instead: `vector-prepare-real <dir> <model-dir> [count] [seed]` embeds a deterministic 18-topic English corpus (invented proper nouns, no personal data) with the converted model, and `vector-recall-real <dir> <model-dir> [queries] [seed]` clusters it, embeds 30 held-out query phrasings worded differently from the corpus templates, and runs the same sweep. Both need the model directory from `scripts/convert-embedding-model.py` and run on macOS only. The operating point chosen from these measurements is recorded in STATUS.md.
+
 
 ## Local Test Servers
 

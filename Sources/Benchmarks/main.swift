@@ -10,6 +10,8 @@
 //   bench-search as-you-type <archive-dir> [repeats]
 //   bench-search vector-prepare <archive-dir> <count> [seed]
 //   bench-search vector-search  <archive-dir> [repeats] [seed]
+//   bench-search vector-prepare-real <archive-dir> <model-dir> [count] [seed]
+//   bench-search vector-recall-real  <archive-dir> <model-dir> [queries] [seed]
 //
 // `prepare` resumes: already-present messages count as duplicates and cost
 // only a hash lookup, so a killed run can be re-run with the same arguments.
@@ -605,7 +607,6 @@ func vectorPrepare(_ archiveDir: String, _ count: Int, _ seed: UInt64) throws {
     var i: Int64 = 0
     let batch = 4096
     while i < count {
-        let from = i
         try store.db.write { db in
             for _ in 0..<batch where i < count {
                 i += 1
@@ -918,30 +919,38 @@ func vectorRecall(_ archiveDir: String, _ queryCount: Int, _ seed: UInt64) throw
     var rng = VectorRNG(seed: seed)
     var queries: [[Float]] = []
     for _ in 0..<max(queryCount, 1) { queries.append(rng.vector(vectorDim)) }
+    try runRecallSweep(store, model: vectorModel, queries: queries, limit: 20)
+}
 
+/// Shared recall sweep (decision 0046): times the exact scan once as the
+/// baseline, then each nprobe in the sweep, reporting recall@limit and
+/// p50/p95/max latency per point. Both the random-vector sweep and the
+/// real-text sweep run through this, so their numbers stay comparable.
+func runRecallSweep(_ store: ArchiveStore, model: String, queries: [[Float]], limit: Int) throws {
     var exact: [[Int64]] = []
     var exactSamples: [Double] = []
     for query in queries {
         let a = monotonicMs()
         let hits = try store.db.read { db in
-            try VectorIndex.search(db, model: vectorModel, query: query, limit: 20, nprobe: nil)
+            try VectorIndex.search(db, model: model, query: query, limit: limit, nprobe: nil)
         }
         exactSamples.append(monotonicMs() - a)
         exact.append(hits.map(\.messageID))
     }
     let exactSorted = exactSamples.sorted()
-    print(String(format: "== exact    : recall@20 1.000  p50 %6.1f ms  p95 %6.1f ms  max %6.1f ms (baseline)",
-                 percentile(exactSorted, 50), percentile(exactSorted, 95),
+    print(String(format: "== exact    : recall@%d 1.000  p50 %6.1f ms  p95 %6.1f ms  max %6.1f ms (baseline)",
+                 limit, percentile(exactSorted, 50), percentile(exactSorted, 95),
                  exactSorted[exactSorted.count - 1]))
 
-    let sweep = [1, 2, 4, 8, 16, 32, 64].filter { $0 <= clusters.count }
+    let clusterCount = try store.db.read { db in try VectorIndex.clusters(db, model: model) }.count
+    let sweep = [1, 2, 4, 8, 16, 32, 64].filter { $0 <= clusterCount }
     for nprobe in sweep {
         var recall = 0.0
         var samples: [Double] = []
         for (i, query) in queries.enumerated() {
             let a = monotonicMs()
             let hits = try store.db.read { db in
-                try VectorIndex.search(db, model: vectorModel, query: query, limit: 20, nprobe: nprobe)
+                try VectorIndex.search(db, model: model, query: query, limit: limit, nprobe: nprobe)
             }
             samples.append(monotonicMs() - a)
             let found = Set(hits.map(\.messageID))
@@ -950,12 +959,465 @@ func vectorRecall(_ archiveDir: String, _ queryCount: Int, _ seed: UInt64) throw
         }
         recall /= Double(queries.count)
         let sorted = samples.sorted()
-        print(String(format: "== nprobe %3d: recall@20 %.3f  p50 %6.1f ms  p95 %6.1f ms  max %6.1f ms",
-                     nprobe, recall, percentile(sorted, 50), percentile(sorted, 95),
+        print(String(format: "== nprobe %3d: recall@%d %.3f  p50 %6.1f ms  p95 %6.1f ms  max %6.1f ms",
+                     nprobe, limit, recall, percentile(sorted, 50), percentile(sorted, 95),
                      sorted[sorted.count - 1]))
     }
     print(String(format: "== peak RSS: %.0f MB", Double(maxRSSKB()) / 1024.0))
 }
+
+// MARK: Real-text semantic measurement (decisions 0045/0046)
+//
+// The pseudo-word corpus in `Corpus` measures keyword search and the
+// random-vector archives in the `vector-*` phases measure scale, but bge
+// needs real natural language for meaningful embeddings. This section
+// embeds a deterministic topic-clustered English corpus with the
+// converted model (via the ArchiveEmbedApple adapter) and re-runs the
+// nprobe recall sweep on those embeddings, where k-means structure comes
+// from actual topic clusters instead of random noise.
+
+/// Topic-clustered English text for the real-model measurements.
+///
+/// Deterministic: the same seed produces the same messages. No real
+/// people, places, or companies — every proper noun here is invented.
+struct RealTextCorpus {
+    struct Topic {
+        let subjects: [String]
+        let sentences: [String]
+    }
+
+    /// (marker, options) pairs for slot substitution. Array, not
+    /// dictionary, so resolution order — and therefore the generated
+    /// corpus — is identical everywhere.
+    static let fillers: [(String, [String])] = [
+        ("N", ["3", "5", "8", "12", "17", "24", "31", "46", "58", "72", "89"]),
+        ("W", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]),
+        ("M", ["January", "February", "March", "April", "May", "June", "September", "October", "November"]),
+        ("T", ["9:30", "11:00", "1:15", "2:45", "4:00", "6:30"]),
+        ("AMT", ["$18", "$35", "$65", "$120", "$240", "$480", "$1,150"]),
+        ("C", ["Riverton", "Lakeview", "Stonebridge", "Foxglove", "Harbor Mill", "Cedar Run", "Ashfield"]),
+        ("K", ["Cedar Run Labs", "Harbor Mill Studio", "Stonebridge Press", "Foxglove Design", "Riverton Works", "Ashfield Group"]),
+    ]
+
+    static let topics: [Topic] = [
+        Topic(
+            subjects: ["Heater still out after {N} days", "Repair visit moved to {W}", "Lease renewal terms for unit {N}"],
+            sentences: [
+                "The heater in unit {N} quit again and the rooms are cold by evening.",
+                "The plumber said the part arrives {W} and the repair takes about {N} minutes.",
+                "Our lease runs through {M} and the renewal still lists the old parking spot.",
+                "Please send the repair confirmation so I can file it with the lease papers.",
+                "The building manager promised a callback last {W} but nothing came through.",
+                "If the heat is not fixed by {W} I want to know what the next step is.",
+            ]),
+        Topic(
+            subjects: ["Release {N}.{N} blocked on the flaky login test", "Staging deploy moved to {W} {T}", "Rollback plan for the payments service"],
+            sentences: [
+                "The payments service failed the smoke test twice on staging overnight.",
+                "We cut the release branch on {W} and the build went green after two retries.",
+                "The flaky login test passed {N} times locally and failed twice in CI.",
+                "Rollback is a single command but the database migration needs a manual step.",
+                "Can we hold the config changes until the deploy finishes on {W}?",
+                "I moved the demo to {T} so the new build has time to soak.",
+            ]),
+        Topic(
+            subjects: ["Changing the return flight to {W}", "Hotel near the venue for {N} nights", "Trip to {C} confirmation"],
+            sentences: [
+                "The return flight lands at {T} and the seat map is open for changes.",
+                "The hotel near the venue has rooms for {N} nights at {AMT} per night.",
+                "I want to move the trip to {C} one week later if the fare holds.",
+                "The confirmation email never arrived so the booking reference is missing.",
+                "Parking at the airport is cheaper when booked {N} days ahead.",
+                "Send the updated itinerary once the dates are locked.",
+            ]),
+        Topic(
+            subjects: ["Table for {N} on {W} at {T}", "Reservation change for Friday", "Birthday dinner plans"],
+            sentences: [
+                "We need a table for {N} people at {T} on {W}.",
+                "The quiet room in the back worked well for the last dinner.",
+                "One guest is vegetarian so the menu needs a couple of meatless options.",
+                "The reservation is under {K} and the count may grow by two.",
+                "Can we move the booking {N} minutes later without losing the table?",
+                "The parking behind the restaurant fills up after {T}.",
+            ]),
+        Topic(
+            subjects: ["Permission slip for the {M} field trip", "Parent meeting on {W} at {T}", "School photo order deadline"],
+            sentences: [
+                "The field trip to the nature center happens on {W} and costs {AMT}.",
+                "The parent meeting starts at {T} and runs about an hour.",
+                "Photo orders close on {W} and the packet went home early in {M}.",
+                "The bus returns to the school at {T} so pickup runs a little late.",
+                "Please sign the slip and send it back by {W}.",
+                "After-school club meets {N} more times before the break.",
+            ]),
+        Topic(
+            subjects: ["Dentist appointment on {W} at {T}", "Prescription refill question", "Reschedule the annual checkup"],
+            sentences: [
+                "The dentist can see me at {T} on {W} instead of the original slot.",
+                "The pharmacy needs {N} days to order the refill.",
+                "The annual checkup moved to {M} because of a scheduling conflict.",
+                "Bring the insurance card and the list of current prescriptions.",
+                "The clinic calls the evening before to confirm each appointment.",
+                "If the visit runs late I might miss the {T} pickup.",
+            ]),
+        Topic(
+            subjects: ["Invoice {N} past due", "Payment received for order {N}", "Question about the {M} statement"],
+            sentences: [
+                "Invoice {N} for {AMT} is past due by {N} days.",
+                "The payment posted on {W} and the balance is now zero.",
+                "The {M} statement lists two charges that look duplicated.",
+                "Purchase orders need an approval code before processing.",
+                "Our accounting cutoff is {W} so anything later rolls to next month.",
+                "Please confirm the billing address before the next cycle.",
+            ]),
+        Topic(
+            subjects: ["Standup notes {W}", "Blockers before sprint planning", "Demo schedule for {W}"],
+            sentences: [
+                "Yesterday I finished the search pagination work and started the review fixes.",
+                "The data refresh job is blocked on the staging credentials.",
+                "Planning moves to {W} at {T} because two people are out.",
+                "The demo covers the import flow and the new archive viewer.",
+                "I can pair on the flaky test right after standup.",
+                "Tickets for the next sprint are still unpointed.",
+            ]),
+        Topic(
+            subjects: ["Review requested for the export fix", "Small PR for the index cleanup", "Follow-up on yesterday's review comments"],
+            sentences: [
+                "The export fix touches the writer path and the error mapping.",
+                "I added a regression test that fails without the change.",
+                "The index cleanup is {N} lines and mostly mechanical.",
+                "Review comments from {W} are addressed except the concurrency question.",
+                "The branch is green and ready for a second look.",
+                "Can you re-review by {W} so it makes the release?",
+            ]),
+        Topic(
+            subjects: ["Kitchen remodel quote for {C}", "Contractor visit on {W}", "Tile order delay"],
+            sentences: [
+                "The kitchen remodel quote came in at {AMT} including permits.",
+                "The contractor can start on {W} and estimates {N} working days.",
+                "The tile order slipped a week and the backsplash is now the bottleneck.",
+                "We need a decision on the cabinet handles before the install.",
+                "Dust barriers go up on {W} so plan around the noise.",
+                "The final walkthrough is scheduled for {T} on {W}.",
+            ]),
+        Topic(
+            subjects: ["Brake noise getting worse", "Oil change reminder", "Tire rotation before the {M} trip"],
+            sentences: [
+                "The car makes a grinding noise when braking below {N} mph.",
+                "The service shop has an opening on {W} at {T}.",
+                "An oil change and a tire rotation cost {AMT} together.",
+                "The loaner car needs a reservation {N} days ahead.",
+                "The brakes were replaced {N} months ago so this is under warranty.",
+                "Drop it off before {T} and pick it up after work.",
+            ]),
+        Topic(
+            subjects: ["Gym schedule change for {W}", "Swim lane reservation", "Training plan for the {M} 10k"],
+            sentences: [
+                "The morning classes move to {T} starting {W}.",
+                "I reserved a swim lane for {N} days at {T}.",
+                "The 10k plan adds one long run each {W}.",
+                "The pool closes early on {W} for maintenance.",
+                "Coaching sessions cost {AMT} per month.",
+                "Sign-ups for the race close at the end of {M}.",
+            ]),
+        Topic(
+            subjects: ["Community garden work day", "Tomato seedlings ready for pickup", "Watering schedule for the raised beds"],
+            sentences: [
+                "The work day is on {W} starting at {T} by the tool shed.",
+                "The tomato seedlings are ready and cost {AMT} a flat.",
+                "The raised beds need watering every {N} days in {M}.",
+                "The compost bin breaks down fastest when turned on {W}.",
+                "Rabbits got into the lettuce row again this {W}.",
+                "Bring gloves and a spade if you have them.",
+            ]),
+        Topic(
+            subjects: ["Order {N} prints by {W}", "Portrait session reschedule", "Album proof ready"],
+            sentences: [
+                "The {N} prints order ships by {W} and costs {AMT}.",
+                "The portrait session moved to {T} on {W}.",
+                "The album proof is ready for review online.",
+                "The studio recommends the matte finish for framing.",
+                "Pickup is at the {C} location after {T}.",
+                "The gallery link expires in {N} days.",
+            ]),
+        Topic(
+            subjects: ["Talk slot for the {M} workshop", "Badge pickup hours", "Speaker dinner headcount"],
+            sentences: [
+                "My talk slot is {T} on {W} in the main hall.",
+                "Badge pickup opens at {T} and closes an hour before the keynote.",
+                "The speaker dinner headcount is due {W}.",
+                "Travel costs are capped at {AMT} per speaker.",
+                "The venue wifi dropped during the last rehearsal.",
+                "Slides are due to the AV desk by {T}.",
+            ]),
+        Topic(
+            subjects: ["Next meeting {W}: chapters {N}-{N}", "Hosting rotation for {M}", "Book pick poll results"],
+            sentences: [
+                "We meet at {T} on {W} and discuss chapters {N} through {N}.",
+                "Hosting rotates in {M} and the {C} house has the next slot.",
+                "The poll picked the river novel by {N} votes.",
+                "Snacks rotate with the hosting, so bring something small.",
+                "The library holds {N} copies under the club name.",
+                "New members can join mid-book without any problem.",
+            ]),
+        Topic(
+            subjects: ["Food drive shift on {W}", "Volunteer orientation for {C}", "Donation pickup route"],
+            sentences: [
+                "The food drive shift runs {T} to {T} on {W}.",
+                "Orientation for new volunteers happens at the {C} branch.",
+                "The pickup route covers {N} stops and takes about two hours.",
+                "Donations are up {N} percent over last {M}.",
+                "Wear closed shoes and bring a water bottle.",
+                "Reply by {W} if you can cover an extra shift.",
+            ]),
+        Topic(
+            subjects: ["Claim {N} paperwork checklist", "Policy renewal in {M}", "Deductible question for the roof claim"],
+            sentences: [
+                "Claim {N} needs the photos and the repair estimate attached.",
+                "The policy renews in {M} and the premium goes up {AMT}.",
+                "The roof claim deductible is {AMT} this year.",
+                "The adjuster visits on {W} between {T} and {T}.",
+                "Send the signed form back within {N} days.",
+                "Keep the receipts until the claim closes.",
+            ]),
+        Topic(
+            subjects: ["Dinner plan for {W}", "Slow cooker chili recipe", "Grocery list for the week"],
+            sentences: [
+                "For {W} dinner I plan a slow cooker chili with beans.",
+                "The recipe needs {N} minutes of prep and {N} hours on low.",
+                "The grocery list covers produce for {N} meals.",
+                "The farmers market on {C} street opens at {T}.",
+                "Leftovers keep {N} days in the fridge.",
+                "Double the batch and freeze half for later.",
+            ]),
+        Topic(
+            subjects: ["Dog grooming on {W}", "Vet shot reminder for the cat", "Pet sitter for the {M} trip"],
+            sentences: [
+                "The grooming appointment is at {T} on {W}.",
+                "The cat is due for shots in {M} and the clinic opens at {T}.",
+                "The pet sitter charges {AMT} per visit for {N} visits.",
+                "The dog pulls on the leash near the {C} park.",
+                "Food delivery arrives every {N} weeks on {W}.",
+                "Leave the carrier out the night before.",
+            ]),
+    ]
+
+    var rng: LCG
+
+    init(seed: UInt64) {
+        rng = LCG(seed: seed)
+    }
+
+    /// Deterministic (subject, body) for the next corpus message.
+    mutating func message() -> (subject: String, body: String) {
+        let topic = RealTextCorpus.topics[rng.uniform(RealTextCorpus.topics.count)]
+        let subject = resolve(topic.subjects[rng.uniform(topic.subjects.count)])
+        var lines: [String] = []
+        for _ in 0..<(3 + rng.uniform(2)) {
+            lines.append(resolve(topic.sentences[rng.uniform(topic.sentences.count)]))
+        }
+        return (subject, lines.joined(separator: " "))
+    }
+
+    mutating func resolve(_ template: String) -> String {
+        var out = template
+        for (marker, options) in RealTextCorpus.fillers {
+            let token = "{\(marker)}"
+            guard out.contains(token) else { continue }
+            let value = options[rng.uniform(options.count)]
+            out = out.replacingOccurrences(of: token, with: value)
+        }
+        return out
+    }
+}
+
+/// Held-out query phrasings for the real-text sweep: written as natural
+/// questions about the corpus topics, worded differently from the corpus
+/// templates, so recall measures semantic similarity rather than
+/// template match.
+let realQueries: [String] = [
+    "Is there any update on the heating problem in my apartment?",
+    "When will someone come to look at the broken radiator?",
+    "Can we push the software launch to later in the week?",
+    "Why does the login test keep failing on the build server?",
+    "How do I change my flight to a later date?",
+    "Looking for a quiet hotel near the convention center",
+    "Book a table for six people on Friday evening",
+    "What time does the parent teacher meeting start?",
+    "I need to move my dentist appointment to next month",
+    "Did the invoice from last month ever get paid?",
+    "What is still open before sprint planning on Monday?",
+    "Please review my pull request when you have a minute",
+    "How long will the kitchen remodeling take?",
+    "The car is making a strange noise when I brake",
+    "Can I switch my gym membership to mornings?",
+    "When is the community garden work day this month?",
+    "Where can I pick up the printed photos I ordered?",
+    "Who is giving the opening talk at the workshop?",
+    "Which book are we reading for the next meeting?",
+    "Can I still sign up to volunteer for the food drive?",
+    "What papers do I need for the insurance claim?",
+    "Suggestions for an easy dinner to cook tonight",
+    "Who can watch the dog while we are away?",
+    "What is the moving truck schedule for the end of the month?",
+    "Has the new sofa been delivered yet?",
+    "The internet has dropped out three times today",
+    "Which documents should I keep for the tax return?",
+    "Do I need to renew my parking permit this year?",
+    "Is the pool open early on weekends now?",
+    "Looking for the receipt for the desk chair I returned",
+]
+
+let realModelName = "bge-small-en-v1.5"
+
+#if canImport(ArchiveEmbedApple)
+import ArchiveEmbedApple
+
+func loadRealModel(_ modelDir: String) -> CoreMLEmbedding {
+    guard let model = CoreMLEmbedding.load(named: realModelName, in: [URL(fileURLWithPath: modelDir)]) else {
+        print("FAIL: cannot load \(realModelName) from \(modelDir)")
+        exit(1)
+    }
+    return model
+}
+
+///   bench-search vector-prepare-real <archive-dir> <model-dir> [count] [seed]
+///
+/// Builds a fresh embedding-only archive whose vectors are real-model
+/// embeddings of the topic-clustered English corpus, so the recall sweep
+/// runs on embeddings with actual semantic structure.
+func vectorPrepareReal(_ archiveDir: String, _ modelDir: String, _ count: Int, _ seed: UInt64) throws {
+    let model = loadRealModel(modelDir)
+    let store = try ArchiveStore.create(at: URL(fileURLWithPath: archiveDir), appVersion: "0.1.0")
+    var corpus = RealTextCorpus(seed: seed)
+    let started = monotonicMs()
+    func generateRows(_ n: Int) -> [(subject: String, text: String)] {
+        var out: [(subject: String, text: String)] = []
+        out.reserveCapacity(n)
+        for _ in 0..<n {
+            let m = corpus.message()
+            out.append((m.subject, EmbeddingBackfill.documentText(subject: m.subject, body: m.body)))
+        }
+        return out
+    }
+    let rows = generateRows(count)
+    let subjects = rows.map(\.subject)
+    let texts = rows.map(\.text)
+    print(String(format: "== generated %d texts in %.0f ms", count, monotonicMs() - started))
+    fflush(nil)
+
+    // Embed concurrently: each closure writes only its own row slots of
+    // `vectors`, so the shared mutable array is never contended.
+    let embedStarted = monotonicMs()
+    nonisolated(unsafe) var vectors = [[Float]](repeating: [], count: count)
+    let chunk = 32
+    let chunks = max(1, (count + chunk - 1) / chunk)
+    DispatchQueue.concurrentPerform(iterations: chunks) { c in
+        let lo = c * chunk
+        let hi = min(lo + chunk, count)
+        for i in lo..<hi {
+            vectors[i] = model.embed(texts[i]) ?? []
+        }
+    }
+    let embedded = vectors.filter { $0.count == model.dimension }
+    print(String(format: "== embedded %d/%d in %.1f s (dim %d)",
+                 embedded.count, count, (monotonicMs() - embedStarted) / 1000.0, model.dimension))
+    guard embedded.count == count else {
+        print("FAIL: \(count - embedded.count) embeddings missing or wrong dimension")
+        exit(1)
+    }
+
+    // Insert (message, message_embedding) pairs, batched like vectorPrepare.
+    let insertStarted = monotonicMs()
+    let batch = 4096
+    let db = store.db
+    let vectorModel = model.identifier
+    let vectorDim = model.dimension
+    var i = 0
+    while i < count {
+        try db.write { db in
+            for _ in 0..<batch where i < count {
+                let vector = vectors[i]
+                let vectorBlob = VectorIndex.encode(vector)
+                try db.execute(
+                    sql: "INSERT INTO message (hash, size, subject) VALUES (?, ?, ?)",
+                    arguments: [vectorHash(Int64(i)), vectorBlob.count, subjects[i]]
+                )
+                try db.execute(
+                    sql: "INSERT INTO message_embedding (id, model, dim, vector) VALUES (?, ?, ?, ?)",
+                    arguments: [db.lastInsertedRowID, vectorModel, vectorDim, vectorBlob]
+                )
+                i += 1
+            }
+        }
+        if i / batch % 25 == 0 || i == count {
+            let mark = monotonicMs()
+            print(String(format: "== %lld rows (%.0f rows/s so far)", Int64(i), Double(i) * 1000.0 / max(mark - insertStarted, 1)))
+            fflush(nil)
+        }
+    }
+    let done = monotonicMs()
+    print(String(format: "== inserted %d real-model embeddings (dim %d, model %@) in %.1f s",
+                 count, vectorDim, vectorModel, (done - insertStarted) / 1000.0))
+}
+
+///   bench-search vector-recall-real <archive-dir> <model-dir> [queries] [seed]
+///
+/// Clusters the real-model archive if needed, embeds held-out query
+/// phrasings with the same model, and runs the shared nprobe recall
+/// sweep — recall now measured on real natural-language embeddings.
+func vectorRecallReal(_ archiveDir: String, _ modelDir: String, _ queryCount: Int, _ seed: UInt64) throws {
+    let model = loadRealModel(modelDir)
+    let store = try ArchiveStore.open(at: URL(fileURLWithPath: archiveDir))
+    let stored = try store.db.read { db in
+        try Int.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM message_embedding WHERE model = ?", arguments: [model.identifier]
+        ) ?? 0
+    }
+    print("== archive: \(stored) embeddings (dim \(model.dimension), model \(model.identifier))")
+    guard stored > 0 else { print("FAIL: run vector-prepare-real first"); exit(1) }
+
+    var clusters = try store.db.read { db in try VectorIndex.clusters(db, model: model.identifier) }
+    if clusters.isEmpty {
+        let t0 = monotonicMs()
+        let clusterCount = try store.db.write { db in
+            try VectorIndex.maybeCluster(db, model: model.identifier, seed: seed)
+        }
+        print(String(format: "== buildClusters: %d clusters in %.1f ms", clusterCount, monotonicMs() - t0))
+        guard clusterCount > 0 else {
+            print("FAIL: no clusters built (rows \(stored) below clusterMinRows \(VectorIndex.clusterMinRows)?)")
+            exit(1)
+        }
+        clusters = try store.db.read { db in try VectorIndex.clusters(db, model: model.identifier) }
+    }
+    var sizes = clusters.map(\.count)
+    sizes.sort()
+    let covered = sizes.reduce(0, +)
+    print("== coverage \(covered)/\(stored) rows; size min \(sizes.first ?? 0)" +
+        " median \(sizes[sizes.count / 2]) max \(sizes.last ?? 0)")
+    precondition(covered <= stored, "cluster counts exceed row count")
+
+    let n = max(min(queryCount, realQueries.count), 1)
+    let queries = realQueries.prefix(n).map { q -> [Float] in
+        guard let v = model.embed(q), v.count == model.dimension else {
+            print("FAIL: query embedding failed for \(q)")
+            exit(1)
+        }
+        return v
+    }
+    try runRecallSweep(store, model: model.identifier, queries: queries, limit: 20)
+}
+#else
+func vectorPrepareReal(_ archiveDir: String, _ modelDir: String, _ count: Int, _ seed: UInt64) throws {
+    print("FAIL: vector-prepare-real requires macOS (ArchiveEmbedApple)")
+    exit(2)
+}
+
+func vectorRecallReal(_ archiveDir: String, _ modelDir: String, _ queryCount: Int, _ seed: UInt64) throws {
+    print("FAIL: vector-recall-real requires macOS (ArchiveEmbedApple)")
+    exit(2)
+}
+#endif
 
 // MARK: Entry
 
@@ -998,7 +1460,7 @@ func parseCrashStage(_ args: [String]) -> ([String], String?) {
 }
 
 guard let command = args.first else {
-    print("usage: bench-search prepare|search|both|as-you-type <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search vector-prepare <archive-dir> <count> [seed]\n       bench-search vector-search <archive-dir> [repeats] [seed]  (same seed as vector-prepare)\n       bench-search vector-cluster <archive-dir> [repeats] [seed]  (after vector-prepare; decision 0046)\n       bench-search vector-recall <archive-dir> [queries] [seed]  (after vector-cluster; decision 0046)")
+    print("usage: bench-search prepare|search|both|as-you-type <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search vector-prepare <archive-dir> <count> [seed]\n       bench-search vector-search <archive-dir> [repeats] [seed]  (same seed as vector-prepare)\n       bench-search vector-cluster <archive-dir> [repeats] [seed]  (after vector-prepare; decision 0046)\n       bench-search vector-recall <archive-dir> [queries] [seed]  (after vector-cluster; decision 0046)\n       bench-search vector-prepare-real <archive-dir> <model-dir> [count] [seed]  (real-model embeddings, macOS only)\n       bench-search vector-recall-real <archive-dir> <model-dir> [queries] [seed]  (real-model recall; decision 0046)")
     exit(2)
 }
 do {
@@ -1036,6 +1498,12 @@ do {
         try vectorCluster(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 20, parsed.count > 3 ? UInt64(parsed[3])! : 42)
     case "vector-recall":
         try vectorRecall(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 10, parsed.count > 3 ? UInt64(parsed[3])! : 42)
+    case "vector-prepare-real":
+        try vectorPrepareReal(parsed[1], parsed[2], parsed.count > 3 ? Int(parsed[3])! : 10000,
+                              parsed.count > 4 ? UInt64(parsed[4])! : 42)
+    case "vector-recall-real":
+        try vectorRecallReal(parsed[1], parsed[2], parsed.count > 3 ? Int(parsed[3])! : 30,
+                             parsed.count > 4 ? UInt64(parsed[4])! : 42)
     default:
         print("unknown command: \(command)")
         exit(2)

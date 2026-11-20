@@ -154,8 +154,9 @@ let coreTargets: [Target] = [
     // CredentialStore, Keychain and 1Password backends (DESIGN 4)
     .target(name: "Credentials"),
     // scale benchmark harness (ROADMAP M1 "Done when", docs/TESTING.md;
-    // decision 0045 scale-measurement slice adds the semantic phases)
-    .executableTarget(name: "Benchmarks", dependencies: ["ArchiveCore", .product(name: "GRDB", package: "GRDB.swift")]),
+    // decision 0045 scale-measurement slice adds the semantic phases;
+    // decision 0046 real-text recall links ArchiveEmbedApple on macOS only)
+    .executableTarget(name: "Benchmarks", dependencies: ["ArchiveCore", .product(name: "GRDB", package: "GRDB.swift"), .target(name: "ArchiveEmbedApple", condition: .when(platforms: [.macOS]))]),
 ]
 
 let evalTargets: [Target] = [
