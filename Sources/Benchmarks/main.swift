@@ -8,6 +8,8 @@
 //   bench-search search      <archive-dir> [repeats]
 //   bench-search both        <archive-dir> <count> [repeats]
 //   bench-search as-you-type <archive-dir> [repeats]
+//   bench-search vector-prepare <archive-dir> <count> [seed]
+//   bench-search vector-search  <archive-dir> [repeats] [seed]
 //
 // `prepare` resumes: already-present messages count as duplicates and cost
 // only a hash lookup, so a killed run can be re-run with the same arguments.
@@ -23,6 +25,7 @@
 
 import ArchiveCore
 import Foundation
+import GRDB
 
 #if canImport(Darwin)
 import Darwin
@@ -541,6 +544,148 @@ func maxRSSKB() -> Int {
     #endif
 }
 
+// MARK: Semantic scale benchmark (decision 0045 scale-measurement slice)
+
+/// DESIGN 6A semantic budget: a semantic query at one million messages must
+/// finish in under 300 ms. The archive here holds one float16 embedding per
+/// message at the real model's dimension (384). Rows go straight into
+/// `message` + `message_embedding` — the phase measures the scan, not ingest.
+///
+///   bench-search vector-prepare <archive-dir> <count> [seed]
+///   bench-search vector-search  <archive-dir> [repeats] [seed]
+///
+/// Vectors are deterministic: rows get uniform [-1, 1) draws from a seeded
+/// xorshift, and the row nearest `count/2` stores 0.7 × query0, so the probe
+/// query must return exactly that row at rank 1. A broken scan (wrong math,
+/// wrong layout) fails the sanity check instead of passing a meaningless
+/// timing. `vector-search` must use the same seed as `vector-prepare` to
+/// rebuild query0.
+
+struct VectorRNG {
+    var state: UInt64
+    init(seed: UInt64) { state = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed }
+    mutating func next() -> UInt64 {
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return state
+    }
+    /// Uniform in [-1, 1).
+    mutating func unit() -> Float {
+        var value = Float(bitPattern: 0x3F80_0000 | UInt32(truncatingIfNeeded: next() & 0x007F_FFFF)) - 1.0
+        if next() & 1 == 1 { value = -value }
+        return value
+    }
+    mutating func vector(_ dim: Int) -> [Float] {
+        var v = [Float]()
+        v.reserveCapacity(dim)
+        for _ in 0..<dim { v.append(unit()) }
+        return v
+    }
+}
+
+let vectorDim = 384
+let vectorModel = "bench-vector"
+
+func vectorHash(_ i: Int64) -> Data {
+    var bytes = [UInt8](repeating: 0, count: 8)
+    for k in 0..<8 { bytes[k] = UInt8(truncatingIfNeeded: i >> (8 * k)) }
+    return Data(bytes)
+}
+
+func vectorPrepare(_ archiveDir: String, _ count: Int, _ seed: UInt64) throws {
+    let store = try ArchiveStore.create(at: URL(fileURLWithPath: archiveDir), appVersion: "0.1.0")
+    var rng = VectorRNG(seed: seed)
+    let query0 = rng.vector(vectorDim)
+    let specialRow = Int64(max(1, count / 2))
+    let started = monotonicMs()
+    var i: Int64 = 0
+    let batch = 4096
+    while i < count {
+        let from = i
+        try store.db.write { db in
+            for _ in 0..<batch where i < count {
+                i += 1
+                let vector = (i == specialRow) ? query0.map { $0 * 0.7 } : rng.vector(vectorDim)
+                let vectorBlob = VectorIndex.encode(vector)
+                try db.execute(
+                    sql: "INSERT INTO message (hash, size, subject) VALUES (?, ?, ?)",
+                    arguments: [vectorHash(i), vectorBlob.count, "vec-\(i)"]
+                )
+                try db.execute(
+                    sql: "INSERT INTO message_embedding (id, model, dim, vector) VALUES (?, ?, ?, ?)",
+                    arguments: [db.lastInsertedRowID, vectorModel, vectorDim, vectorBlob]
+                )
+            }
+        }
+        if Int(i) / batch % 25 == 0 || i == count {
+            let mark = monotonicMs()
+            print(String(format: "== %lld rows (%.0f rows/s)", i, Double(i - from) * 1000.0 / max(mark - started, 1)))
+            fflush(nil)
+        }
+    }
+    let done = monotonicMs()
+    print(String(format: "== inserted %d embeddings (dim %d) in %.1f s", count, vectorDim, (done - started) / 1000.0))
+}
+
+func vectorSearch(_ archiveDir: String, _ repeats: Int, _ seed: UInt64) throws {
+    let store = try ArchiveStore.open(at: URL(fileURLWithPath: archiveDir))
+    let stored = try store.db.read { db in
+        try Int.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM message_embedding WHERE model = ?", arguments: [vectorModel]
+        ) ?? 0
+    }
+    print("== archive: \(stored) embeddings (dim \(vectorDim), model \(vectorModel))")
+    guard stored > 0 else { print("FAIL: run vector-prepare first"); exit(1) }
+
+    var rng = VectorRNG(seed: seed)
+    let query0 = rng.vector(vectorDim)
+    let specialRow = Int64(max(1, stored / 2))
+    var queries: [[Float]] = [query0]
+    for _ in 0..<24 { queries.append(rng.vector(vectorDim)) }
+
+    // Sanity probe (its wall time doubles as the cold-ish first-scan mark):
+    // the planted row must come back at rank 1 with cosine 1.0 (0.7 × 0.7
+    // scales out of cosine).
+    let probeStart = monotonicMs()
+    let probe = try store.db.read { db in
+        try VectorIndex.search(db, model: vectorModel, query: query0, limit: 5)
+    }
+    let probeMs = monotonicMs() - probeStart
+    let probeOK = probe.first?.messageID == specialRow
+    print(String(format: "== probe: rank1 id %lld (expected %lld), first-scan %.1f ms — %@",
+                 probe.first?.messageID ?? -1, specialRow, probeMs, probeOK ? "PASS" : "FAIL"))
+    guard probeOK else { exit(1) }
+
+    // Warm-up, untimed.
+    _ = try store.db.read { db in
+        try VectorIndex.search(db, model: vectorModel, query: queries[7], limit: 20)
+    }
+
+    var samples: [Double] = []
+    samples.reserveCapacity(repeats * queries.count)
+    var hitTotal = 0
+    for r in 0..<repeats {
+        let query = queries[r % queries.count]
+        let t0 = monotonicMs()
+        let hits = try store.db.read { db in
+            try VectorIndex.search(db, model: vectorModel, query: query, limit: 20)
+        }
+        let t1 = monotonicMs()
+        samples.append(t1 - t0)
+        hitTotal += hits.count
+    }
+    print("== average hits per scan: \(hitTotal / max(repeats * queries.count, 1))")
+    print(String(format: "== peak RSS: %.0f MB", Double(maxRSSKB()) / 1024.0))
+    report("semantic scan, dim \(vectorDim), limit 20", samples)
+
+    let sorted = samples.sorted()
+    let p95 = percentile(sorted, 95)
+    let ok = p95 < 300.0
+    print(String(format: "== budget: semantic scan p95 %.1f ms — %@ (<300)", p95, ok ? "PASS" : "FAIL"))
+    if !ok { exit(1) }
+}
+
 // MARK: Entry
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -582,7 +727,7 @@ func parseCrashStage(_ args: [String]) -> ([String], String?) {
 }
 
 guard let command = args.first else {
-    print("usage: bench-search prepare|search|both|as-you-type <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]")
+    print("usage: bench-search prepare|search|both|as-you-type <archive-dir> [count] [repeats] [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search import <archive-dir> <count> [seed] [--kill-after N] [--crash-stage files-written|dir-fsync|index-commit]\n       bench-search vector-prepare <archive-dir> <count> [seed]\n       bench-search vector-search <archive-dir> [repeats] [seed]  (same seed as vector-prepare)")
     exit(2)
 }
 do {
@@ -610,6 +755,10 @@ do {
         try importFixture(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42, killAfter: killAfter, crashStage: crashStage)
     case "as-you-type":
         try asYouTypePhase(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 300)
+    case "vector-prepare":
+        try vectorPrepare(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42)
+    case "vector-search":
+        try vectorSearch(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 20, parsed.count > 3 ? UInt64(parsed[3])! : 42)
     default:
         print("unknown command: \(command)")
         exit(2)

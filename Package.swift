@@ -153,8 +153,9 @@ let coreTargets: [Target] = [
     .target(name: "ArchiveMCP"),
     // CredentialStore, Keychain and 1Password backends (DESIGN 4)
     .target(name: "Credentials"),
-    // scale benchmark harness (ROADMAP M1 "Done when", docs/TESTING.md)
-    .executableTarget(name: "Benchmarks", dependencies: ["ArchiveCore"]),
+    // scale benchmark harness (ROADMAP M1 "Done when", docs/TESTING.md;
+    // decision 0045 scale-measurement slice adds the semantic phases)
+    .executableTarget(name: "Benchmarks", dependencies: ["ArchiveCore", .product(name: "GRDB", package: "GRDB.swift")]),
 ]
 
 let evalTargets: [Target] = [
