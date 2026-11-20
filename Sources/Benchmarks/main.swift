@@ -920,12 +920,19 @@ func vectorRecall(_ archiveDir: String, _ queryCount: Int, _ seed: UInt64) throw
     for _ in 0..<max(queryCount, 1) { queries.append(rng.vector(vectorDim)) }
 
     var exact: [[Int64]] = []
+    var exactSamples: [Double] = []
     for query in queries {
+        let a = monotonicMs()
         let hits = try store.db.read { db in
             try VectorIndex.search(db, model: vectorModel, query: query, limit: 20, nprobe: nil)
         }
+        exactSamples.append(monotonicMs() - a)
         exact.append(hits.map(\.messageID))
     }
+    let exactSorted = exactSamples.sorted()
+    print(String(format: "== exact    : recall@20 1.000  p50 %6.1f ms  p95 %6.1f ms  max %6.1f ms (baseline)",
+                 percentile(exactSorted, 50), percentile(exactSorted, 95),
+                 exactSorted[exactSorted.count - 1]))
 
     let sweep = [1, 2, 4, 8, 16, 32, 64].filter { $0 <= clusters.count }
     for nprobe in sweep {
