@@ -524,14 +524,17 @@ func asYouTypePhase(_ archiveDir: String, _ repeats: Int) throws {
 
 func maxRSSKB() -> Int {
     #if canImport(Darwin)
-    var info = mach_task_basic_info_data_t()
-    var count = mach_msg_type_number_t(10)
+    // task_vm_info rather than MACH_TASK_BASIC_INFO: the latter's task_info
+    // call returns KERN_INVALID_ARGUMENT here (harness printed "0 MB" since
+    // it was introduced), while task_vm_info reports resident_size reliably.
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
     let result = withUnsafeMutablePointer(to: &info) {
-        task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO),
+        task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO),
                   $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { $0 },
                   &count)
     }
-    return result == KERN_SUCCESS ? Int(info.resident_size) : 0
+    return result == KERN_SUCCESS ? Int(info.resident_size / 1024) : 0
     #else
     var usage = rusage()
     // Linux: RUSAGE_SELF is a __rusage_who enum; the C function wants Int32.
@@ -835,7 +838,7 @@ func vectorCluster(_ archiveDir: String, _ repeats: Int, _ seed: UInt64) throws 
     let clusterCount = try store.db.write { db in
         try VectorIndex.maybeCluster(db, model: vectorModel, seed: seed)
     }
-    print(String(format: "== buildClusters: %d clusters in %.1f s", clusterCount, monotonicMs() - t0))
+    print(String(format: "== buildClusters: %d clusters in %.1f ms", clusterCount, monotonicMs() - t0))
     guard clusterCount > 0 else {
         print("FAIL: no clusters built (rows \(stored) below clusterMinRows \(VectorIndex.clusterMinRows)?)")
         exit(1)
