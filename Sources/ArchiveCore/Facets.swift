@@ -16,6 +16,20 @@ public struct EntityValueCount: Sendable, Equatable {
     }
 }
 
+/// One bar of the timeline histogram: how many matched messages carry the
+/// effective date (dateSent, else dateReceived) inside this year-month.
+public struct YearMonthCount: Sendable, Equatable {
+    public var year: Int
+    public var month: Int
+    public var count: Int
+
+    public init(year: Int, month: Int, count: Int) {
+        self.year = year
+        self.month = month
+        self.count = count
+    }
+}
+
 /// Entity facets (DESIGN 6A, M2): live counts that stand beside the
 /// results. A facet answers "what is in this result set" — how many
 /// messages carry each entity kind, and which values dominate one kind —
@@ -79,6 +93,57 @@ extension ArchiveStore {
             .map { row in
                 EntityValueCount(value: row["v"] ?? "", count: row["n"] ?? 0)
             }
+        }
+    }
+
+    /// The timeline histogram (DESIGN 6A): for the query's full match set,
+    /// how many messages carry each year-and-month of their effective date
+    /// (dateSent, else dateReceived), ascending chronologically. Messages
+    /// with no usable date are counted in `undated` and appear in no bucket.
+    /// The buckets cover the whole match set, not one result page, and
+    /// follow the same zero-hit fallback ladder the hits follow (trigram
+    /// retry, then the one-edit typo rescue), so the histogram always
+    /// describes the set the person is looking at. One indexed scan, under
+    /// the 300 ms faceted-counts budget. Natural-language dates resolve
+    /// against `now` (defaults to the current time).
+    public func timelineHistogram(
+        matching query: String, now: Date? = nil
+    ) throws -> (buckets: [YearMonthCount], undated: Int) {
+        try db.read { db in
+            let predicate = try facetPredicate(matching: query, in: db, now: now)
+            // Dates are stored as fixed UTC ISO strings (Timestamp.string),
+            // so the first seven characters are the year and month.
+            let bucketSQL = """
+                SELECT substr(d, 1, 7) AS ym, COUNT(*) AS n
+                FROM (
+                    SELECT COALESCE(m.dateSent, m.dateReceived) AS d
+                    FROM message m WHERE \(predicate.sql)
+                )
+                WHERE d IS NOT NULL AND length(d) >= 7
+                GROUP BY ym ORDER BY ym ASC
+                """
+            let args = StatementArguments(predicate.arguments)
+            var buckets: [YearMonthCount] = []
+            for row in try Row.fetchAll(db, sql: bucketSQL, arguments: args) {
+                let ym: String = row["ym"] ?? ""
+                let parts = ym.split(separator: "-")
+                guard parts.count == 2, let year = Int(parts[0]), let month = Int(parts[1]) else {
+                    continue
+                }
+                buckets.append(YearMonthCount(year: year, month: month, count: row["n"] ?? 0))
+            }
+            let undated = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) FROM (
+                        SELECT COALESCE(m.dateSent, m.dateReceived) AS d
+                        FROM message m WHERE \(predicate.sql)
+                    )
+                    WHERE d IS NULL OR length(d) < 7
+                    """,
+                arguments: args
+            ) ?? 0
+            return (buckets, undated)
         }
     }
 
