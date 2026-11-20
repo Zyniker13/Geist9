@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "note": "Graded judgments for the M2 judged relevance set (DESIGN 6A, decision 0028). Grade 2 = directly about the query topic, grade 1 = supportive or brief mention. Every id refers to a JudgedMessage in Sources/SearchEval/JudgedTopics.swift or JudgedTopics2.swift; edit both together. Queries use only mechanisms the engine implements (decision 0028).",
   "queries": [
     {
@@ -483,7 +483,7 @@
     },
     {
       "id": "q026",
-      "text": "Pr\u00fcfbericht",
+      "text": "Prüfbericht",
       "category": "finance",
       "judgments": [
         {
@@ -1081,7 +1081,7 @@
     },
     {
       "id": "q068",
-      "text": "Pr\u00fcfung",
+      "text": "Prüfung",
       "category": "multilingual",
       "judgments": [
         {
@@ -1188,7 +1188,7 @@
     },
     {
       "id": "q077",
-      "text": "\u0441\u0447\u0451\u0442",
+      "text": "счёт",
       "category": "multilingual",
       "judgments": [
         {
@@ -1199,7 +1199,7 @@
     },
     {
       "id": "q078",
-      "text": "\u043e\u0442\u0447\u0451\u0442",
+      "text": "отчёт",
       "category": "multilingual",
       "judgments": [
         {
@@ -1214,7 +1214,7 @@
     },
     {
       "id": "q079",
-      "text": "\u8acb\u6c42\u66f8",
+      "text": "請求書",
       "category": "multilingual",
       "judgments": [
         {
@@ -1225,7 +1225,7 @@
     },
     {
       "id": "q080",
-      "text": "\u4f1a\u8b70",
+      "text": "会議",
       "category": "multilingual",
       "judgments": [
         {
@@ -1236,7 +1236,7 @@
     },
     {
       "id": "q081",
-      "text": "\u4f1a\u8bae",
+      "text": "会议",
       "category": "multilingual",
       "judgments": [
         {
@@ -1247,7 +1247,7 @@
     },
     {
       "id": "q082",
-      "text": "\u53d1\u7968",
+      "text": "发票",
       "category": "multilingual",
       "judgments": [
         {
@@ -1258,7 +1258,7 @@
     },
     {
       "id": "q083",
-      "text": "\ud68c\uc758\ub85d",
+      "text": "회의록",
       "category": "multilingual",
       "judgments": [
         {
@@ -1269,7 +1269,7 @@
     },
     {
       "id": "q084",
-      "text": "caf\u00e9",
+      "text": "café",
       "category": "folding",
       "judgments": [
         {
@@ -1295,7 +1295,7 @@
     },
     {
       "id": "q086",
-      "text": "r\u00e9sum\u00e9",
+      "text": "résumé",
       "category": "folding",
       "judgments": [
         {
@@ -1321,7 +1321,7 @@
     },
     {
       "id": "q088",
-      "text": "Gr\u00fc\u00dfe",
+      "text": "Grüße",
       "category": "folding",
       "judgments": [
         {
@@ -1332,7 +1332,7 @@
     },
     {
       "id": "q089",
-      "text": "Stra\u00dfe",
+      "text": "Straße",
       "category": "folding",
       "judgments": [
         {
@@ -1343,7 +1343,7 @@
     },
     {
       "id": "q090",
-      "text": "S\u00f8rensen",
+      "text": "Sørensen",
       "category": "folding",
       "judgments": [
         {
@@ -1358,7 +1358,7 @@
     },
     {
       "id": "q091",
-      "text": "F\u00e4hre",
+      "text": "Fähre",
       "category": "folding",
       "judgments": [
         {
@@ -1380,7 +1380,7 @@
     },
     {
       "id": "q093",
-      "text": "F\u00f6hn",
+      "text": "Föhn",
       "category": "folding",
       "judgments": [
         {
@@ -2027,10 +2027,29 @@
         {
           "id": "j046",
           "grade": 2
+        },
+        {
+          "id": "j047",
+          "grade": 1
+        },
+        {
+          "id": "j048",
+          "grade": 1
         }
       ],
       "requires": [
         "semantic"
+      ]
+    },
+    {
+      "id": "q143",
+      "text": "the email where the landlord agreed to fix the heater",
+      "category": "housing",
+      "judgments": [
+        {
+          "id": "j046",
+          "grade": 2
+        }
       ]
     }
   ]

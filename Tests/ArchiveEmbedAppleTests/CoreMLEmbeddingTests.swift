@@ -236,4 +236,31 @@ final class RealCoreMLEmbeddingTests: XCTestCase {
             XCTAssertEqual(a, b, accuracy: 0.001)
         }
     }
+
+    /// The vocab file is the Swift tokenizer's id table: line N must be id
+    /// N. A file written in any other order silently maps every word to the
+    /// wrong embedding row — vectors stay deterministic and unit-normalized,
+    /// so only a known-id check catches it (regression for the scrambled
+    /// `get_vocab().keys()` export; decision 0049). These ids are fixed by
+    /// the bge-small-en-v1.5 vocabulary (the bert-base-uncased table).
+    func testRealVocabMapsKnownTokensToTheirPublishedIds() throws {
+        guard let directory = ProcessInfo.processInfo.environment["BRISTLECONE_REAL_EMBEDDING_MODEL"],
+              !directory.isEmpty
+        else { throw XCTSkip("BRISTLECONE_REAL_EMBEDDING_MODEL not set; real-weights test skipped") }
+        let vocabURL = URL(fileURLWithPath: directory)
+            .appendingPathComponent("bge-small-en-v1.5-vocab.txt")
+        let vocabulary = try String(contentsOf: vocabURL, encoding: .utf8)
+        let tokenizer = try WordPieceTokenizer(vocabulary: vocabulary, maxSequenceLength: 512)
+        XCTAssertEqual(tokenizer.clsID, 101, "[CLS] must be id 101")
+        XCTAssertEqual(tokenizer.sepID, 102, "[SEP] must be id 102")
+        XCTAssertEqual(tokenizer.unknownID, 100, "[UNK] must be id 100")
+        // "re : heat ##er in unit 4" — golden ids from the HuggingFace
+        // tokenizer for the heater thread's opening words.
+        let ids = tokenizer.encode("re : heater in unit 4")
+        XCTAssertEqual(
+            Array(ids.prefix(9)),
+            [101, 2128, 1024, 3684, 2121, 1999, 3131, 1018, 102],
+            "Swift WordPiece ids must match the HuggingFace tokenizer's"
+        )
+    }
 }

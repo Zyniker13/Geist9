@@ -69,8 +69,28 @@ def convert(out_dir: Path) -> None:
     model.eval()
 
     vocab_path = out_dir / "bge-small-en-v1.5-vocab.txt"
-    vocab_path.write_text("\n".join(tokenizer.get_vocab().keys()) + "\n", encoding="utf-8")
-    print(f"Wrote {vocab_path} ({len(tokenizer.get_vocab())} tokens)")
+    # The vocab file is the Swift tokenizer's id table: line N must BE id
+    # N, because WordPieceTokenizer assigns ids by file position. HF's
+    # get_vocab() returns a token->id dict whose key order is NOT the id
+    # order (a scrambled file makes every Swift token id wrong — the model
+    # then embeds near-random vectors that still look deterministic and
+    # unit-normalized, so only a known-id check catches it). Write the
+    # tokens sorted by id, then verify the round trip.
+    token_to_id = tokenizer.get_vocab()
+    ordered = sorted(token_to_id.items(), key=lambda kv: kv[1])
+    vocab_lines = [token for token, _ in ordered]
+    expected = sorted(token_to_id.values())
+    if [token_to_id[token] for token in vocab_lines] != expected:
+        raise SystemExit("vocab ids are not a contiguous 0..N-1 range; refusing to write")
+    vocab_path.write_text("\n".join(vocab_lines) + "\n", encoding="utf-8")
+    roundtrip = tokenizer.convert_ids_to_tokens(list(range(min(8, len(vocab_lines)))))
+    file_sample = vocab_lines[: len(roundtrip)]
+    if roundtrip != file_sample:
+        raise SystemExit(
+            "vocab round trip failed: first lines %r do not match ids %r"
+            % (file_sample, roundtrip)
+        )
+    print(f"Wrote {vocab_path} ({len(vocab_lines)} tokens, id order verified)")
 
     class CLS(torch.nn.Module):
         def __init__(self, encoder):

@@ -1,8 +1,8 @@
 # Status
 
 - **Current milestone:** M2 (Deep Search) — M1 closed 2026-11-18 (1M benchmark: ranked p95 107.6 ms < 200 ms, executor v2).
-- **Last done:** `bench-search relevance` added to the benchmark harness (decision 0047): keyword-only gate (139 queries) nDCG@10 = 0.9910, recall@50 = 0.9982, mean top rank 1.0; hybrid with the toy model (140 queries) gate nDCG@10 = 0.9839, recall@50 = 0.9911, semantic slice recall@50 = 1.0 with target at rank 45. Fixed two CI-red bugs on the way: SwiftPM on Linux rejects `.when`-conditioned references to macOS-only targets (now `#if os(macOS)`-branched dependency arrays in Package.swift), and `String(format:)` with `%s` + a Swift String arg segfaults (now `%@` + NSString).
-- **Next step:** Linux-verify the manifest fix in the swift:6.2-noble container, run full `scripts/check.sh`, commit and push, watch CI. Then: add more semantic queries to the judged set, and measure the relevance benchmark with the real model for the true semantic-slice operating point.
+- **Last done:** Found and fixed the embedding vocab-order bug (decision 0049): `convert-embedding-model.py` wrote `get_vocab().keys()` (not id order), so every Swift WordPiece id was wrong and the real model ranked near-randomly while all contract tests stayed green. Converter now writes id order + round-trip check; Swift regression test asserts the published golden ids. Refined q142's judgments to the full heater thread (j047/j048 grade 1) and added q143 (ROADMAP exemplar). Re-measured: semantic slice top rank **1** (M2 top-3 line met), hybrid gate nDCG@10 = 0.9770, recall@50 = 0.9840 over 141 queries; keyword-only gate 0.9839/0.9911 over 140.
+- **Next step:** Run `scripts/check.sh`, commit and push the vocab fix + qrels refinement + measured operating point, watch CI. Then verify the remaining M2 Done-when lines against ROADMAP and close M2 or continue its list.
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer

@@ -72,11 +72,15 @@ final class SemanticSliceTests: XCTestCase {
             "q142 not found in semantic slice"
         )
 
-        // The target must be found (recall@50 = 1.0 for a single relevant).
-        // With a toy model the target may rank below position 10, but it must
-        // appear in the top-50.  The real model will push it much higher.
-        XCTAssertEqual(q142.foundCount, 1, "q142 should find exactly 1 relevant message")
-        XCTAssertEqual(q142.recall50, 1.0, "q142 recall@50 should be 1.0")
+        // The primary target must be found: with the toy model only the
+        // mechanism is under test (decision 0047), not embedding quality —
+        // the toy vocabulary cannot be trusted to recall all three judged
+        // documents of the heater thread, but it must recall j046 itself.
+        // The real model's recall is the benchmark's measured slice.
+        XCTAssertFalse(q142.missed.contains("j046"),
+            "q142 must recall the primary target j046; missed: \(q142.missed)")
+        XCTAssertGreaterThanOrEqual(q142.recall50, 1.0 / 3.0,
+            "q142 should recall at least the primary target in the top 50")
 
         // The query shares no content tokens with j046 body (folding only,
         // no stemming; stop words like "the" are excluded from the check).

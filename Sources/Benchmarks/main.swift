@@ -1423,9 +1423,13 @@ func relevancePhase(_ modelDir: String?) throws {
     if let modelDir = modelDir {
         let dir = URL(fileURLWithPath: modelDir)
         // Try the real model first; it exits on failure, so probe for its
-        // package first and fall back to the toy model when absent.
-        let realModelDir = dir.appendingPathComponent(realModelName)
-        if FileManager.default.fileExists(atPath: realModelDir.path) {
+        // package first and fall back to the toy model when absent. The
+        // probe mirrors CoreMLEmbedding.load(named:in:).
+        let realVocabURL = dir.appendingPathComponent("\(realModelName)-vocab.txt")
+        let hasRealModel = FileManager.default.fileExists(atPath: realVocabURL.path)
+            && (FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(realModelName).mlpackage").path)
+                || FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(realModelName).mlmodel").path))
+        if hasRealModel {
             semanticModel = loadRealModel(modelDir)
             print("== relevance with semantic model: \(semanticModel!.identifier)")
         } else {
