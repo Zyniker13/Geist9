@@ -32,6 +32,7 @@ public enum IndexSchema {
         ("core-v10", coreV10),
         ("core-v11", coreV11),
         ("core-v12", coreV12),
+        ("core-v13", coreV13),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -374,8 +375,7 @@ public enum IndexSchema {
         )
     }
 
-    /// core-v12: the semantic-search vector index (decision 0045). One row
-    /// per message — the id IS the message id, so message deletion cascades.
+    /// core-v12: the semantic-search vector index (decision 0045).
     /// Vectors are little-endian binary16 (2 bytes per dimension); `dim` is
     /// per model, one dimension per model keeps every cosine well-defined.
     private static func coreV12(_ db: Database) throws {
@@ -388,6 +388,30 @@ public enum IndexSchema {
             t.column("dim", .integer).notNull()
             t.column("vector", .blob).notNull()
         }
+    }
+
+    /// core-v13: message_embedding's primary key becomes (id, model). Under
+    /// core-v12 the key was id alone, so a second model's backfill overwrote
+    /// the first model's rows — models must coexist, not clobber each other.
+    /// The row data carries over unchanged; deletion still cascades.
+    private static func coreV13(_ db: Database) throws {
+        try db.create(table: "message_embedding_rebuilt") { t in
+            t.column("id", .integer)
+                .notNull()
+                .references("message", onDelete: .cascade)
+            t.column("model", .text).notNull()
+            t.column("dim", .integer).notNull()
+            t.column("vector", .blob).notNull()
+            t.primaryKey(["id", "model"])
+        }
+        try db.execute(
+            sql: """
+            INSERT INTO message_embedding_rebuilt (id, model, dim, vector)
+            SELECT id, model, dim, vector FROM message_embedding
+            """
+        )
+        try db.drop(table: "message_embedding")
+        try db.rename(table: "message_embedding_rebuilt", to: "message_embedding")
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

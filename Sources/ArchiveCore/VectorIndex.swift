@@ -167,8 +167,8 @@ public enum VectorIndex {
             sql: """
             INSERT INTO message_embedding (id, model, dim, vector)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                model = excluded.model, dim = excluded.dim, vector = excluded.vector
+            ON CONFLICT(id, model) DO UPDATE SET
+                dim = excluded.dim, vector = excluded.vector
             """,
             arguments: [messageID, model, vector.count, encode(vector)]
         )

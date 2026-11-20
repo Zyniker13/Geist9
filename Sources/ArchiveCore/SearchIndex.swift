@@ -25,10 +25,16 @@ public struct SearchHit: Sendable, Equatable {
     /// the exact index and the trigram fallback both found nothing, so the
     /// query's terms were corrected against the vocabulary and re-matched.
     public var viaTypo: Bool
+    /// True when the hit was found only by the semantic side (decision
+    /// 0045): it has no keyword rank and no snippet, because no term of
+    /// the query matched it. A hit found by both sides keeps its keyword
+    /// data and is not flagged.
+    public var viaSemantic: Bool
 
     public init(
         messageID: Int64, rank: Double? = nil, threadID: Int64? = nil,
-        snippet: String? = nil, viaTrigram: Bool = false, viaTypo: Bool = false
+        snippet: String? = nil, viaTrigram: Bool = false, viaTypo: Bool = false,
+        viaSemantic: Bool = false
     ) {
         self.messageID = messageID
         self.rank = rank
@@ -36,6 +42,7 @@ public struct SearchHit: Sendable, Equatable {
         self.snippet = snippet
         self.viaTrigram = viaTrigram
         self.viaTypo = viaTypo
+        self.viaSemantic = viaSemantic
     }
 }
 
@@ -449,13 +456,20 @@ extension ArchiveStore {
     /// collapse to conversations: one hit per thread, the thread's best.
     /// Natural-language dates resolve against `now` (defaults to the
     /// current time; tests pin it).
+    /// - Parameters:
+    ///   - semanticModel: the embedding model for the semantic half of the
+    ///     hybrid merge (decision 0045). nil keeps search keyword-only.
+    ///   - semanticEnabled: the off switch for the semantic half; false
+    ///     forces keyword-only even with a model registered.
     public func search(
         _ query: String,
         limit: Int = 200,
         offset: Int = 0,
         withSnippets: Bool = false,
         groupByThread: Bool = false,
-        now: Date? = nil
+        now: Date? = nil,
+        semanticModel: (any EmbeddingModel)? = nil,
+        semanticEnabled: Bool = true
     ) throws -> SearchResults {
         guard let node = try QueryParser.parse(query, now: now) else {
             return SearchResults(hits: [], warnings: [])
@@ -464,13 +478,82 @@ extension ArchiveStore {
         // once and expand every text token to its forms.
         let language = Stemming.detectLanguage(query)
         let compiled = try QueryCompiler.compile(node, language: language)
+        // Hybrid search (decision 0045): with a model active, the keyword
+        // side is fetched from position 0 through `limit + offset` so both
+        // sides can be fused and the offset applied to the fused list.
+        let model = semanticEnabled ? semanticModel : nil
+        let hybrid = model != nil
+        let perSide = hybrid ? limit + offset : limit
         let hits = try db.read { db in
             try SearchExecutor.run(
-                compiled.root, in: db, limit: limit, offset: offset,
+                compiled.root, in: db, limit: perSide,
+                offset: hybrid ? 0 : offset,
                 withSnippets: withSnippets, groupByThread: groupByThread
             )
         }
-        return SearchResults(hits: hits, warnings: compiled.warnings)
+        guard let model, let queryVector = model.embed(query) else {
+            // Keyword-only (decision 0045): the semantic side can only add
+            // hits; with no model, no query embedding, or the off switch
+            // set, the answer is exactly the keyword list.
+            let final = hybrid ? Array(hits.dropFirst(offset)) : hits
+            return SearchResults(hits: final, warnings: compiled.warnings)
+        }
+        let vectorHits = try db.read { db in
+            try VectorIndex.search(
+                db, model: model.identifier, query: queryVector, limit: perSide
+            )
+        }
+        let fused = RankFusion.rrf(
+            [hits.map(\.messageID), vectorHits.map(\.messageID)], limit: perSide
+        )
+        var keywordByID = Dictionary(
+            hits.map { ($0.messageID, $0) }, uniquingKeysWith: { first, _ in first }
+        )
+        let semanticOnly = fused.map(\.id).filter { keywordByID[$0] == nil }
+        var threadByID: [Int64: Int64] = [:]
+        if !semanticOnly.isEmpty {
+            // The house idiom for variable IN lists (see the snippet pass
+            // above): hand the ids over as JSON and let json_each expand.
+            let idsJSON = "[" + semanticOnly.map(String.init).joined(separator: ",") + "]"
+            let rows = try db.read { db in
+                try Row.fetchAll(
+                    db,
+                    sql: "SELECT id, threadID FROM message WHERE id IN (SELECT value FROM json_each(?))",
+                    arguments: [idsJSON]
+                )
+            }
+            for row in rows {
+                let id: Int64 = row["id"]
+                let threadID: Int64? = row["threadID"]
+                threadByID[id] = threadID
+            }
+        }
+        var finalHits = [SearchHit]()
+        finalHits.reserveCapacity(fused.count)
+        for entry in fused {
+            if let hit = keywordByID.removeValue(forKey: entry.id) {
+                finalHits.append(hit)
+            } else {
+                finalHits.append(
+                    SearchHit(
+                        messageID: entry.id, threadID: threadByID[entry.id], viaSemantic: true
+                    )
+                )
+            }
+        }
+        if groupByThread {
+            // The executor collapsed the keyword side by thread; the fused
+            // list can still hold several hits of one thread, so collapse
+            // again with the same key the executor uses.
+            var seen = Set<Int64>()
+            finalHits = finalHits.filter { hit in
+                let key = hit.threadID ?? -hit.messageID
+                if seen.contains(key) { return false }
+                seen.insert(key)
+                return true
+            }
+        }
+        return SearchResults(hits: Array(finalHits.dropFirst(offset)), warnings: compiled.warnings)
     }
 
     /// The as-you-type search answer (decision 0025): term completions for

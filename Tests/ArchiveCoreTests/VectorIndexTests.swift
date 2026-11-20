@@ -290,6 +290,73 @@ final class VectorIndexTests: XCTestCase {
         XCTAssertEqual(hits.map(\.messageID), [1])
     }
 
+    /// Two models coexist: writing vectors under a second model must never
+    /// touch the first model's rows (core-v13 regression — under core-v12
+    /// the id-alone primary key let a second model overwrite the first).
+    func testSecondModelCoexistsWithTheFirst() throws {
+        let store = try ArchiveStore.open(at: archiveURL)
+        let ids = try ingest(store, count: 2)
+        try store.db.write { db in
+            try VectorIndex.upsert(db, messageID: ids[0], model: "m", vector: [1, 0, 0, 0])
+            try VectorIndex.upsert(db, messageID: ids[0], model: "other", vector: [0, 1, 0, 0])
+            try VectorIndex.upsert(db, messageID: ids[1], model: "other", vector: [1, 0, 0, 0])
+        }
+        let modelRows = try store.db.read { db in
+            try VectorIndex.search(db, model: "m", query: [1, 0, 0, 0], limit: 10)
+        }
+        let otherRows = try store.db.read { db in
+            try VectorIndex.search(db, model: "other", query: [1, 0, 0, 0], limit: 10)
+        }
+        XCTAssertEqual(modelRows.map(\.messageID), [ids[0]])
+        XCTAssertEqual(otherRows.map(\.messageID), [ids[1], ids[0]])
+    }
+
+    /// A core-v12 index (embedding rows keyed by id alone) migrates forward
+    /// on open with its rows intact, and the migrated table keeps models
+    /// separate.
+    func testIndexMigratesV12ArchiveToCurrentSchema() throws {
+        let indexURL = archiveURL.appendingPathComponent(ArchiveStore.indexName)
+        let pool = try DatabasePool(path: indexURL.path)
+        try IndexSchema.migrator(through: "core-v12").migrate(pool)
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO message (hash, size, subject, normalizedSubject, dateSent, messageID, fromEmail)
+                VALUES (x'01020304', 12, 'Old subject', 'old subject',
+                        '2024-03-05T14:23:01Z', '<old@example.com>', 'alice@example.com')
+                """
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO message (hash, size, subject, normalizedSubject, dateSent, messageID, fromEmail)
+                VALUES (x'05060708', 12, 'Older subject', 'older subject',
+                        '2024-03-05T14:23:02Z', '<older@example.com>', 'alice@example.com')
+                """
+            )
+            try db.execute(
+                sql: "INSERT INTO message_embedding (id, model, dim, vector) VALUES (1, 'm', 4, ?)",
+                arguments: [VectorIndex.encode([1, 0, 0, 0])]
+            )
+            try db.execute(
+                sql: "INSERT INTO message_embedding (id, model, dim, vector) VALUES (2, 'm', 4, ?)",
+                arguments: [VectorIndex.encode([0, 1, 0, 0])]
+            )
+        }
+
+        let store = try ArchiveStore.open(at: archiveURL)
+        try store.db.write { db in
+            try VectorIndex.upsert(db, messageID: 1, model: "other", vector: [0, 0, 1, 0])
+        }
+        let migrated = try store.db.read { db in
+            try VectorIndex.search(db, model: "m", query: [1, 0, 0, 0], limit: 10)
+        }
+        let added = try store.db.read { db in
+            try VectorIndex.search(db, model: "other", query: [0, 0, 1, 0], limit: 10)
+        }
+        XCTAssertEqual(migrated.map(\.messageID), [1, 2])
+        XCTAssertEqual(added.map(\.messageID), [1])
+    }
+
     // MARK: - Reciprocal rank fusion
 
     func testRRFSumsContributionsAcrossLists() throws {

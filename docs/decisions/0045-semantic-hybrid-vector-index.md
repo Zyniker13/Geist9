@@ -22,15 +22,19 @@ own "if that is simpler to sandbox".
    one-million-message index) fits a float16 full scan with vectorized dot
    products; the five-million stretch is measured before we trust it.
 
-2. **Storage.** New `message_embedding` table (core-v12), one row per
-   message, the row id *is* the message id:
+2. **Storage.** New `message_embedding` table (introduced core-v12), one
+   row per message *per model* — the primary key is (message id, model),
+   added as the core-v13 rebuild after slice 2's tests caught that the
+   id-alone key of core-v12 let a second model's backfill overwrite the
+   first model's vectors:
 
    ```sql
    CREATE TABLE message_embedding(
-       id     INTEGER PRIMARY KEY REFERENCES message(id) ON DELETE CASCADE,
+       id     INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
        model  TEXT NOT NULL,
        dim    INTEGER NOT NULL,
-       vector BLOB NOT NULL)
+       vector BLOB NOT NULL,
+       PRIMARY KEY (id, model))
    ```
 
    Vectors are stored as **float16 little-endian** BLOBs (2 bytes per
@@ -43,7 +47,8 @@ own "if that is simpler to sandbox".
    tests on Linux): `encode`/`decode` (exact IEEE binary16 conversion,
    round-to-nearest-even; decode exact for normal, subnormal, Inf, NaN),
    `cosine` (nil for dimension mismatch or an all-zero vector), `upsert`
-   (replaces the row for the message; rejects empty vectors and any
+   (replaces the row for the (message, model) pair; rejects empty vectors
+   and any
    dimension change for a model already present — one dimension per model,
    so a query dimension is always known), `remove`, and `search` (full
    scan, cosine descending, ties by ascending message id, `limit`
