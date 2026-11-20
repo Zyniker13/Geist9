@@ -22,6 +22,7 @@ public struct RelevanceSlice: Sendable {
     public var scores: [RelevanceQueryScore]
     public var meanNDCG10: Double
     public var meanRecall50: Double
+    public var meanTopRank: Double
 }
 
 // The full run: per-query scores plus the two headline means the M2 gate
@@ -30,6 +31,7 @@ public struct RelevanceRun: Sendable {
     public var scores: [RelevanceQueryScore]
     public var meanNDCG10: Double
     public var meanRecall50: Double
+    public var meanTopRank: Double
     public var corpusSize: Int
     /// Capability-gated slices (decision 0028, decision 0047). When the
     /// mechanism is available the slice is evaluated; otherwise it is
@@ -218,26 +220,30 @@ public enum RelevanceRunner {
             }
             let meanNDCG = sliceScores.map(\.nDCG10).reduce(0, +) / Double(sliceScores.count)
             let meanRecall = sliceScores.map(\.recall50).reduce(0, +) / Double(sliceScores.count)
+            let meanTopRank = sliceScores.map { Double($0.topRank) }.reduce(0, +) / Double(sliceScores.count)
             slices.append(RelevanceSlice(
                 capability: "semantic",
                 scores: sliceScores,
                 meanNDCG10: meanNDCG,
-                meanRecall50: meanRecall
+                meanRecall50: meanRecall,
+                meanTopRank: meanTopRank
             ))
         }
 
         guard !scores.isEmpty else {
             return RelevanceRun(
-                scores: [], meanNDCG10: 0, meanRecall50: 0,
+                scores: [], meanNDCG10: 0, meanRecall50: 0, meanTopRank: 0,
                 corpusSize: messages.count, slices: slices
             )
         }
         let meanNDCG10 = scores.map { $0.nDCG10 }.reduce(0, +) / Double(scores.count)
         let meanRecall50 = scores.map { $0.recall50 }.reduce(0, +) / Double(scores.count)
+        let meanTopRank = scores.map { Double($0.topRank) }.reduce(0, +) / Double(scores.count)
         return RelevanceRun(
             scores: scores,
             meanNDCG10: meanNDCG10,
             meanRecall50: meanRecall50,
+            meanTopRank: meanTopRank,
             corpusSize: messages.count,
             slices: slices
         )

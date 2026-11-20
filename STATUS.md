@@ -1,8 +1,8 @@
 # Status
 
 - **Current milestone:** M2 (Deep Search) — M1 closed 2026-11-18 (1M benchmark: ranked p95 107.6 ms < 200 ms, executor v2).
-- **Last done:** Decision 0046's follow-up (real-data recall measurement on 100k-row corpus) → semantic judged-set query evaluation. Added `q142` (semantic query, target `j046`) to judged set, capability-gated evaluation (`requires: ["semantic"]`, decision 0047), `RelevanceSlice` output, and `SemanticSliceTests` (toy model). Fixed `RelevanceRunner` to call `EmbeddingBackfill.run()` so the vector index is populated before query. Toy model recall@50 = 1.0 (target found in top 50, rank 45). Gate tests pass keyword-only.
-- **Next step:** Run the full `RelevanceRunner` on the judged corpus with the toy model to get aggregate metrics (gate + semantic slice). Verify hybrid search behavior. Add more semantic queries to the judged set.
+- **Last done:** `bench-search relevance` added to the benchmark harness (decision 0047): keyword-only gate (139 queries) nDCG@10 = 0.9910, recall@50 = 0.9982, mean top rank 1.0; hybrid with the toy model (140 queries) gate nDCG@10 = 0.9839, recall@50 = 0.9911, semantic slice recall@50 = 1.0 with target at rank 45. Fixed two CI-red bugs on the way: SwiftPM on Linux rejects `.when`-conditioned references to macOS-only targets (now `#if os(macOS)`-branched dependency arrays in Package.swift), and `String(format:)` with `%s` + a Swift String arg segfaults (now `%@` + NSString).
+- **Next step:** Linux-verify the manifest fix in the swift:6.2-noble container, run full `scripts/check.sh`, commit and push, watch CI. Then: add more semantic queries to the judged set, and measure the relevance benchmark with the real model for the true semantic-slice operating point.
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer

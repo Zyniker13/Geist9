@@ -1,8 +1,12 @@
 import XCTest
 @testable import SearchEval
-@testable import ArchiveEmbedApple
 @testable import ArchiveSearch
 import ArchiveCore
+
+#if canImport(ArchiveEmbedApple)
+@testable import ArchiveEmbedApple
+import CoreML
+#endif
 
 /// Semantic slice test (decision 0047): verifies that the semantic half of
 /// hybrid search can retrieve a target message that shares no content keywords
@@ -12,7 +16,11 @@ import ArchiveCore
 /// being restored") whose sole relevant target is j046 (the landlord's
 /// agreement to fix the heater). The query shares no stemmed tokens with any
 /// message in the judged corpus.
+///
+/// CoreML is Apple-only (DESIGN 12): on Linux the embedding loader does not
+/// exist, so the semantic slice cannot run there and the test skips.
 final class SemanticSliceTests: XCTestCase {
+    #if canImport(ArchiveEmbedApple)
     private var modelURL: URL!
     private var vocabText: String!
 
@@ -97,4 +105,11 @@ final class SemanticSliceTests: XCTestCase {
                   "recall=\(score.recall50, default: "%.3f") topRank=\(score.topRank)")
         }
     }
+    #else
+    func testSemanticSliceRequiresApple() throws {
+        // ArchiveEmbedApple (CoreML) is macOS-only; the semantic slice is
+        // exercised on macOS CI and locally. Nothing to assert on Linux.
+        throw XCTSkip("Semantic slice requires ArchiveEmbedApple (macOS-only)")
+    }
+    #endif
 }

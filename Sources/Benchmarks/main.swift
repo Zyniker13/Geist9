@@ -30,6 +30,10 @@ import Foundation
 import GRDB
 
 #if canImport(Darwin)
+import ArchiveEmbedApple
+// SearchEval links Benchmarks on macOS only (see Package.swift): the
+// judged-relevance phase and its CoreML-driven semantic slice live here.
+import SearchEval
 import Darwin
 #else
 import Glibc
@@ -1407,6 +1411,50 @@ func vectorRecallReal(_ archiveDir: String, _ modelDir: String, _ queryCount: In
     }
     try runRecallSweep(store, model: model.identifier, queries: queries, limit: 20)
 }
+
+///   bench-search relevance [model-dir]
+///
+/// Runs the full RelevanceRunner on the judged corpus (~150 messages).
+/// With no model-dir: keyword-only gate (decision 0047).
+/// With model-dir: hybrid search — keyword gate + semantic slice.
+/// Loads the real model (bge-small-en-v1.5) or falls back to the toy model.
+func relevancePhase(_ modelDir: String?) throws {
+    var semanticModel: (any EmbeddingModel)?
+    if let modelDir = modelDir {
+        let dir = URL(fileURLWithPath: modelDir)
+        // Try the real model first; it exits on failure, so probe for its
+        // package first and fall back to the toy model when absent.
+        let realModelDir = dir.appendingPathComponent(realModelName)
+        if FileManager.default.fileExists(atPath: realModelDir.path) {
+            semanticModel = loadRealModel(modelDir)
+            print("== relevance with semantic model: \(semanticModel!.identifier)")
+        } else {
+            let toyModelURL = dir.appendingPathComponent("toy_embedding.mlmodel")
+            let toyVocabURL = dir.appendingPathComponent("toy_vocab.txt")
+            guard FileManager.default.fileExists(atPath: toyModelURL.path),
+                  FileManager.default.fileExists(atPath: toyVocabURL.path) else {
+                print("FAIL: no \(realModelName) package or toy model in \(modelDir)")
+                exit(2)
+            }
+            let vocabText = try String(contentsOf: toyVocabURL, encoding: .utf8)
+            semanticModel = try CoreMLEmbedding(modelAt: toyModelURL, vocabulary: vocabText)
+            print("== relevance with toy semantic model")
+        }
+    } else {
+        semanticModel = nil
+        print("== relevance keyword-only gate (no model)")
+    }
+
+    let run = try RelevanceRunner.run(appVersion: "0.0.0-eval", semanticModel: semanticModel)
+    print(String(format: "gate: nDCG@10=%.4f recall@50=%.4f topRank=%.1f queries=%d",
+                 run.meanNDCG10, run.meanRecall50, run.meanTopRank,
+                 run.scores.count))
+    for slice in run.slices {
+        print(String(format: "slice %@: nDCG@10=%.4f recall@50=%.4f topRank=%.1f queries=%d",
+                     slice.capability as NSString, slice.meanNDCG10, slice.meanRecall50, slice.meanTopRank,
+                     slice.scores.count))
+    }
+}
 #else
 func vectorPrepareReal(_ archiveDir: String, _ modelDir: String, _ count: Int, _ seed: UInt64) throws {
     print("FAIL: vector-prepare-real requires macOS (ArchiveEmbedApple)")
@@ -1415,6 +1463,11 @@ func vectorPrepareReal(_ archiveDir: String, _ modelDir: String, _ count: Int, _
 
 func vectorRecallReal(_ archiveDir: String, _ modelDir: String, _ queryCount: Int, _ seed: UInt64) throws {
     print("FAIL: vector-recall-real requires macOS (ArchiveEmbedApple)")
+    exit(2)
+}
+
+func relevancePhase(_ modelDir: String?) throws {
+    print("FAIL: relevance requires macOS (SearchEval + ArchiveEmbedApple)")
     exit(2)
 }
 #endif
@@ -1504,6 +1557,8 @@ do {
     case "vector-recall-real":
         try vectorRecallReal(parsed[1], parsed[2], parsed.count > 3 ? Int(parsed[3])! : 30,
                              parsed.count > 4 ? UInt64(parsed[4])! : 42)
+    case "relevance":
+        try relevancePhase(parsed.count > 1 ? parsed[1] : nil)
     default:
         print("unknown command: \(command)")
         exit(2)

@@ -85,6 +85,23 @@ appleEmbedProducts = []
 appleEmbedTargets = []
 #endif
 
+// macOS-only target references in dependency lists must be branched here,
+// not with .when(platforms:) conditions: SwiftPM on Linux still validates
+// names that never exist there and fails the whole manifest with a
+// misleading "sources should be located under Sources/<name>" error.
+let benchDeps: [Target.Dependency]
+let searchEvalTestDeps: [Target.Dependency]
+#if os(macOS)
+// decision 0046 real-text recall links ArchiveEmbedApple; decision 0047
+// runs the judged-relevance phase from bench-search relevance.
+benchDeps = ["ArchiveCore", .product(name: "GRDB", package: "GRDB.swift"), .target(name: "ArchiveEmbedApple"), .target(name: "SearchEval")]
+// SemanticSliceTests loads the toy CoreML embedding model.
+searchEvalTestDeps = ["SearchEval", "ArchiveCore", .target(name: "ArchiveEmbedApple"), "ArchiveSearch"]
+#else
+benchDeps = ["ArchiveCore", .product(name: "GRDB", package: "GRDB.swift")]
+searchEvalTestDeps = ["SearchEval", "ArchiveCore", "ArchiveSearch"]
+#endif
+
 let products: [Product] = [
     .library(name: "ArchiveCore", targets: ["ArchiveCore"]),
     .library(name: "MailMIME", targets: ["MailMIME"]),
@@ -155,8 +172,11 @@ let coreTargets: [Target] = [
     .target(name: "Credentials"),
     // scale benchmark harness (ROADMAP M1 "Done when", docs/TESTING.md;
     // decision 0045 scale-measurement slice adds the semantic phases;
-    // decision 0046 real-text recall links ArchiveEmbedApple on macOS only)
-    .executableTarget(name: "Benchmarks", dependencies: ["ArchiveCore", .product(name: "GRDB", package: "GRDB.swift"), .target(name: "ArchiveEmbedApple", condition: .when(platforms: [.macOS]))]),
+    // decision 0046 real-text recall links ArchiveEmbedApple on macOS only.
+    // The macOS-only references must be #if-gated, not .when-conditioned:
+    // SwiftPM on Linux still validates target names that never exist there
+    // and fails the whole manifest with a misleading missing-sources error.)
+    .executableTarget(name: "Benchmarks", dependencies: benchDeps),
 ]
 
 let evalTargets: [Target] = [
@@ -167,7 +187,9 @@ let evalTargets: [Target] = [
         dependencies: ["ArchiveCore", "ArchiveSearch", "MailMIME"],
         resources: [.copy("qrels.json")]
     ),
-    .testTarget(name: "SearchEvalTests", dependencies: ["SearchEval", "ArchiveCore", "ArchiveEmbedApple", "ArchiveSearch"], resources: [.copy("toy_vocab.txt"), .copy("toy_embedding.mlmodel")]),
+    // SemanticSliceTests loads the toy CoreML embedding model, so the
+    // ArchiveEmbedApple reference is macOS-only (see note above).
+    .testTarget(name: "SearchEvalTests", dependencies: searchEvalTestDeps, resources: [.copy("toy_vocab.txt"), .copy("toy_embedding.mlmodel")]),
 ]
 
 let testTargets: [Target] = [
