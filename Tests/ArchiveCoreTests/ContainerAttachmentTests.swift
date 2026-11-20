@@ -45,6 +45,8 @@ final class ContainerAttachmentTests: XCTestCase {
 
         /// One ZIP with all entries stored, fitting the reader's strict
         /// expectations: local headers, payload, central directory, EOCD.
+        /// Fields are appended one at a time: long `+` chains over byte
+        /// arrays send the Linux type checker into a timeout.
         static func zip(_ pairs: [(name: String, body: String)]) -> Data {
             var bytes: [UInt8] = []
             var central: [UInt8] = []
@@ -53,23 +55,53 @@ final class ContainerAttachmentTests: XCTestCase {
                 let nameBytes = Array(name.utf8)
                 let payload = Array(body.utf8)
                 let crc = crc32(payload)
-                let local: [UInt8] = [0x50, 0x4B, 0x03, 0x04] +
-                    le16(20) + le16(0) + le16(0) + le16(0) + le16(0) +
-                    le32(Int(crc)) + le32(payload.count) + le32(payload.count) +
-                    le16(nameBytes.count) + le16(0) + nameBytes
-                bytes += local + payload
-                let entry: [UInt8] = [0x50, 0x4B, 0x01, 0x02] +
-                    le16(20) + le16(20) + le16(0) + le16(0) + le16(0) + le16(0) +
-                    le32(Int(crc)) + le32(payload.count) + le32(payload.count) +
-                    le16(nameBytes.count) + le16(0) + le16(0) + le16(0) + le16(0) +
-                    le32(0) + le32(offset) + nameBytes
+                var local: [UInt8] = [0x50, 0x4B, 0x03, 0x04]
+                local += le16(20)
+                local += le16(0)
+                local += le16(0)
+                local += le16(0)
+                local += le16(0)
+                local += le32(Int(crc))
+                local += le32(payload.count)
+                local += le32(payload.count)
+                local += le16(nameBytes.count)
+                local += le16(0)
+                local += nameBytes
+                bytes += local
+                bytes += payload
+                var entry: [UInt8] = [0x50, 0x4B, 0x01, 0x02]
+                entry += le16(20)
+                entry += le16(20)
+                entry += le16(0)
+                entry += le16(0)
+                entry += le16(0)
+                entry += le16(0)
+                entry += le32(Int(crc))
+                entry += le32(payload.count)
+                entry += le32(payload.count)
+                entry += le16(nameBytes.count)
+                entry += le16(0)
+                entry += le16(0)
+                entry += le16(0)
+                entry += le16(0)
+                entry += le32(0)
+                entry += le32(offset)
+                entry += nameBytes
                 central += entry
                 offset += local.count + payload.count
             }
-            let eocd: [UInt8] = [0x50, 0x4B, 0x05, 0x06] +
-                le16(0) + le16(0) + le16(pairs.count) + le16(pairs.count) +
-                le32(central.count) + le32(offset) + le16(0)
-            return Data(bytes + central + eocd)
+            var eocd: [UInt8] = [0x50, 0x4B, 0x05, 0x06]
+            eocd += le16(0)
+            eocd += le16(0)
+            eocd += le16(pairs.count)
+            eocd += le16(pairs.count)
+            eocd += le32(central.count)
+            eocd += le32(offset)
+            eocd += le16(0)
+            var all = bytes
+            all += central
+            all += eocd
+            return Data(all)
         }
 
         static let docx: Data = zip([
