@@ -15,6 +15,32 @@ public struct QrelsFile: Sendable, Decodable {
         public var text: String
         public var category: String
         public var judgments: [Judgment]
+        /// Mechanisms this query needs (e.g. "semantic"). Empty when the
+        /// query works with keyword search alone. Queries with a non-empty
+        /// list are excluded from the gate aggregate when the mechanism is
+        /// not present (decision 0028, decision 0047).
+        public var requires: [String]
+
+        public init(id: String, text: String, category: String, judgments: [Judgment], requires: [String] = []) {
+            self.id = id
+            self.text = text
+            self.category = category
+            self.judgments = judgments
+            self.requires = requires
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.id = try container.decode(String.self, forKey: .id)
+            self.text = try container.decode(String.self, forKey: .text)
+            self.category = try container.decode(String.self, forKey: .category)
+            self.judgments = try container.decodeIfPresent([Judgment].self, forKey: .judgments) ?? []
+            self.requires = try container.decodeIfPresent([String].self, forKey: .requires) ?? []
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, text, category, judgments, requires
+        }
     }
 
     public var version: Int

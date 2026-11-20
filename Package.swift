@@ -167,7 +167,7 @@ let evalTargets: [Target] = [
         dependencies: ["ArchiveCore", "ArchiveSearch", "MailMIME"],
         resources: [.copy("qrels.json")]
     ),
-    .testTarget(name: "SearchEvalTests", dependencies: ["SearchEval", "ArchiveCore"]),
+    .testTarget(name: "SearchEvalTests", dependencies: ["SearchEval", "ArchiveCore", "ArchiveEmbedApple", "ArchiveSearch"], resources: [.copy("toy_vocab.txt"), .copy("toy_embedding.mlmodel")]),
 ]
 
 let testTargets: [Target] = [
