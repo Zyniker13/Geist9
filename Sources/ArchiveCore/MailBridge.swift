@@ -266,6 +266,12 @@ public enum MailBridge {
                 data: part.decodedBody
             ) {
                 text = extracted
+            } else if let extracted = imageAttachmentText(
+                main: main,
+                filename: decodedFilename(part),
+                data: part.decodedBody
+            ) {
+                text = extracted
             } else {
                 guard let extracted = containerAttachmentText(
                     main: main,
@@ -284,17 +290,36 @@ public enum MailBridge {
         return joined.isEmpty ? nil : joined
     }
 
-    /// PDF attachment text via PDFKit (decision 0039). MIME type first,
-    /// filename extension as the fallback for broken MIME parts. On Linux
-    /// the Apple-only extractor target does not exist and this returns nil
-    /// (the part is still listed in the attachment row).
+    /// PDF attachment text via PDFKit (decision 0039), with Vision OCR
+    /// fallback for scanned images (decision 0040). On Linux the Apple-only
+    /// extractor target does not exist and this returns nil.
     static func pdfAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
 #if canImport(ArchiveExtractApple)
         let extensionName = filename
             .flatMap { $0.split(separator: ".").last.map(String.init) }
             .map { $0.lowercased() }
         guard main == "application/pdf" || extensionName == "pdf" else { return nil }
-        return PDFText.text(Data(data))
+        let payload = Data(data)
+        if let pdf = PDFText.text(payload) { return pdf }
+        return OCRText.pdfText(payload)
+#else
+        return nil
+#endif
+    }
+
+    /// Image attachment text via Vision OCR (decision 0040). Returns nil
+    /// when the data is not a readable image or nothing legible is found.
+    static func imageAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
+#if canImport(ArchiveExtractApple)
+        let imageTypes: Set<String> = [
+            "image/png", "image/jpeg", "image/tiff", "image/bmp", "image/webp",
+        ]
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "tiff", "tif", "bmp", "webp", "heic", "heif"]
+        let extensionName = filename
+            .flatMap { $0.split(separator: ".").last.map(String.init) }
+            .map { $0.lowercased() }
+        guard imageTypes.contains(main) || imageExtensions.contains(extensionName ?? "") else { return nil }
+        return OCRText.text(Data(data))
 #else
         return nil
 #endif
@@ -303,8 +328,8 @@ public enum MailBridge {
     /// Container attachment formats whose text we extract (DESIGN 6A,
     /// M2.3): Office Open XML packages, OpenDocument packages, and iWork
     /// packages, keyed by MIME type first and filename extension as a
-    /// fallback for broken MIME parts. Images return nil until their
-    /// extractor lands; the attachment row still lists the part.
+    /// fallback for broken MIME parts. The attachment row still lists
+    /// the part even when no text extractor is available.
     static func containerAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
         let ooxmlTypes: Set<String> = [
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

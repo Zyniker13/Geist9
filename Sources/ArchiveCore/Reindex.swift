@@ -44,7 +44,11 @@ enum TextIndexVersion {
     /// extractor, decision 0039) joins the attachments column; the backfill
     /// re-indexes older rows from their stored bytes to add it.
     static let v9 = 9
-    static var current: Int { v9 }
+    /// M2.4: the extracted text of image attachments (Vision OCR, decision 0040)
+    /// joins the attachments column; the backfill re-indexes older rows from
+    /// their stored bytes to add it.
+    static let v10 = 10
+    static var current: Int { v10 }
 }
 
 extension ArchiveStore {

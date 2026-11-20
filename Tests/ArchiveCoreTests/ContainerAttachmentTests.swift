@@ -7,6 +7,14 @@
 
 import XCTest
 
+#if canImport(CoreGraphics)
+import AppKit
+import CoreGraphics
+import CoreText
+import ImageIO
+import PDFKit
+#endif
+
 @testable import ArchiveCore
 
 final class ContainerAttachmentTests: XCTestCase {
@@ -203,6 +211,51 @@ final class ContainerAttachmentTests: XCTestCase {
             body += xref
             return Data(body.utf8)
         }
+
+#if canImport(ArchiveExtractApple)
+        /// Renders one line per element into a white bitmap with CoreText
+        /// and returns it as PNG bytes (macOS-only: the OCR fixtures need
+        /// real raster text).
+        static func png(_ lines: [String]) -> Data {
+            let width = 900
+            let height = 120 + 70 * lines.count
+            let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )!
+            context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            let font = CTFontCreateWithName("Helvetica" as CFString, 40, nil)
+            for (index, line) in lines.enumerated() {
+                let attributes = [
+                    kCTFontAttributeName: font,
+                    kCTForegroundColorAttributeName: CGColor(red: 0, green: 0, blue: 0, alpha: 1),
+                ] as CFDictionary
+                let attributed = CFAttributedStringCreate(nil, line as CFString, attributes)!
+                let ctLine = CTLineCreateWithAttributedString(attributed)
+                context.textPosition = CGPoint(x: 60, y: CGFloat(height - 90 - 70 * index))
+                CTLineDraw(ctLine, context)
+            }
+            let image = context.makeImage()!
+            let output = NSMutableData()
+            let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil)!
+            CGImageDestinationAddImage(destination, image, nil)
+            CGImageDestinationFinalize(destination)
+            return output as Data
+        }
+
+        /// An image-only (scanned) PDF: PDFKit wraps the rendered bitmap
+        /// into a one-page document, the shape a scanner produces.
+        static func scannedPDF(_ lines: [String]) -> Data {
+            let source = CGImageSourceCreateWithData(png(lines) as CFData, nil)!
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+            let page = PDFPage(image: NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)))!
+            let document = PDFDocument()
+            document.insert(page, at: 0)
+            return document.dataRepresentation()!
+        }
+#endif
 
         private static func base64(_ data: Data) -> String {
             data.base64EncodedString()
@@ -502,6 +555,77 @@ final class ContainerAttachmentTests: XCTestCase {
         XCTAssertTrue(
             attachments.contains("quarterly numbers"),
             "the v9 backfill must restore PDF text: \(attachments)"
+        )
+    }
+
+    // MARK: - OCR (decisions 0010 and 0040, macOS-only Vision extractor)
+
+    func testImageAttachmentTextIsIndexed() throws {
+        let pngBytes = Container.png(["Scanned receipt from Harbor Lane"])
+        let data = Data(Container.message(
+            id: "ocr@example.com", mimeType: "image/png",
+            filename: "receipt.png", attachment: pngBytes
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Harbor Lane"), "got: \(attachments)")
+        XCTAssertEqual(parsed.attachments.first?.size, pngBytes.count)
+    }
+
+    func testScannedPDFAttachmentTextIsIndexed() throws {
+        let data = Data(Container.message(
+            id: "scanned@example.com", mimeType: "application/pdf",
+            filename: "scan.pdf", attachment: Container.scannedPDF(["Scanned receipt from Harbor Lane"])
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Harbor Lane"), "got: \(attachments)")
+    }
+
+    func testVersionBumpBackfillsOCRText() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-ocr-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try ArchiveStore.create(at: tempDir.appendingPathComponent("C.emailarchive"), appVersion: "0.1.0")
+
+        let pngBytes = Container.png(["Scanned receipt from Harbor Lane"])
+        let data = Data(Container.message(
+            id: "backfill-ocr@example.com", mimeType: "image/png",
+            filename: "receipt.png", attachment: pngBytes
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let message = IngestedMessage(
+            record: parsed.record,
+            data: data,
+            memberships: [Membership(mailbox: "INBOX", flags: [])],
+            labels: [],
+            attachments: parsed.attachments,
+            providerThreadID: nil,
+            searchText: parsed.searchText
+        )
+        let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+        guard case .created(let id) = try store.ingest(message, into: account) else {
+            return XCTFail("ingest must create")
+        }
+
+        // Simulate the previous pipeline: mark the row older than current
+        // and blank the attachment text the old row could not have had.
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE message SET textVersion = textVersion - 1 WHERE id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE message_text SET attachments = 'scanned receipt' WHERE rowid = ?", arguments: [id])
+        }
+        let processed = try store.reindexOutdated()
+        XCTAssertEqual(processed, 1)
+        let got = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT attachments FROM message_text WHERE rowid = ?", arguments: [id]
+            )
+        }
+        let attachments = try XCTUnwrap(got)
+        XCTAssertTrue(
+            attachments.contains("harbor"),
+            "the v10 backfill must restore OCR text: \(attachments)"
         )
     }
 #endif
