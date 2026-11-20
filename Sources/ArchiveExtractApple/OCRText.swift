@@ -16,6 +16,12 @@ public enum OCRText {
     /// Scanned pages are rendered at 2.5x PDF space, ~180 DPI: inside the
     /// 150-300 DPI band decision 0010 fixed for legibility without waste.
     static let pdfRenderScale: CGFloat = 2.5
+    /// Wall-clock bound for one Vision recognition call. Vision performs
+    /// synchronously, and a call that never returns (seen on CI runners
+    /// when recognition assets cannot load) must not wedge indexing. On
+    /// deadline the pass yields nil; the message's bytes stay archived
+    /// and a later version bump can extract again.
+    static let recognitionTimeout: TimeInterval = 90
 
     /// OCRs image bytes (PNG, JPEG, HEIC, TIFF, GIF...). Returns nil when
     /// the data is not a readable image or nothing legible was found.
@@ -23,12 +29,8 @@ public enum OCRText {
         guard data.count <= maxInputBytes else { return nil }
         let handler = VNImageRequestHandler(data: data, options: [:])
         let request = makeRequest()
-        do {
-            try handler.perform([request])
-        } catch {
-            return nil
-        }
-        return joinedLines(from: request.results ?? [])
+        guard let observations = performBounded(handler, request: request) else { return nil }
+        return joinedLines(from: observations)
     }
 
     /// Per-page text of a PDF: embedded text when the page has any, OCR of
@@ -94,12 +96,65 @@ public enum OCRText {
         guard let image = rendered(page: page) else { return nil }
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         let request = makeRequest()
-        do {
-            try handler.perform([request])
-        } catch {
-            return nil
+        guard let observations = performBounded(handler, request: request) else { return nil }
+        return joinedLines(from: observations)
+    }
+
+    /// Runs one recognition call on a worker thread and waits at most
+    /// `recognitionTimeout` for it. Vision objects stay confined to the
+    /// worker thread that runs them; only the outcome crosses back
+    /// through the locked box. nil on error or deadline.
+    static func performBounded(
+        _ handler: VNImageRequestHandler,
+        request: VNRecognizeTextRequest
+    ) -> [VNRecognizedTextObservation]? {
+        final class Job: @unchecked Sendable {
+            let handler: VNImageRequestHandler
+            let request: VNRecognizeTextRequest
+            init(handler: VNImageRequestHandler, request: VNRecognizeTextRequest) {
+                self.handler = handler
+                self.request = request
+            }
         }
-        return joinedLines(from: request.results ?? [])
+        final class Outcome: @unchecked Sendable {
+            private let lock = NSLock()
+            private let done = DispatchSemaphore(value: 0)
+            private var failed = false
+            private var lines: [VNRecognizedTextObservation]?
+            func finish(_ lines: [VNRecognizedTextObservation]) {
+                lock.lock()
+                self.lines = lines
+                lock.unlock()
+                done.signal()
+            }
+            func fail() {
+                lock.lock()
+                failed = true
+                lock.unlock()
+                done.signal()
+            }
+            /// nil when the deadline passed or the call errored.
+            func take(after timeout: TimeInterval) -> [VNRecognizedTextObservation]? {
+                if done.wait(timeout: .now() + timeout) == .timedOut { return nil }
+                lock.lock()
+                defer { lock.unlock() }
+                return failed ? nil : lines
+            }
+        }
+        let outcome = Outcome()
+        let job = Job(handler: handler, request: request)
+        let worker = Thread {
+            do {
+                try job.handler.perform([job.request])
+                outcome.finish(job.request.results ?? [])
+            } catch {
+                outcome.fail()
+            }
+        }
+        worker.name = "bristlecone-ocr"
+        worker.qualityOfService = .userInitiated
+        worker.start()
+        return outcome.take(after: recognitionTimeout)
     }
 
     private static func rendered(page: PDFPage) -> CGImage? {

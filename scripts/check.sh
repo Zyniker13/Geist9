@@ -32,11 +32,29 @@ else
   run_logged() { "$@"; }
 fi
 
+# Phase markers with elapsed seconds: the last line printed before a
+# stuck run names the phase that hung. Notices become job annotations,
+# readable through the public checks API even when the full log is not.
+STARTED=$(date +%s)
+mark() {
+  local at=$(($(date +%s) - STARTED))
+  echo "[$at s] $1 $2"
+  if [[ -n "$SUMMARY" ]]; then
+    printf -- '- %s s: %s %s\n' "$at" "$1" "$2" >> "$SUMMARY"
+    printf '::notice::%ss %s %s\n' "$at" "$1" "$2"
+  fi
+}
+
 echo "== Swift build and tests"
+mark swift-build begin
 run_logged swift build
+mark swift-build done
+mark swift-test begin
 run_logged swift test --parallel
+mark swift-test done
 
 echo "== Docs: every relative link in a Markdown file points at a file that exists"
+mark docs begin
 python3 - <<'PY'
 import pathlib, re, sys
 bad = []
@@ -56,10 +74,12 @@ PY
 # The app is macOS-only (DESIGN 12): generate its project and build it unsigned.
 if [[ "$(uname)" == "Darwin" ]]; then
   echo "== App: XcodeGen generate and build"
+  mark app begin
   xcodegen generate
   xcodebuild -project EmailArchiver.xcodeproj -scheme EmailArchiver \
     -configuration Debug -destination 'platform=macOS' build \
     CODE_SIGNING_ALLOWED=NO 2>&1 | tail -3
+  mark app done
 fi
 
 echo "== All checks passed"
