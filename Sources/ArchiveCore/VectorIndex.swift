@@ -1,13 +1,17 @@
 // The semantic-search vector index (decision 0045). One float16 vector per
-// message lives in the `message_embedding` table (core-v12); the row id is
+// message lives in the `message_embedding` table (core-v13); the row id is
 // the message id, so deleting a message cascades its embedding. Search is a
-// full cosine scan — scalar and deterministic on every platform for this
-// slice; the Accelerate path lands with the scale-measurement slice. The
-// embedding model itself (decision 0009: bge-small-en-v1.5 through Core ML)
-// is a later slice; until it writes rows, search returns empty.
+// chunked full cosine scan: id-ordered batches, scored with Accelerate on
+// Apple silicon (vImage binary16 expand + two GEMVs per batch) and the
+// identical scalar math elsewhere, keeping only the best `limit` hits.
+// Results agree across platforms to float rounding.
 
 import Foundation
 import GRDB
+
+#if canImport(Accelerate) && arch(arm64)
+import Accelerate
+#endif
 
 /// One semantic-search hit: the message row id and its cosine similarity to
 /// the query vector, in [−1, 1].
@@ -182,12 +186,23 @@ public enum VectorIndex {
         )
     }
 
+    /// Number of rows fetched and scored per pass of the scan. Bounded
+    /// batches keep the scan's memory independent of archive size.
+    public static let scanBatchSize = 4096
+
     /// Nearest messages by cosine similarity, best first, ties by ascending
     /// message id. Rows of other models, unreadable vectors, and all-zero
     /// vectors are skipped. A query whose dimension disagrees with the
     /// model's stored dimension throws.
+    ///
+    /// The scan runs in id-ordered batches: each batch is decoded and scored
+    /// in one vectorized pass where Accelerate is available (Apple silicon),
+    /// with the same per-row scalar math elsewhere. Only the best `limit`
+    /// hits survive each pass, so memory stays bounded, and ties resolve
+    /// exactly as the previous full-sort scan did.
     public static func search(
-        _ db: Database, model: String, query: [Float], limit: Int
+        _ db: Database, model: String, query: [Float], limit: Int,
+        batchSize: Int = VectorIndex.scanBatchSize
     ) throws -> [VectorHit] {
         guard limit > 0 else { return [] }
         if let storedDim = try Int.fetchOne(
@@ -197,24 +212,214 @@ public enum VectorIndex {
         ), storedDim != query.count {
             throw VectorIndexError.dimensionMismatch(expected: storedDim, got: query.count)
         }
-        let rows = try Row.fetchAll(
-            db,
-            sql: "SELECT id, vector FROM message_embedding WHERE model = ?",
-            arguments: [model]
-        )
-        var hits: [VectorHit] = []
-        hits.reserveCapacity(rows.count)
-        for row in rows {
-            let id: Int64 = row["id"]
-            let blob: Data = row["vector"]
-            guard let vector = decode(blob, dimension: query.count),
+        var lastID: Int64 = 0
+        var keeper = TopKeeper(limit: limit)
+        while true {
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                SELECT id, vector FROM message_embedding
+                WHERE model = ? AND id > ? ORDER BY id LIMIT ?
+                """,
+                arguments: [model, lastID, batchSize]
+            )
+            if rows.isEmpty { break }
+            let last: Int64 = rows[rows.count - 1]["id"]
+            lastID = last
+            let batch: [(id: Int64, blob: Data)] = rows.map { row in
+                let id: Int64 = row["id"]
+                let blob: Data = row["vector"]
+                return (id, blob)
+            }
+            score(batch, query: query, into: &keeper)
+        }
+        return keeper.best()
+    }
+
+    // MARK: - Batch scoring
+
+    /// Scores one fetched batch against the query and offers the survivors
+    /// to the keeper. On Apple silicon the decode and the products run
+    /// through Accelerate; elsewhere the identical math runs per row. The
+    /// two paths agree to float rounding (see the agreement test).
+    static func score(
+        _ batch: [(id: Int64, blob: Data)], query: [Float], into keeper: inout TopKeeper
+    ) {
+        #if canImport(Accelerate) && arch(arm64)
+        accelerateScore(batch, query: query, into: &keeper)
+        #else
+        scalarScore(batch, query: query, into: &keeper)
+        #endif
+    }
+
+    /// The scalar reference path: the same per-row decode and cosine the
+    /// scan used before it was vectorized.
+    static func scalarScore(
+        _ batch: [(id: Int64, blob: Data)], query: [Float], into keeper: inout TopKeeper
+    ) {
+        for row in batch {
+            guard let vector = decode(row.blob, dimension: query.count),
                   let score = cosine(query, vector) else { continue }
-            hits.append(VectorHit(messageID: id, score: score))
+            keeper.offer(VectorHit(messageID: row.id, score: score))
         }
-        hits.sort { a, b in
-            a.score == b.score ? a.messageID < b.messageID : a.score > b.score
+    }
+
+    #if canImport(Accelerate) && arch(arm64)
+    /// Vectorized batch scoring. The blobs are little-endian binary16 and
+    /// Apple silicon is little-endian, so the raw bytes are copied as-is;
+    /// one vImage call expands the whole batch to float32, and two GEMVs
+    /// then produce the dot products and the row norms in bulk. Unreadable
+    /// blobs and all-zero vectors fall out naturally: their row stays zero
+    /// and a zero norm is skipped, matching the scalar path.
+    static func accelerateScore(
+        _ batch: [(id: Int64, blob: Data)], query: [Float], into keeper: inout TopKeeper
+    ) {
+        let dim = query.count
+        guard dim > 0 else { return }
+        var normQuery: Float = 0
+        for q in query { normQuery += q * q }
+        if normQuery == 0 { return }
+        let n = batch.count
+
+        // One contiguous half buffer for the whole batch. Rows whose blob
+        // size disagrees with the model dimension stay zero and are skipped
+        // below, exactly like the scalar path skips them.
+        var halves = [UInt16](repeating: 0, count: n * dim)
+        var readable = [Bool](repeating: false, count: n)
+        halves.withUnsafeMutableBytes { hRaw in
+            let dst = hRaw.baseAddress!.assumingMemoryBound(to: UInt16.self)
+            for i in 0..<n {
+                let blob = batch[i].blob
+                guard blob.count == dim * 2 else { continue }
+                readable[i] = true
+                blob.withUnsafeBytes { src in
+                    memcpy(dst + i * dim, src.baseAddress, dim * 2)
+                }
+            }
         }
-        if hits.count > limit { hits.removeLast(hits.count - limit) }
-        return hits
+
+        // One bulk pass expands the whole batch from little-endian binary16
+        // to float32 (Apple silicon is little-endian, so the raw bytes are
+        // copied as-is).
+        var flat = [Float](repeating: 0, count: n * dim)
+        halves.withUnsafeMutableBytes { hBuf in
+            flat.withUnsafeMutableBytes { fBuf in
+                var source = vImage_Buffer(
+                    data: hBuf.baseAddress, height: 1,
+                    width: vImagePixelCount(n * dim), rowBytes: n * dim * 2
+                )
+                var destination = vImage_Buffer(
+                    data: fBuf.baseAddress, height: 1,
+                    width: vImagePixelCount(n * dim), rowBytes: n * dim * 4
+                )
+                vImageConvert_Planar16FtoPlanarF(&source, &destination, vImage_Flags(kvImageDoNotTile))
+            }
+        }
+
+        // dots[i] = query · row[i]: vDSP_mmul reads row-major, so the GEMV
+        // runs as flat (n × dim) times query (dim × 1) into dots (n × 1).
+        var dots = [Float](repeating: 0, count: n)
+        dots.withUnsafeMutableBufferPointer { dotsPtr in
+            flat.withUnsafeBufferPointer { flatPtr in
+                query.withUnsafeBufferPointer { queryPtr in
+                    vDSP_mmul(
+                        flatPtr.baseAddress!, 1,
+                        queryPtr.baseAddress!, 1,
+                        dotsPtr.baseAddress!, 1,
+                        vDSP_Length(n), 1, vDSP_Length(dim)
+                    )
+                }
+            }
+        }
+
+        // norms[i] = |row[i]|² via a second GEMV over the squared matrix.
+        var squared = [Float](repeating: 0, count: n * dim)
+        squared.withUnsafeMutableBufferPointer { sqPtr in
+            flat.withUnsafeBufferPointer { flatPtr in
+                vDSP_vsq(flatPtr.baseAddress!, 1, sqPtr.baseAddress!, 1, vDSP_Length(n * dim))
+            }
+        }
+        var norms = [Float](repeating: 0, count: n)
+        norms.withUnsafeMutableBufferPointer { normsPtr in
+            squared.withUnsafeBufferPointer { sqPtr in
+                var ones = [Float](repeating: 1, count: dim)
+                ones.withUnsafeBufferPointer { onesPtr in
+                    vDSP_mmul(
+                        sqPtr.baseAddress!, 1,
+                        onesPtr.baseAddress!, 1,
+                        normsPtr.baseAddress!, 1,
+                        vDSP_Length(n), 1, vDSP_Length(dim)
+                    )
+                }
+            }
+        }
+
+        for i in 0..<n where readable[i] {
+            let norm = norms[i]
+            if norm == 0 { continue }
+            let score = dots[i] / (normQuery * norm).squareRoot()
+            keeper.offer(VectorHit(messageID: batch[i].id, score: score))
+        }
+    }
+    #endif
+
+    /// Bounded best-first collector for the scan: keeps at most `limit`
+    /// hits and evicts the worst, where worse means the lower score, or the
+    /// larger message id at an equal score — so ties resolve exactly as the
+    /// previous full-sort scan resolved them (smallest ids win).
+    struct TopKeeper {
+        private let limit: Int
+        private var heap: [VectorHit] = []
+
+        /// A min-heap under "worse": the root is the worst kept hit.
+        init(limit: Int) { self.limit = limit }
+
+        var count: Int { heap.count }
+
+        mutating func offer(_ hit: VectorHit) {
+            if limit <= 0 { return }
+            if heap.count < limit {
+                heap.append(hit)
+                siftUp(heap.count - 1)
+            } else if isWorse(heap[0], hit) {
+                heap[0] = hit
+                siftDown(0)
+            }
+        }
+
+        /// The kept hits, best first, ties by ascending message id.
+        func best() -> [VectorHit] {
+            heap.sorted { a, b in
+                a.score == b.score ? a.messageID < b.messageID : a.score > b.score
+            }
+        }
+
+        private func isWorse(_ a: VectorHit, _ b: VectorHit) -> Bool {
+            a.score != b.score ? a.score < b.score : a.messageID > b.messageID
+        }
+
+        private mutating func siftUp(_ start: Int) {
+            var child = start
+            while child > 0 {
+                let parent = (child - 1) / 2
+                guard isWorse(heap[child], heap[parent]) else { break }
+                heap.swapAt(child, parent)
+                child = parent
+            }
+        }
+
+        private mutating func siftDown(_ start: Int) {
+            var parent = start
+            while true {
+                let left = 2 * parent + 1
+                let right = left + 1
+                var worst = parent
+                if left < heap.count, isWorse(heap[left], heap[worst]) { worst = left }
+                if right < heap.count, isWorse(heap[right], heap[worst]) { worst = right }
+                if worst == parent { return }
+                heap.swapAt(parent, worst)
+                parent = worst
+            }
+        }
     }
 }
