@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 11
+    public static let version = 12
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -31,6 +31,7 @@ public enum IndexSchema {
         ("core-v9", coreV9),
         ("core-v10", coreV10),
         ("core-v11", coreV11),
+        ("core-v12", coreV12),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -371,6 +372,22 @@ public enum IndexSchema {
         try db.create(
             index: "message_entity_message", on: "message_entity", columns: ["messageID"]
         )
+    }
+
+    /// core-v12: the semantic-search vector index (decision 0045). One row
+    /// per message — the id IS the message id, so message deletion cascades.
+    /// Vectors are little-endian binary16 (2 bytes per dimension); `dim` is
+    /// per model, one dimension per model keeps every cosine well-defined.
+    private static func coreV12(_ db: Database) throws {
+        try db.create(table: "message_embedding") { t in
+            t.column("id", .integer)
+                .notNull()
+                .primaryKey()
+                .references("message", onDelete: .cascade)
+            t.column("model", .text).notNull()
+            t.column("dim", .integer).notNull()
+            t.column("vector", .blob).notNull()
+        }
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {
