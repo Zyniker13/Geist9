@@ -285,6 +285,76 @@ final class ContainerAttachmentTests: XCTestCase {
             --BOUND--
             """
         }
+
+        /// A minimal RFC 822 message with a plain-text body.
+        static func plainMessage(id: String, subject: String, body: String) -> String {
+            """
+            Message-ID: <\(id)>
+            Date: Tue, 12 Mar 2024 09:00:00 +0000
+            From: alice@example.com
+            To: bob@example.org
+            Subject: \(subject)
+            Content-Type: text/plain; charset=utf-8
+
+            \(body)
+            """
+        }
+
+        /// A multipart/mixed message that forwards one complete message as
+        /// a message/rfc822 attachment.
+        static func forwardingMessage(
+            id: String, subject: String = "Forwarded for the record",
+            boundary: String = "BOUND", inner: String
+        ) -> String {
+            """
+            Message-ID: <\(id)>
+            Date: Tue, 12 Mar 2024 09:05:00 +0000
+            From: alice@example.com
+            To: bob@example.org
+            Subject: \(subject)
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary=\(boundary)
+
+            --\(boundary)
+            Content-Type: text/plain; charset=utf-8
+
+            Keeping this on file.
+            --\(boundary)
+            Content-Type: message/rfc822
+            Content-Disposition: attachment; filename="forwarded.eml"
+
+            \(inner)
+            --\(boundary)--
+            """
+        }
+
+        /// A chain of `levels` messages: the outermost is a forwarder and
+        /// each deeper level forwards the next, for nesting-cap tests.
+        static func nestedChain(levels: Int) -> String {
+            var payload = plainMessage(
+                id: "innermost@example.com",
+                subject: "Innermost payload survives",
+                body: "The bytes must remain readable."
+            )
+            for level in 1...max(levels, 1) {
+                payload = forwardingMessage(
+                    id: "chain-\(level)@example.com",
+                    subject: "Forwarded note \(level)",
+                    boundary: "BOUND-\(level)",
+                    inner: payload
+                )
+            }
+            return payload
+        }
+
+        /// True when `needle`'s bytes appear contiguously in `haystack`.
+        static func bytes(_ haystack: [UInt8], contain needle: [UInt8]) -> Bool {
+            guard !needle.isEmpty, needle.count <= haystack.count else { return false }
+            for start in 0...(haystack.count - needle.count) {
+                if haystack[start..<(start + needle.count)].elementsEqual(needle) { return true }
+            }
+            return false
+        }
     }
 
     // MARK: - Extraction through the bridge
@@ -629,4 +699,113 @@ final class ContainerAttachmentTests: XCTestCase {
         )
     }
 #endif
+
+    // MARK: - Nested message/rfc822 (M2.3)
+
+    func testForwardedMessageTextIsIndexed() throws {
+        let inner = Container.plainMessage(
+            id: "inner@example.com",
+            subject: "Recipe exchange thread",
+            body: "Curry recipe lives in the shared drive."
+        )
+        let data = Data(Container.forwardingMessage(id: "fwd@example.com", inner: inner).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Recipe exchange thread"), "got: \(attachments)")
+        XCTAssertTrue(
+            attachments.contains("Curry recipe lives in the shared drive"),
+            "got: \(attachments)"
+        )
+    }
+
+    func testForwardedSubjectEncodedWordIsDecoded() throws {
+        let encoded = "=?utf-8?B?\(Data("Weekly status summary".utf8).base64EncodedString())?="
+        let inner = Container.plainMessage(
+            id: "enc@example.com", subject: encoded, body: "Standing agenda in the notes."
+        )
+        let data = Data(Container.forwardingMessage(id: "encfwd@example.com", inner: inner).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Weekly status summary"), "got: \(attachments)")
+    }
+
+    func testForwardedHTMLBodyIsReducedToText() throws {
+        let inner = """
+        Message-ID: <html@example.com>
+        From: alice@example.com
+        To: bob@example.org
+        Subject: Schedule change
+        Content-Type: text/html; charset=utf-8
+
+        <html><body><p>Sprint review moved</p><p>to Thursday</p></body></html>
+        """
+        let data = Data(Container.forwardingMessage(id: "htmlfwd@example.com", inner: inner).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Sprint review moved"), "got: \(attachments)")
+        XCTAssertTrue(attachments.contains("to Thursday"), "got: \(attachments)")
+    }
+
+    func testNestedChainExtractionStopsAtDepthCap() throws {
+        let data = Data(Container.nestedChain(levels: 40).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Forwarded note 38"), "got: \(attachments)")
+        XCTAssertFalse(
+            attachments.contains("Forwarded note 6"),
+            "beyond the 32-level nesting cap the text must stop: got \(attachments)"
+        )
+    }
+
+    func testVersionBumpBackfillsNestedText() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-nested-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try ArchiveStore.create(at: tempDir.appendingPathComponent("C.emailarchive"), appVersion: "0.1.0")
+
+        let inner = Container.plainMessage(
+            id: "family@example.com",
+            subject: "Family photo planning",
+            body: "Album link inside."
+        )
+        let data = Data(Container.forwardingMessage(id: "nestedbackfill@example.com", inner: inner).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let message = IngestedMessage(
+            record: parsed.record,
+            data: data,
+            memberships: [Membership(mailbox: "INBOX", flags: [])],
+            labels: [],
+            attachments: parsed.attachments,
+            providerThreadID: nil,
+            searchText: parsed.searchText
+        )
+        let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+        guard case .created(let id) = try store.ingest(message, into: account) else {
+            return XCTFail("ingest must create")
+        }
+
+        // Simulate the previous pipeline: mark the row older than current
+        // and blank the nested-message text the old row could not have had.
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE message SET textVersion = textVersion - 1 WHERE id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE message_text SET attachments = 'family photos' WHERE rowid = ?", arguments: [id])
+        }
+        let processed = try store.reindexOutdated()
+        XCTAssertEqual(processed, 1)
+        let got = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT attachments FROM message_text WHERE rowid = ?", arguments: [id]
+            )
+        }
+        let attachments = try XCTUnwrap(got)
+        XCTAssertTrue(
+            attachments.contains("family photo planning"),
+            "the v11 backfill must restore nested-message text: \(attachments)"
+        )
+        XCTAssertTrue(
+            attachments.contains("album link inside"),
+            "the v11 backfill must restore nested-message body text: \(attachments)"
+        )
+    }
 }

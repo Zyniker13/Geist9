@@ -97,15 +97,19 @@ public struct MIMEPart: Sendable, Equatable {
 }
 
 public enum MIMEParser {
+    /// Maximum message/rfc822 nesting depth the parser descends into.
+    /// Deeper levels keep their raw bytes as a leaf, so nothing is lost.
+    public static let nestingDepthLimit = 32
+
     /// Parse a complete message (headers + body) into a part tree.
     public static func parse(_ data: Data) -> MIMEPart {
         let bytes = [UInt8](data)
         let block = HeaderScanner.scan(data)
         let body = Array(bytes[block.bodyStart...])
-        return makePart(headers: block, body: body)
+        return makePart(headers: block, body: body, depth: 0)
     }
 
-    private static func makePart(headers: HeaderBlock, body: [UInt8]) -> MIMEPart {
+    private static func makePart(headers: HeaderBlock, body: [UInt8], depth: Int) -> MIMEPart {
         let (main, params) = HeaderParameters.split(
             headers.first("content-type")?.valueText ?? "text/plain"
         )
@@ -114,7 +118,7 @@ public enum MIMEParser {
 
         if type.hasPrefix("multipart/") {
             if let boundary = resolved["boundary"] {
-                let children = splitMultipart(body, boundary: boundary)
+                let children = splitMultipart(body, boundary: boundary, depth: depth)
                 return MIMEPart(headers: headers, bodyBytes: body, children: children, kind: .multipart)
             }
             // A multipart without a usable boundary: keep the raw body as a leaf.
@@ -123,21 +127,25 @@ public enum MIMEParser {
 
         if type == "message/rfc822" {
             // The body is a complete message; its transfer encoding applies
-            // to the whole inner message.
+            // to the whole inner message. Descend only to the nesting limit;
+            // deeper levels keep their raw bytes as a leaf.
+            guard depth < nestingDepthLimit else {
+                return MIMEPart(headers: headers, bodyBytes: body, children: [], kind: .leaf)
+            }
             let encoding = headers.first("content-transfer-encoding")?.valueText
             let decoded = Transfer.decode(encoding: encoding, body)
-            let inner = makePart(body: decoded)
+            let inner = makePart(body: decoded, depth: depth + 1)
             return MIMEPart(headers: headers, bodyBytes: body, children: [inner], kind: .nestedMessage)
         }
 
         return MIMEPart(headers: headers, bodyBytes: body, children: [], kind: .leaf)
     }
 
-    private static func makePart(body: [UInt8]) -> MIMEPart {
+    private static func makePart(body: [UInt8], depth: Int) -> MIMEPart {
         let block = HeaderScanner.scan(Data(body))
         let bytes = [UInt8](body)
         let partBody = Array(bytes[block.bodyStart...])
-        return makePart(headers: block, body: partBody)
+        return makePart(headers: block, body: partBody, depth: depth)
     }
 
     // MARK: - Boundary splitting
@@ -148,7 +156,9 @@ public enum MIMEParser {
         return true
     }
 
-    private static func splitMultipart(_ body: [UInt8], boundary: String) -> [MIMEPart] {
+    private static func splitMultipart(
+        _ body: [UInt8], boundary: String, depth: Int
+    ) -> [MIMEPart] {
         let marker = [UInt8](boundary.utf8)
         var parts: [MIMEPart] = []
         var currentStart: Int? = nil
@@ -170,7 +180,7 @@ public enum MIMEParser {
                 if starts(Array(rest), with: [0x2D, 0x2D]) {
                     // Closing boundary: end of the multipart body.
                     if let start = currentStart {
-                        parts.append(makePart(body: Array(body[start..<i])))
+                        parts.append(makePart(body: Array(body[start..<i]), depth: depth))
                         currentStart = nil
                     }
                     break
@@ -178,7 +188,7 @@ public enum MIMEParser {
                 if rest.isEmpty || rest.allSatisfy({ $0 == 0x20 || $0 == 0x09 }) {
                     // Opening boundary: start the next part.
                     if let start = currentStart {
-                        parts.append(makePart(body: Array(body[start..<i])))
+                        parts.append(makePart(body: Array(body[start..<i]), depth: depth))
                     }
                     currentStart = end + 1
                 }
@@ -189,7 +199,7 @@ public enum MIMEParser {
 
         // Malformed multipart without a closing boundary: keep the tail.
         if let start = currentStart {
-            parts.append(makePart(body: Array(body[start...])))
+            parts.append(makePart(body: Array(body[start...]), depth: depth))
         }
         return parts
     }

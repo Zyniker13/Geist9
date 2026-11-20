@@ -234,6 +234,47 @@ public enum MailBridge {
         visit(part)
     }
 
+    /// The searchable text of one nested message part (the message inside
+    /// a message/rfc822 attachment): its decoded subject line plus its own
+    /// body text — the plain part, or the reduced HTML when there is no
+    /// plain part. Its attachments are covered by the leaf walk; here only
+    /// the prose. nil when the nested message has neither subject nor text.
+    static func nestedMessageText(_ inner: MIMEPart) -> String? {
+        let subject = Headers(inner.headers).subject()
+        var plain: String? = nil
+        var html: String? = nil
+        walkTextBodies(inner) { part in
+            let (main, parameters) = part.contentType
+            guard main == "text/plain" || main == "text/html" else { return }
+            let text = Charset.decode(parameters["charset"], Array(part.decodedBody))
+            if main == "text/plain" {
+                if plain == nil { plain = text }
+            } else if html == nil {
+                html = text
+            }
+        }
+        let body = plain ?? html.map { htmlToText($0) }
+        let joined = [subject, body]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : joined
+    }
+
+    /// Every nested message/rfc822 part in part order, innermost prose
+    /// included: the walk descends into nested messages as the parser
+    /// structured them, and MailMIME's nesting cap bounds the depth, so
+    /// no unbounded recursion is possible here.
+    private static func walkNestedMessages(_ part: MIMEPart, _ visit: (String) -> Void) {
+        if part.kind == .nestedMessage {
+            if let inner = part.children.first, let text = nestedMessageText(inner) {
+                visit(text)
+            }
+        }
+        for child in part.children { walkNestedMessages(child, visit) }
+    }
+
     /// Cap on how much decoded attachment text one message contributes to
     /// the index (decision 0029): huge text dumps stop adding value long
     /// before this, and the cap bounds ingest cost.
@@ -252,6 +293,15 @@ public enum MailBridge {
     static func extractAttachmentText(_ root: MIMEPart) -> String? {
         var pieces: [String] = []
         var total = 0
+        // Nested message/rfc822 prose first (decision 0041), then the
+        // attachment leaves. One shared length cap over both.
+        walkNestedMessages(root) { text in
+            guard total < Self.maxAttachmentTextLength else { return }
+            let remaining = Self.maxAttachmentTextLength - total
+            let clipped = text.count > remaining ? String(text.prefix(remaining)) : text
+            total += clipped.count
+            if !clipped.isEmpty { pieces.append(clipped) }
+        }
         walkLeaves(root) { part in
             guard total < Self.maxAttachmentTextLength else { return }
             guard part.contentDisposition["content-disposition"] == "attachment" else { return }

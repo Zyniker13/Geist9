@@ -48,7 +48,12 @@ enum TextIndexVersion {
     /// joins the attachments column; the backfill re-indexes older rows from
     /// their stored bytes to add it.
     static let v10 = 10
-    static var current: Int { v10 }
+    /// M2.3: the text of nested message/rfc822 parts (forwarded `.eml`:
+    /// decoded subject line plus the nested message's own body, decision
+    /// 0041) joins the attachments column; the backfill re-indexes older
+    /// rows from their stored bytes to add it.
+    static let v11 = 11
+    static var current: Int { v11 }
 }
 
 extension ArchiveStore {
