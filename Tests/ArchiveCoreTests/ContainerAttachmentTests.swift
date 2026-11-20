@@ -179,6 +179,31 @@ final class ContainerAttachmentTests: XCTestCase {
             return Data(bytes)
         }
 
+        /// Minimal one-page PDF with correct xref offsets: the same builder
+        /// PDFExtractTests uses, trimmed to a single page.
+        static func pdf(_ text: String) -> Data {
+            let stream = "BT /F1 12 Tf 72 720 Td (\(text)) Tj ET"
+            let streamBytes = stream.utf8.count
+            var body = "%PDF-1.4\n"
+            var offsets: [Int] = []
+            func add(_ object: String) {
+                offsets.append(body.utf8.count)
+                body += object
+            }
+            add("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+            add("2 0 obj\n<< /Type /Pages /Kids [4 0 R] /Count 1 >>\nendobj\n")
+            add("3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+            add("4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> >> >>\nendobj\n")
+            add("5 0 obj\n<< /Length \(streamBytes) >>\nstream\n\(stream)\nendstream\nendobj\n")
+            var xref = "xref\n0 6\n0000000000 65535 f \n"
+            for offset in offsets {
+                xref += String(format: "%010d 00000 n \n", offset)
+            }
+            xref += "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n\(body.utf8.count)\n%%EOF\n"
+            body += xref
+            return Data(body.utf8)
+        }
+
         private static func base64(_ data: Data) -> String {
             data.base64EncodedString()
         }
@@ -408,4 +433,76 @@ final class ContainerAttachmentTests: XCTestCase {
             "the v8 backfill must restore iWork text: \(attachments)"
         )
     }
+
+    // MARK: - PDF (decision 0039, macOS-only PDFKit extractor)
+
+#if canImport(ArchiveExtractApple)
+    func testPDFAttachmentTextIsIndexed() throws {
+        let data = Data(Container.message(
+            id: "pdf@example.com", mimeType: "application/pdf",
+            filename: "invoice.pdf", attachment: Container.pdf("Quarterly numbers report")
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Quarterly numbers"), "got: \(attachments)")
+        XCTAssertEqual(parsed.attachments.first?.size, Container.pdf("Quarterly numbers report").count)
+    }
+
+    func testPDFFallbackByFilename() throws {
+        let data = Data(Container.message(
+            id: "pdf-fallback@example.com", mimeType: "application/octet-stream",
+            filename: "summary.PDF", attachment: Container.pdf("Agenda for Friday")
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let attachments = try XCTUnwrap(parsed.searchText.attachments)
+        XCTAssertTrue(attachments.contains("Agenda for Friday"), "got: \(attachments)")
+    }
+
+    func testVersionBumpBackfillsPDFText() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-pdf-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try ArchiveStore.create(at: tempDir.appendingPathComponent("C.emailarchive"), appVersion: "0.1.0")
+
+        let pdfBytes = Container.pdf("Quarterly numbers report")
+        let data = Data(Container.message(
+            id: "backfill-pdf@example.com", mimeType: "application/pdf",
+            filename: "invoice.pdf", attachment: pdfBytes
+        ).utf8)
+        let parsed = MailBridge.parse(for: data)
+        let message = IngestedMessage(
+            record: parsed.record,
+            data: data,
+            memberships: [Membership(mailbox: "INBOX", flags: [])],
+            labels: [],
+            attachments: parsed.attachments,
+            providerThreadID: nil,
+            searchText: parsed.searchText
+        )
+        let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+        guard case .created(let id) = try store.ingest(message, into: account) else {
+            return XCTFail("ingest must create")
+        }
+
+        // Simulate the previous pipeline: mark the row older than current
+        // and blank the attachment text the old row could not have had.
+        try store.db.write { db in
+            try db.execute(sql: "UPDATE message SET textVersion = textVersion - 1 WHERE id = ?", arguments: [id])
+            try db.execute(sql: "UPDATE message_text SET attachments = 'invoice pdf' WHERE rowid = ?", arguments: [id])
+        }
+        let processed = try store.reindexOutdated()
+        XCTAssertEqual(processed, 1)
+        let got = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT attachments FROM message_text WHERE rowid = ?", arguments: [id]
+            )
+        }
+        let attachments = try XCTUnwrap(got)
+        XCTAssertTrue(
+            attachments.contains("quarterly numbers"),
+            "the v9 backfill must restore PDF text: \(attachments)"
+        )
+    }
+#endif
 }

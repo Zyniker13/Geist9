@@ -7,6 +7,9 @@
 import Foundation
 import MailMIME
 import ArchiveExtract
+#if canImport(ArchiveExtractApple)
+import ArchiveExtractApple
+#endif
 
 /// The text the search index gets from one message: the body a person
 /// wrote (ranks high) and quoted or signature text (ranks low). The
@@ -257,6 +260,12 @@ public enum MailBridge {
             if main.hasPrefix("text/") {
                 let decoded = Charset.decode(parameters["charset"], Array(part.decodedBody))
                 text = main == "text/html" ? htmlToText(decoded) : decoded
+            } else if let extracted = pdfAttachmentText(
+                main: main,
+                filename: decodedFilename(part),
+                data: part.decodedBody
+            ) {
+                text = extracted
             } else {
                 guard let extracted = containerAttachmentText(
                     main: main,
@@ -275,11 +284,27 @@ public enum MailBridge {
         return joined.isEmpty ? nil : joined
     }
 
+    /// PDF attachment text via PDFKit (decision 0039). MIME type first,
+    /// filename extension as the fallback for broken MIME parts. On Linux
+    /// the Apple-only extractor target does not exist and this returns nil
+    /// (the part is still listed in the attachment row).
+    static func pdfAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
+#if canImport(ArchiveExtractApple)
+        let extensionName = filename
+            .flatMap { $0.split(separator: ".").last.map(String.init) }
+            .map { $0.lowercased() }
+        guard main == "application/pdf" || extensionName == "pdf" else { return nil }
+        return PDFText.text(Data(data))
+#else
+        return nil
+#endif
+    }
+
     /// Container attachment formats whose text we extract (DESIGN 6A,
     /// M2.3): Office Open XML packages, OpenDocument packages, and iWork
     /// packages, keyed by MIME type first and filename extension as a
-    /// fallback for broken MIME parts. PDF and images return nil until
-    /// their extractors land; the attachment row still lists the part.
+    /// fallback for broken MIME parts. Images return nil until their
+    /// extractor lands; the attachment row still lists the part.
     static func containerAttachmentText(main: String, filename: String?, data: [UInt8]) -> String? {
         let ooxmlTypes: Set<String> = [
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

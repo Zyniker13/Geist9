@@ -47,6 +47,23 @@ viewerProducts = []
 viewerTargets = []
 #endif
 
+// Apple-framework extractors (DESIGN 6A): PDFKit for PDF text, later Vision
+// for OCR. These are Darwin frameworks, so the target exists only on macOS;
+// ArchiveCore calls into it under #if canImport and the Linux build simply
+// never sees it (decision 0039).
+let appleExtractProducts: [Product]
+let appleExtractTargets: [Target]
+#if os(macOS)
+appleExtractProducts = [.library(name: "ArchiveExtractApple", targets: ["ArchiveExtractApple"])]
+appleExtractTargets = [
+    .target(name: "ArchiveExtractApple"),
+    .testTarget(name: "ArchiveExtractAppleTests", dependencies: ["ArchiveExtractApple"]),
+]
+#else
+appleExtractProducts = []
+appleExtractTargets = []
+#endif
+
 let products: [Product] = [
     .library(name: "ArchiveCore", targets: ["ArchiveCore"]),
     .library(name: "MailMIME", targets: ["MailMIME"]),
@@ -57,7 +74,7 @@ let products: [Product] = [
     .library(name: "ArchiveMCP", targets: ["ArchiveMCP"]),
     .library(name: "Credentials", targets: ["Credentials"]),
     .executable(name: "bench-search", targets: ["Benchmarks"]),
-] + viewerProducts
+] + viewerProducts + appleExtractProducts
 
 let dependencies: [Package.Dependency] = [
     // IMAP protocol layer, chosen in docs/decisions/0002 and confirmed by the M0 spike.
@@ -74,16 +91,24 @@ let dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-crypto.git", exact: "5.1.1"),
 ]
 
+var archiveCoreDependencies: [Target.Dependency] = [
+    .product(name: "GRDB", package: "GRDB.swift"),
+    .product(name: "Crypto", package: "swift-crypto"),
+    "MailMIME",
+    "ArchiveSearch",
+    "ArchiveExtract",
+]
+#if os(macOS)
+archiveCoreDependencies.append("ArchiveExtractApple")
+#endif
+
 let coreTargets: [Target] = [
     // models, archive format, index, migrations, import/export (DESIGN 6, DESIGN 9);
     // import parsing goes through MailMIME, never its own parser.
-    .target(name: "ArchiveCore", dependencies: [
-        .product(name: "GRDB", package: "GRDB.swift"),
-        .product(name: "Crypto", package: "swift-crypto"),
-        "MailMIME",
-        "ArchiveSearch",
-        "ArchiveExtract",
-    ]),
+    .target(
+        name: "ArchiveCore",
+        dependencies: archiveCoreDependencies
+    ),
     // parser, charsets, threading (DESIGN 7)
     .target(name: "MailMIME"),
     // IMAP, JMAP, provider database (DESIGN 5)
@@ -130,7 +155,9 @@ let testTargets: [Target] = [
     .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
 ]
 
-let targets: [Target] = coreTargets + spikeTargets + viewerTargets + testTargets + evalTargets
+let targets: [Target] =
+    coreTargets + spikeTargets + viewerTargets + appleExtractTargets
+    + testTargets + evalTargets
 
 let package = Package(
     name: "EmailArchiver",

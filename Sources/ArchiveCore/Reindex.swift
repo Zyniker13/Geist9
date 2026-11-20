@@ -40,7 +40,11 @@ enum TextIndexVersion {
     /// the backfill re-indexes older rows from their stored bytes to add
     /// it.
     static let v8 = 8
-    static var current: Int { v8 }
+    /// M2.3: the extracted text of PDF attachments (macOS-only PDFKit
+    /// extractor, decision 0039) joins the attachments column; the backfill
+    /// re-indexes older rows from their stored bytes to add it.
+    static let v9 = 9
+    static var current: Int { v9 }
 }
 
 extension ArchiveStore {
