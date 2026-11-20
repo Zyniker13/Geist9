@@ -70,8 +70,7 @@ own "if that is simpler to sandbox".
    scales with ingest, and the opening carries the semantic signal the
    hybrid adds over BM25. The Core ML embedding adapter, the background
    computation/backfill, and the executor wiring with the off-switch are
-   later slices of this same decision; until they land, the table is
-   written by nothing and `search` returns empty.
+   later slices of this same decision (see Implementation status).
 
 6. **No new dependencies.** sqlite-vec is not added; Core ML is an Apple
    system framework reached through the macOS-only target that decision
@@ -90,5 +89,35 @@ own "if that is simpler to sandbox".
   300 ms budget at 1M × 384 and report; if a flat scan misses it there,
   the follow-up decision picks a real ANN structure (the schema above does
   not change — only the search path does).
-- `IndexSchema.version` moves 11 → 12; old archives migrate on open with
-  no change to stored bytes.
+- `IndexSchema.version` moves 11 → 12, and 12 → 13 when slice 2's tests
+  caught the id-alone key letting a second model overwrite the first
+  model's vectors; old archives migrate on open with no change to stored
+  bytes.
+
+## Implementation status
+
+- **Slice 1 (storage, similarity, fusion):** `VectorIndex` (binary16
+  codec, cosine scan, dimension-per-model upsert) and `RankFusion.rrf` in
+  ArchiveCore; `message_embedding` introduced in core-v12. Committed
+  `dc07056`.
+- **Slice 2 (runtime + backfill):** the `EmbeddingModel` protocol (with a
+  deterministic test double as the default), `EmbeddingBackfill`
+  (resumable, oldest-first, bounded, never rewrites an existing vector,
+  embeds subject + opening of the folded token stream), hybrid `search()`
+  merging the keyword and semantic lists via RRF with `viaSemantic` on
+  hits, and the core-v13 rebuild above. Committed `ddc9dcb`.
+- **Slice 3 (Core ML adapter + wiring):** the macOS-only `ArchiveEmbedApple`
+  target, the decision-0039 arrangement: `WordPieceTokenizer` (BERT
+  WordPiece, per-model vocabulary, truncation to the model's sequence
+  length) and `CoreMLEmbedding` (compiles source-format models before
+  load, probes the real output shape when a conversion leaves it
+  undeclared, normalizes the [CLS] hidden state, also accepts pooled
+  outputs). `CoreMLEmbedding.load(named:in:)` locates
+  `<name>.mlmodel`/`.mlpackage` plus `<name>-vocab.txt` in the app bundle
+  or the models folder and returns nil otherwise. The app loads the model
+  per archive, passes it and the persisted off-switch
+  (`semanticSearchEnabled`, default on) into every search, and schedules
+  bounded background backfill passes after open and import. No model
+  weights are committed; tests run against a generated toy model. Until
+  the real bge-small-en-v1.5 files are present (the model-download slice),
+  the archive searches keyword-only.

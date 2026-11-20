@@ -5,6 +5,7 @@
 // viewer re-reads the original whenever it renders.
 
 import ArchiveCore
+import ArchiveEmbedApple
 import Foundation
 import MailMIME
 import ViewerKit
@@ -31,6 +32,16 @@ final class ArchiveModel: ObservableObject {
     /// One-line status for the last archive action (import, export, scrub).
     @Published private(set) var notice: String?
 
+    /// The semantic half of hybrid search (DESIGN 6C): on by default, and
+    /// the person can turn it off; the choice persists. When the embedding
+    /// model is not present, search runs keyword-only regardless.
+    @Published var semanticSearchEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(semanticSearchEnabled, forKey: Self.semanticSearchKey)
+            if semanticSearchEnabled { scheduleBackfill() }
+        }
+    }
+
     /// A message-list row: the row plus, for search results, the matching
     /// snippet the query engine already computed.
     struct SearchRow: Identifiable, Sendable, Equatable {
@@ -47,11 +58,21 @@ final class ArchiveModel: ObservableObject {
     }
 
     private var searchTask: Task<Void, Never>?
+    /// The semantic half's model, loaded per archive (nil when not present
+    /// on disk — search then stays keyword-only by design, DESIGN 6C).
+    private var embeddingModel: (any EmbeddingModel)?
+    private var backfillTask: Task<Void, Never>?
+    private static let semanticSearchKey = "semanticSearchEnabled"
     /// The selected message's stored bytes, kept only while it stays
     /// selected, so "load remote content" can re-render without a re-read.
     private var selectedData: Data?
 
     var hasArchive: Bool { store != nil }
+
+    init() {
+        semanticSearchEnabled = UserDefaults.standard
+            .object(forKey: Self.semanticSearchKey) as? Bool ?? true
+    }
 
     // MARK: Archive lifecycle
 
@@ -66,6 +87,9 @@ final class ArchiveModel: ObservableObject {
     func closeArchive() {
         searchTask?.cancel()
         searchTask = nil
+        backfillTask?.cancel()
+        backfillTask = nil
+        embeddingModel = nil
         store = nil
         archiveName = nil
         mailboxes = []
@@ -88,9 +112,43 @@ final class ArchiveModel: ObservableObject {
             store = try make()
             archiveName = store?.directory.lastPathComponent
             notice = nil
+            embeddingModel = Self.loadEmbeddingModel()
             refreshMailboxes(selectFirst: true)
+            scheduleBackfill()
         } catch {
             notice = "Could not open archive: \(describe(error))"
+        }
+    }
+
+    // MARK: Semantic half (decision 0045)
+
+    /// The embedding model for the semantic half of hybrid search: loaded
+    /// from the app bundle or the models folder when the model files are
+    /// present, nil otherwise (search stays keyword-only until the model
+    /// is downloaded, DESIGN 6C).
+    private static func loadEmbeddingModel() -> (any EmbeddingModel)? {
+        var directories = [URL]()
+        if let bundleURL = Bundle.main.resourceURL {
+            directories.append(bundleURL)
+        }
+        if let support = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            directories.append(support.appendingPathComponent(
+                "Bristlecone/Models", isDirectory: true
+            ))
+        }
+        return CoreMLEmbedding.load(named: "bge-small-en-v1.5", in: directories)
+    }
+
+    /// Fills missing vectors in the background (decision 0045): bounded,
+    /// resumable passes; the persistent background queue arrives with the
+    /// later model-download work. A cancelled pass leaves stored vectors
+    /// untouched — backfill never rewrites an existing vector.
+    private func scheduleBackfill() {
+        backfillTask?.cancel()
+        guard semanticSearchEnabled, let store, let model = embeddingModel else { return }
+        backfillTask = Task.detached(priority: .utility) { [store] in
+            _ = try? EmbeddingBackfill.run(store, model: model, maxMessages: 2_000)
         }
     }
 
@@ -217,7 +275,12 @@ final class ArchiveModel: ObservableObject {
     private func runSearch(_ text: String) {
         guard let store else { return }
         do {
-            let answer = try store.search(text, withSnippets: true)
+            let answer = try store.search(
+                text,
+                withSnippets: true,
+                semanticModel: embeddingModel,
+                semanticEnabled: semanticSearchEnabled
+            )
             results = try answer.hits.compactMap { hit in
                 guard let summary = try store.message(id: hit.messageID) else { return nil }
                 return SearchRow(summary: summary, snippet: hit.snippet)
@@ -322,6 +385,8 @@ final class ArchiveModel: ObservableObject {
             // A fresh import may have brought new mailboxes.
             selectedMailbox = nil
             refreshMailboxes(selectFirst: true)
+            // New messages need vectors for the semantic half (decision 0045).
+            scheduleBackfill()
         } catch {
             notice = "Import failed: \(describe(error))"
         }

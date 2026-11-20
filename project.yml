@@ -22,6 +22,8 @@ targets:
         product: MailMIME
       - package: EmailArchiver
         product: ViewerKit
+      - package: EmailArchiver
+        product: ArchiveEmbedApple
     settings:
       base:
         SWIFT_VERSION: "6.0"

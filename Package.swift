@@ -64,6 +64,27 @@ appleExtractProducts = []
 appleExtractTargets = []
 #endif
 
+// On-device semantic embeddings (DESIGN 6A, decisions 0009 and 0045):
+// the Core ML adapter and its BERT WordPiece tokenizer. Apple-only
+// because Core ML is; ArchiveCore's EmbeddingModel protocol stays
+// cross-platform and the app injects this implementation at startup.
+let appleEmbedProducts: [Product]
+let appleEmbedTargets: [Target]
+#if os(macOS)
+appleEmbedProducts = [.library(name: "ArchiveEmbedApple", targets: ["ArchiveEmbedApple"])]
+appleEmbedTargets = [
+    .target(name: "ArchiveEmbedApple", dependencies: ["ArchiveCore"]),
+    .testTarget(
+        name: "ArchiveEmbedAppleTests",
+        dependencies: ["ArchiveEmbedApple", "ArchiveCore"],
+        resources: [.copy("toy_vocab.txt"), .copy("toy_embedding.mlmodel")]
+    ),
+]
+#else
+appleEmbedProducts = []
+appleEmbedTargets = []
+#endif
+
 let products: [Product] = [
     .library(name: "ArchiveCore", targets: ["ArchiveCore"]),
     .library(name: "MailMIME", targets: ["MailMIME"]),
@@ -74,7 +95,7 @@ let products: [Product] = [
     .library(name: "ArchiveMCP", targets: ["ArchiveMCP"]),
     .library(name: "Credentials", targets: ["Credentials"]),
     .executable(name: "bench-search", targets: ["Benchmarks"]),
-] + viewerProducts + appleExtractProducts
+] + viewerProducts + appleExtractProducts + appleEmbedProducts
 
 let dependencies: [Package.Dependency] = [
     // IMAP protocol layer, chosen in docs/decisions/0002 and confirmed by the M0 spike.
@@ -156,7 +177,7 @@ let testTargets: [Target] = [
 ]
 
 let targets: [Target] =
-    coreTargets + spikeTargets + viewerTargets + appleExtractTargets
+    coreTargets + spikeTargets + viewerTargets + appleExtractTargets + appleEmbedTargets
     + testTargets + evalTargets
 
 let package = Package(
