@@ -23,3 +23,6 @@ build/
 
 # Core dumps from kill-point tests (Linux containers write them into the workdir)
 /core
+
+# Python bytecode from scratch scripts run in the workdir
+__pycache__/
