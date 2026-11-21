@@ -42,6 +42,57 @@ public struct SavedSearchSummary: Sendable, Equatable {
     public var createdAt: Date
 }
 
+/// One attachment row of one message as listings need it. `textState` is
+/// the OCR queue state of the part (decision 0050): "done" for parts whose
+/// text is settled, "pending" while the queue has not reached it.
+public struct AttachmentSummary: Sendable, Equatable, Hashable {
+    public var id: Int64
+    public var partIndex: String
+    public var filename: String?
+    public var contentType: String
+    public var size: Int
+    public var textState: String
+}
+
+/// One address of the archive with how much mail involves it (DESIGN 9A
+/// find_contacts). `name` is the most recent display name seen for the
+/// address, or the address itself when no non-empty name was ever seen.
+public struct ContactSummary: Sendable, Equatable, Hashable {
+    public var email: String
+    public var name: String
+    public var messageCount: Int
+    public var firstDate: Date?
+    public var lastDate: Date?
+}
+
+/// Archive totals (DESIGN 9A archive_stats): messages per account, per
+/// year, and per sender, for "how much mail from X per year"-shaped
+/// questions without a search round-trip.
+public struct ArchiveStats: Sendable, Equatable {
+    public struct AccountCount: Sendable, Equatable {
+        public var email: String
+        public var displayName: String
+        public var messageCount: Int
+    }
+
+    public struct YearCount: Sendable, Equatable {
+        public var year: String
+        public var messageCount: Int
+    }
+
+    public struct SenderCount: Sendable, Equatable {
+        public var email: String
+        public var name: String?
+        public var messageCount: Int
+        public var firstDate: Date?
+        public var lastDate: Date?
+    }
+
+    public var byAccount: [AccountCount]
+    public var byYear: [YearCount]
+    public var bySender: [SenderCount]
+}
+
 extension ArchiveStore {
     /// Messages in one mailbox, newest first by dateReceived (then id).
     public func listMessages(mailbox: String, newestFirst: Bool = true, limit: Int = 100, offset: Int = 0) throws -> [MessageSummary] {
@@ -186,6 +237,151 @@ extension ArchiveStore {
             )
         }
     }
+
+    /// All messages of one thread, oldest first, as the MCP get_thread tool
+    /// and any other client list them. Threads hold message ids, so this is
+    /// one indexed lookup; ties on the same timestamp break by id, which is
+    /// ingest order (the same rule the ranking uses for ties).
+    public func threadMessages(threadID: Int64) throws -> [MessageSummary] {
+        try db.read { db in
+            try MessageSummary.fetchAll(
+                db,
+                sql: """
+                SELECT id, hash, subject, fromName, fromEmail,
+                       dateSent, dateReceived, size
+                FROM message WHERE threadID = ?
+                ORDER BY COALESCE(dateReceived, dateSent), id
+                """,
+                arguments: [threadID]
+            )
+        }
+    }
+
+    /// The stored subject of one thread, nil when no thread has that id.
+    public func threadSubject(threadID: Int64) throws -> String? {
+        try db.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT rootSubject FROM thread WHERE id = ?",
+                arguments: [threadID]
+            )
+        }
+    }
+
+    /// The attachments of one message, in MIME part order, with their OCR
+    /// queue state (decision 0050). `get_attachment_text` needs the part
+    /// path; viewers need the rest.
+    public func messageAttachments(messageID: Int64) throws -> [AttachmentSummary] {
+        try db.read { db in
+            try AttachmentSummary.fetchAll(
+                db,
+                sql: """
+                SELECT id, partIndex, filename, contentType, size, textState
+                FROM attachment WHERE messageID = ?
+                ORDER BY partIndex
+                """,
+                arguments: [messageID]
+            )
+        }
+    }
+
+    /// The labels one message carries, sorted. Empty for most messages:
+    /// only imports that laid labels down have any.
+    public func messageLabels(messageID: Int64) throws -> [String] {
+        try db.read { db in
+            try String.fetchAll(
+                db,
+                sql: """
+                SELECT l.name
+                FROM label l
+                JOIN message_label ml ON ml.labelID = l.id
+                WHERE ml.messageID = ?
+                ORDER BY l.name
+                """,
+                arguments: [messageID]
+            )
+        }
+    }
+
+    /// Addresses and names seen in the archive (DESIGN 9A find_contacts),
+    /// most-recent messages first by count. A message counts for an address
+    /// once, whatever roles (from, to, cc, bcc, reply-to) it carries the
+    /// address in. Counts and dates come from the message rows, so a
+    /// deleted message leaves the counts too.
+    public func findContacts(limit: Int = 50) throws -> [ContactSummary] {
+        let capped = max(1, min(limit, 10_000))
+        return try db.read { db in
+            try ContactSummary.fetchAll(
+                db,
+                sql: """
+                SELECT a.email, a.name,
+                       COUNT(DISTINCT ma.messageID) AS messageCount,
+                       MIN(COALESCE(m.dateReceived, m.dateSent)) AS firstDate,
+                       MAX(COALESCE(m.dateReceived, m.dateSent)) AS lastDate
+                FROM address a
+                JOIN message_address ma ON ma.addressID = a.id
+                JOIN message m ON m.id = ma.messageID
+                GROUP BY a.id
+                ORDER BY messageCount DESC, a.email
+                LIMIT ?
+                """,
+                arguments: [capped]
+            )
+        }
+    }
+
+    /// Archive totals by account, year, and sender (DESIGN 9A
+    /// archive_stats), for questions like "how much mail from X per year".
+    /// `senderLimit` caps the sender list; the year and account lists are
+    /// always complete.
+    public func archiveStats(senderLimit: Int = 50) throws -> ArchiveStats {
+        let cappedSenders = max(1, min(senderLimit, 10_000))
+        let accounts = try listAccounts().map {
+            ArchiveStats.AccountCount(
+                email: $0.email,
+                displayName: $0.displayName,
+                messageCount: $0.messageCount
+            )
+        }
+        let years = try db.read { db in
+            try ArchiveStats.YearCount.fetchAll(
+                db,
+                sql: """
+                SELECT substr(COALESCE(dateReceived, dateSent, 'none'), 1, 4) AS year,
+                       COUNT(*) AS messageCount
+                FROM message
+                GROUP BY year
+                ORDER BY year
+                """
+            )
+        }
+        .filter { $0.year.count == 4 }
+        let senders = try db.read { db in
+            try ArchiveStats.SenderCount.fetchAll(
+                db,
+                sql: """
+                SELECT m.fromEmail AS email,
+                       (SELECT m2.fromName FROM message m2
+                        WHERE m2.fromEmail = m.fromEmail AND m2.fromName != ''
+                        ORDER BY COALESCE(m2.dateReceived, m2.dateSent) DESC, m2.id DESC
+                        LIMIT 1) AS name,
+                       COUNT(*) AS messageCount,
+                       MIN(COALESCE(m.dateReceived, m.dateSent)) AS firstDate,
+                       MAX(COALESCE(m.dateReceived, m.dateSent)) AS lastDate
+                FROM message m
+                GROUP BY m.fromEmail
+                ORDER BY messageCount DESC, email
+                LIMIT ?
+                """,
+                arguments: [cappedSenders]
+            )
+        }
+        return ArchiveStats(
+            byAccount: accounts,
+            byYear: years,
+            bySender: senders
+        )
+    }
 }
 
 /// GRDB row mapping.
@@ -242,6 +438,54 @@ extension SavedSearchSummary: FetchableRecord {
             name: row["name"],
             query: row["query"],
             createdAt: Timestamp.date(row["createdAt"] as String) ?? Date(timeIntervalSince1970: 0)
+        )
+    }
+}
+
+extension AttachmentSummary: FetchableRecord {
+    public init(row: Row) throws {
+        self.init(
+            id: row["id"],
+            partIndex: row["partIndex"],
+            filename: row["filename"],
+            contentType: row["contentType"],
+            size: row["size"],
+            textState: row["textState"]
+        )
+    }
+}
+
+extension ContactSummary: FetchableRecord {
+    public init(row: Row) throws {
+        self.init(
+            email: row["email"],
+            // No non-empty name ever seen for the address: show the
+            // address itself, so the listing never shows a blank name.
+            name: row["name"] ?? row["email"] ?? "",
+            messageCount: row["messageCount"],
+            firstDate: (row["firstDate"] as String?).flatMap(Timestamp.date),
+            lastDate: (row["lastDate"] as String?).flatMap(Timestamp.date)
+        )
+    }
+}
+
+extension ArchiveStats.YearCount: FetchableRecord {
+    public init(row: Row) throws {
+        self.init(
+            year: row["year"],
+            messageCount: row["messageCount"]
+        )
+    }
+}
+
+extension ArchiveStats.SenderCount: FetchableRecord {
+    public init(row: Row) throws {
+        self.init(
+            email: row["email"],
+            name: row["name"],
+            messageCount: row["messageCount"],
+            firstDate: (row["firstDate"] as String?).flatMap(Timestamp.date),
+            lastDate: (row["lastDate"] as String?).flatMap(Timestamp.date)
         )
     }
 }

@@ -199,6 +199,72 @@ public enum MailBridge {
         return extractSearchText(root)
     }
 
+    /// The readable text of a single attachment part, addressed by its MIME
+    /// part path (decision 0052: a reader asks for one part without the
+    /// whole message). The per-part ladder mirrors the per-message search
+    /// extraction (decision 0029, extended by 0036, 0044, 0050) but returns
+    /// the part's real text: text/* parts come through verbatim (HTML
+    /// reduced to readable text), never through the search-only structured
+    /// reducers, capped at `maxAttachmentTextLength`. OCR-eligible parts
+    /// follow `ocr`, ZIP and container formats as the per-message pass
+    /// handles them. Only leaves with an attachment disposition answer
+    /// here; body leaves are the message body and are covered by the
+    /// message content. Nil when the path names no such part, the bytes do
+    /// not parse, or the part has no readable text (strict container
+    /// failure, decision 0036).
+    public static func attachmentText(
+        at partIndex: String,
+        in data: Data,
+        ocr: AttachmentOCR = .inline
+    ) -> String? {
+        guard let root = try? parseRoot(data) else { return nil }
+        var found: String? = nil
+        walkBodies(root, path: "") { path, part in
+            guard found == nil, path == partIndex else { return }
+            guard part.contentDisposition["content-disposition"] == "attachment" else { return }
+            let (main, parameters) = part.contentType
+            let filename = decodedFilename(part)
+            let bytes = part.decodedBody
+            let text: String?
+            if let extracted = rtfAttachmentText(
+                main: main, filename: filename, data: bytes
+            ) {
+                text = extracted
+            } else if main.hasPrefix("text/") {
+                // An agent reading one part gets its real text: decoded and,
+                // for HTML, reduced to readable text — but never the search
+                // normalization (structured reducers) the index uses.
+                let decoded = Charset.decode(parameters["charset"], Array(bytes))
+                text = main == "text/html" ? htmlToText(decoded) : decoded
+            } else if Self.isOcrCandidate(main: main, filename: filename) {
+                text = Self.ocrText(
+                    main: main,
+                    filename: filename,
+                    data: bytes,
+                    partIndex: partIndex,
+                    ocr: ocr
+                )
+            } else if let extracted = structuredAttachmentText(
+                main: main, filename: filename, data: bytes
+            ) {
+                text = extracted
+            } else if let extracted = zipAttachmentText(
+                main: main, filename: filename, data: bytes
+            ) {
+                text = extracted
+            } else {
+                text = containerAttachmentText(main: main, filename: filename, data: bytes)
+            }
+            guard var trimmed = text else { return }
+            trimmed = trimmed.count > Self.maxAttachmentTextLength
+                ? String(trimmed.prefix(Self.maxAttachmentTextLength))
+                : trimmed
+            trimmed = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { found = trimmed }
+        }
+        return found
+    }
+
     /// The search text of one parsed tree. `ocr` controls how OCR-eligible
     /// attachments are handled (decision 0050).
     static func extractSearchText(_ root: MIMEPart, ocr: AttachmentOCR = .inline) -> SearchText {
