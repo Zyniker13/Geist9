@@ -55,7 +55,7 @@ public final class ArchiveMCPServer: Sendable {
     /// process prints must go to stderr.
     public func run() async throws {
         let transport = StdioTransport()
-        let server = makeServer()
+        let server = await makeServer()
         try await server.start(transport: transport)
         await server.waitUntilCompleted()
     }
@@ -63,7 +63,7 @@ public final class ArchiveMCPServer: Sendable {
     /// Build the `Server` with the DESIGN 9A tools and resources registered,
     /// ready to `connect` on any transport. Handlers are registered once here
     /// so every transport gets the identical surface.
-    public func makeServer() -> Server {
+    public func makeServer() async -> Server {
         let server = Server(
             name: Self.serverInfo.name,
             version: Self.serverInfo.version,
@@ -72,6 +72,32 @@ public final class ArchiveMCPServer: Sendable {
                 tools: .init(listChanged: false)
             )
         )
+        let store = self.store
+        await server.withMethodHandler(ListTools.self) { params in
+            ListTools.Result(
+                tools: ArchiveTools.definitions(),
+                nextCursor: nil
+            )
+        }
+        await server.withMethodHandler(CallTool.self) { params in
+            try ArchiveTools.call(
+                params.name,
+                arguments: params.arguments ?? [:],
+                store: store
+            )
+        }
+        await server.withMethodHandler(ListResourceTemplates.self) { _ in
+            ListResourceTemplates.Result(
+                templates: ArchiveResources.templates(),
+                nextCursor: nil
+            )
+        }
+        await server.withMethodHandler(ListResources.self) { params in
+            try ArchiveResources.list(cursor: params.cursor, store: store)
+        }
+        await server.withMethodHandler(ReadResource.self) { params in
+            try ArchiveResources.read(params.uri, store: store)
+        }
         return server
     }
 }

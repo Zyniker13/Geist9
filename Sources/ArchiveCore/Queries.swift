@@ -28,6 +28,12 @@ public struct MailboxSummary: Sendable, Equatable {
     public var messageCount: Int
 }
 
+/// A thread as MCP resource listing needs it (DESIGN 9A).
+public struct ThreadRef: Sendable, Equatable {
+    public var id: Int64
+    public var subject: String?
+}
+
 public struct LabelSummary: Sendable, Equatable {
     public var name: String
     public var messageCount: Int
@@ -269,6 +275,36 @@ extension ArchiveStore {
                 sql: "SELECT rootSubject FROM thread WHERE id = ?",
                 arguments: [threadID]
             )
+        }
+    }
+
+    /// Every message in index-id order, paged after `after` (exclusive), for
+    /// MCP resource listing (DESIGN 9A). Index ids are ingest order and never
+    /// reused, so a cursor pages a stable sequence.
+    public func listMessages(after id: Int64, limit: Int) throws -> [MessageSummary] {
+        try db.read { db in
+            try MessageSummary.fetchAll(
+                db,
+                sql: """
+                SELECT id, hash, subject, fromName, fromEmail,
+                       dateSent, dateReceived, size, threadID
+                FROM message WHERE id > ? ORDER BY id LIMIT ?
+                """,
+                arguments: [id, limit]
+            )
+        }
+    }
+
+    /// Every thread in id order, paged after `after` (exclusive), for MCP
+    /// resource listing (DESIGN 9A).
+    public func listThreads(after id: Int64, limit: Int) throws -> [ThreadRef] {
+        try db.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT id, rootSubject FROM thread WHERE id > ? ORDER BY id LIMIT ?",
+                arguments: [id, limit]
+            )
+            .map { ThreadRef(id: $0["id"], subject: $0["rootSubject"]) }
         }
     }
 

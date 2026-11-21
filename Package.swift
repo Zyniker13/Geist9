@@ -215,6 +215,10 @@ let testTargets: [Target] = [
     .testTarget(name: "ArchiveExtractTests", dependencies: ["ArchiveExtract"]),
     .testTarget(name: "MailMIMETests", dependencies: ["MailMIME"]),
     .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
+    // Launches the built email-archiver-mcp executable as a subprocess
+    // (DESIGN 9A end-to-end contract), so it needs the ArchiveMCP library
+    // and ArchiveCore to build the fixture archive.
+    .testTarget(name: "ArchiveMCPTests", dependencies: ["ArchiveMCP", "ArchiveCore"]),
 ]
 
 let targets: [Target] =
