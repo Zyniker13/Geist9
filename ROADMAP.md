@@ -88,17 +88,17 @@ Goal: the person's agents can search and read the archive through the same engin
 
 Tasks:
 
-- [ ] `ArchiveMCP` with every tool and resource in DESIGN 9A, schemas versioned, using the M2 engine.
-- [ ] The stdio helper embedded in the app bundle; Settings › Agents with per-client on/off, account, folder, and label exposure, redaction modes, limits, and the activity log.
-- [ ] Untrusted-content wrapping for every returned body, subject, and attachment text; hidden-text stripping.
-- [ ] A Claude Desktop extension (`.mcpb`) and copyable configuration for other MCP clients.
+- [x] `ArchiveMCP` with every tool and resource in DESIGN 9A, schemas versioned, using the M2 engine.
+- [x] The stdio helper embedded in the app bundle; Settings › Agents with per-client on/off, account, folder, and label exposure, redaction modes, limits, and the activity log.
+- [x] Untrusted-content wrapping for every returned body, subject, and attachment text; hidden-text stripping.
+- [x] A Claude Desktop extension (`.mcpb`) and copyable configuration for other MCP clients.
 
 Done when:
 
-- A scripted MCP client launches the helper against a fixture archive and every tool's contract test passes, on Linux and macOS.
-- The official MCP inspector's checks pass.
-- Excluded accounts and folders never appear in any tool or resource result (access-control tests).
-- Every injection fixture comes back wrapped and labelled as untrusted.
+- [x] A scripted MCP client launches the helper against a fixture archive and every tool's contract test passes, on Linux and macOS. — `Tests/ArchiveMCPTests/StdioEndToEndTests.swift` (591 lines) launches the built helper over real stdio JSON-RPC on both CI platforms; CI job `check (linux)` + `check (macos)` green on `1983df3`, 2026-11-21.
+- [x] The official MCP inspector's checks pass. — `scripts/mcp-inspector-check.sh` (pinned `@modelcontextprotocol/inspector@0.16.2`) drives the built helper against an ingest-path fixture: `tools/list` exactly the 10 DESIGN 9A tools, `search_messages` fenced hit, `resources/read` fenced document linked to its thread, unknown tool `-32601`, `resources/list` = the fixture's 5 URIs. Wired into `check.sh`'s Darwin block; passed locally (full run, "All checks passed") and in CI `check (macos)` on `1983df3`.
+- [x] Excluded accounts and folders never appear in any tool or resource result (access-control tests). — `AccessControlEndToEndTests.swift` (11 over-the-wire tests: filtered policy shapes every answer, unreadable policy refuses the launch, unknown names stay silent, redaction, budget, disabled, permissive default, hidden text) plus the SQL-side guarantees in `ArchiveCoreTests/AccessControlTests.swift`; decision 0053.
+- [x] Every injection fixture comes back wrapped and labelled as untrusted. — `testInjectionFixtureComesBackWrappedOnEverySurface` pins subject, body, and attachment text over the wire; hidden-text stripping has its own e2e (`testHiddenTextNeverReachesTheAgentOverTheWire`) plus unit tests.
 
 ## M4: IMAP With Passwords
 
