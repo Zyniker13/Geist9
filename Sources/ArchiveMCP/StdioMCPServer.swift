@@ -5,10 +5,12 @@
 /// labelled as untrusted content, because email is the classic prompt-injection channel.
 ///
 /// The archive comes from `ARCHIVE_PATH`; the access policy from
-/// `BRISTLECONE_ACCESS_POLICY` (a JSON file; absent means the permissive
-/// default), resolved once at launch by `ArchiveMCPServer` — a policy that
-/// cannot be read or resolved refuses the launch rather than starting
-/// permissive.
+/// `BRISTLECONE_ACCESS_POLICY` (a JSON file), or, when the client names
+/// none, the app's standard policy file — the one Settings › Agents writes
+/// (decision 0054); when neither exists, the permissive default. The
+/// policy is resolved once at launch by `ArchiveMCPServer` — a file the
+/// client named that is missing, unreadable, or invalid refuses the launch
+/// rather than starting permissive.
 
 import Foundation
 import MCP

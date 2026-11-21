@@ -30,7 +30,9 @@ public final class ArchiveMCPServer: Sendable {
     public let context: ToolContext
 
     /// Environment variable naming the access-policy JSON file. An absolute
-    /// or `~`-expanded path; absent means the permissive default policy.
+    /// or `~`-expanded path. When the client names no file, the helper
+    /// reads the app's standard policy location (decision 0054); when
+    /// neither exists, the permissive default applies.
     public static let policyEnvironmentKey = "BRISTLECONE_ACCESS_POLICY"
 
     /// Environment variable overriding the activity log location. Default
@@ -48,10 +50,11 @@ public final class ArchiveMCPServer: Sendable {
     public static let protocolVersion: String = "2025-06-18"
 
     /// Opens the archive read-only and resolves the access policy against
-    /// it. `policy` wins over the environment; a nil policy reads
-    /// `BRISTLECONE_ACCESS_POLICY` and falls back to the permissive
-    /// default, so an agent run with no configuration sees everything the
-    /// owner sees minus junk and trash.
+    /// it. `policy` wins over any file; a nil policy resolves a file from
+    /// the environment first, then the app's standard policy location
+    /// (decision 0054), then falls back to the permissive default, so an
+    /// agent run with no configuration sees everything the owner sees
+    /// minus junk and trash.
     public init(
         archiveURL: URL, policy: AccessPolicy? = nil,
         activityLogURL: URL? = nil
@@ -73,9 +76,9 @@ public final class ArchiveMCPServer: Sendable {
         case .some(let given):
             resolvedPolicy = given
         case .none:
-            switch try Self.policyFromEnvironment() {
-            case .some(let fromEnvironment):
-                resolvedPolicy = fromEnvironment
+            switch try Self.resolvePolicy() {
+            case .some(let fromFiles):
+                resolvedPolicy = fromFiles
             case .none:
                 resolvedPolicy = .default
             }
@@ -102,27 +105,83 @@ public final class ArchiveMCPServer: Sendable {
         )
     }
 
-    /// Reads the policy file named by the environment, if any. A variable
-    /// that is set but unreadable is an error, not a silent default: the
+    /// The app's standard policy location under an Application Support
+    /// directory (decision 0054): the file the app's Settings › Agents
+    /// pane writes, in the layout `App/Sources/AgentAccess.swift` uses.
+    public static func standardPolicyURL(
+        underApplicationSupport appSupport: URL
+    ) -> URL {
+        appSupport
+            .appendingPathComponent("Bristlecone", isDirectory: true)
+            .appendingPathComponent("Agents", isDirectory: true)
+            .appendingPathComponent("policy.json", isDirectory: false)
+    }
+
+    /// The app's standard policy location for this user, or nil when the
+    /// platform has no Application Support directory. Derived from `HOME`
+    /// directly (falling back to the passwd entry): the Cocoa lookup
+    /// ignores `HOME` for a bundle-less tool, so a helper launched with a
+    /// controlled environment would otherwise read the wrong user's
+    /// directory. The helper only ever reads this file; it never creates
+    /// it.
+    public static var standardPolicyURL: URL? {
+        #if os(macOS)
+        let relative = "Library/Application Support"
+        #else
+        let relative = ".local/share"
+        #endif
+        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        return Self.standardPolicyURL(
+            underApplicationSupport: URL(fileURLWithPath: home, isDirectory: true)
+                .appendingPathComponent(relative, isDirectory: true))
+    }
+
+    /// Which policy file one launch reads (decision 0054): the client's
+    /// explicit choice when the environment names one (`~`-expanded, and a
+    /// blank value counts as unset), else the app's standard location,
+    /// else none — the permissive default. Pure so tests can inject both
+    /// sources.
+    static func policyFilePath(envValue: String?, standardURL: URL?) -> String? {
+        if let envValue, !envValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            return (envValue as NSString).expandingTildeInPath
+        }
+        return standardURL?.path
+    }
+
+    /// Reads one policy file. nil when the file is absent; an existing but
+    /// unreadable or invalid file is an error, never a silent default: the
     /// owner asked for a restriction, and ignoring it would be the worst
     /// possible failure.
-    static func policyFromEnvironment() throws -> AccessPolicy? {
-        guard let raw = ProcessInfo.processInfo
-            .environment[policyEnvironmentKey], !raw.isEmpty
-        else { return nil }
-        let expanded = (raw as NSString).expandingTildeInPath
-        guard let data = FileManager.default.contents(atPath: expanded) else {
-            throw SetupError.badPolicy(
-                "\(policyEnvironmentKey) points at an unreadable file: \(raw)"
-            )
+    static func policyFile(at path: String, named source: String) throws -> AccessPolicy? {
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        guard let data = FileManager.default.contents(atPath: path) else {
+            throw SetupError.badPolicy("\(source) points at an unreadable file: \(path)")
         }
         do {
             return try JSONDecoder().decode(AccessPolicy.self, from: data)
         } catch {
-            throw SetupError.badPolicy(
-                "\(policyEnvironmentKey) is not a valid policy file: \(error)"
-            )
+            throw SetupError.badPolicy("\(source) is not a valid policy file: \(error)")
         }
+    }
+
+    /// The policy files decide one launch's policy (decision 0054): the
+    /// client's explicit file first, then the app's standard location, and
+    /// nil — the permissive default — when neither exists. A file the
+    /// client named but that does not exist refuses instead: the owner (or
+    /// the client configuration) asked for a restriction, and silently
+    /// running without it would be the worst possible failure.
+    static func resolvePolicy() throws -> AccessPolicy? {
+        let envValue = ProcessInfo.processInfo.environment[policyEnvironmentKey]
+        if let path = Self.policyFilePath(envValue: envValue, standardURL: nil) {
+            guard FileManager.default.fileExists(atPath: path) else {
+                throw SetupError.badPolicy(
+                    "\(policyEnvironmentKey) points at an unreadable file: \(path)")
+            }
+            return try Self.policyFile(at: path, named: policyEnvironmentKey)
+        }
+        guard let standard = Self.standardPolicyURL else { return nil }
+        return try Self.policyFile(
+            at: standard.path, named: "the app's policy file")
     }
 
     static func activityLogFromEnvironment() -> URL? {

@@ -15,8 +15,11 @@ rows sit.
 ## Decision
 
 The helper resolves one access policy at startup from
-`BRISTLECONE_ACCESS_POLICY` (a JSON file path; absent means the default
-policy), against the archive's own index.
+`BRISTLECONE_ACCESS_POLICY` (a JSON file path; absent, or set to blank,
+means the next source below), then from the app's standard policy
+location (decision 0054) — the file this app's Settings writes — and
+only when neither exists does the default policy apply; against the
+archive's own index.
 
 **Policy shape.** The policy names things, not ids: accounts by address,
 mailboxes by name, labels by name, so a policy written against one archive

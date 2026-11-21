@@ -1,9 +1,10 @@
 // Agent access (DESIGN 9A): the app-side half of the MCP helper's access
 // policy. Settings writes one policy file that the helper reads at startup
-// (BRISTLECONE_ACCESS_POLICY points at it, from the client configuration
-// Settings generates), plus a JSONL activity log the helper appends to and
-// this pane reads back. The app never opens the archive for agents and
-// never runs the helper itself — the policy file is the whole channel.
+// (by default at the standard location this app writes; clients that name
+// an explicit BRISTLECONE_ACCESS_POLICY override it, decision 0054), plus
+// a JSONL activity log the helper appends to and this pane reads back. The
+// app never opens the archive for agents and never runs the helper itself
+// — the policy file is the whole channel.
 
 import ArchiveCore
 import Foundation

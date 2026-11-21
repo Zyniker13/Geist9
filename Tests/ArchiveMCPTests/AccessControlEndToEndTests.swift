@@ -468,6 +468,134 @@ final class AccessControlEndToEndTests: XCTestCase {
         let readError = try policyDict(read["error"])
         XCTAssertEqual(try policyInt(readError["code"]), -32003)
     }
+
+    // MARK: - 7. The app's standard policy location (decision 0054)
+
+    /// When the client names no policy file, the helper reads the app's
+    /// standard location — the same file Settings › Agents writes — before
+    /// falling back to the permissive default. Both per-OS candidates are
+    /// written so the test works wherever the helper looks: macOS uses
+    /// ~/Library/Application Support, Linux uses ~/.local/share.
+    private func makeFakeHome(withStandardPolicy json: String?) throws -> String {
+        let home = tempDir
+            .appendingPathComponent("home-" + UUID().uuidString, isDirectory: true)
+        let relative = ["Bristlecone", "Agents", "policy.json"]
+        for support in [
+            home.appendingPathComponent("Library/Application Support", isDirectory: true),
+            home.appendingPathComponent(".local/share", isDirectory: true),
+        ] {
+            var url = support
+            for component in relative {
+                url = url.appendingPathComponent(component, isDirectory: false)
+            }
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if let json {
+                try Data(json.utf8).write(to: url)
+            }
+        }
+        return home.path
+    }
+
+    /// The minimal handshake every test in this section needs.
+    private func startClient(home: String) throws -> StdioMCPClient {
+        let client = try StdioMCPClient(
+            executable: try helperExecutableURL(), archivePath: archiveURL.path,
+            extraEnvironment: ["HOME": home]
+        )
+        try client.requestResult("initialize", params: [
+            "protocolVersion": "2025-06-18",
+            "capabilities": [String: Any](),
+            "clientInfo": ["name": "geist9-policy-test", "version": "0.0.0"],
+        ])
+        client.notify("notifications/initialized")
+        return client
+    }
+
+    func testStandardLocationDisabledPolicyRefusesEverything() throws {
+        _ = try makeFilteredFixture()
+        let home = try makeFakeHome(withStandardPolicy: #"{"enabled": false}"#)
+        let client = try startClient(home: home)
+        defer { client.shutdown() }
+        process = client.process
+
+        // Tools/list stays static (the client's setup must keep working).
+        let listing = try client.requestResult("tools/list", params: [String: Any]())
+        XCTAssertFalse(try policyArray(listing["tools"]).isEmpty)
+
+        let call = try client.request("tools/call", params: [
+            "name": "archive_stats", "arguments": [String: Any](),
+        ])
+        let callError = try policyDict(call["error"])
+        XCTAssertEqual(try policyInt(callError["code"]), -32003)
+        XCTAssertTrue(
+            try policyStr(callError["message"]).contains("turned off"),
+            "the standard-location switch governs too: \(callError["message"] ?? "")")
+
+        let read = try client.request("resources/read", params: [
+            "uri": "emailarchiver://message/1",
+        ])
+        XCTAssertEqual(try policyInt(try policyDict(read["error"])["code"]), -32003)
+    }
+
+    func testMissingStandardLocationMeansThePermissiveDefault() throws {
+        _ = try makeFilteredFixture()
+        let home = try makeFakeHome(withStandardPolicy: nil)
+        let client = try startClient(home: home)
+        defer { client.shutdown() }
+        process = client.process
+
+        let stats = try client.requestResult("tools/call", params: [
+            "name": "archive_stats", "arguments": [String: Any](),
+        ])
+        XCTAssertNil(stats["isError"], "no policy anywhere answers permissively")
+    }
+
+    func testExplicitPolicyPathOverridesTheStandardLocation() throws {
+        _ = try makeFilteredFixture()
+        // The app's file says off; the client names its own on-policy.
+        let home = try makeFakeHome(withStandardPolicy: #"{"enabled": false}"#)
+        let client = try StdioMCPClient(
+            executable: try helperExecutableURL(), archivePath: archiveURL.path,
+            extraEnvironment: [
+                "HOME": home,
+                "BRISTLECONE_ACCESS_POLICY": try writePolicyFile(
+                    #"{"excludeJunkAndTrash": false, "enabled": true}"#),
+            ]
+        )
+        defer { client.shutdown() }
+        process = client.process
+        try client.requestResult("initialize", params: [
+            "protocolVersion": "2025-06-18",
+            "capabilities": [String: Any](),
+            "clientInfo": ["name": "geist9-policy-test", "version": "0.0.0"],
+        ])
+        client.notify("notifications/initialized")
+
+        let stats = try client.requestResult("tools/call", params: [
+            "name": "archive_stats", "arguments": [String: Any](),
+        ])
+        XCTAssertNil(stats["isError"], "the explicit path wins over the standard location")
+    }
+
+    func testBrokenStandardLocationPolicyRefusesTheLaunch() throws {
+        _ = try makeFilteredFixture()
+        let home = try makeFakeHome(withStandardPolicy: "{not json")
+        let executable = try helperExecutableURL()
+        let client = try StdioMCPClient(
+            executable: executable, archivePath: archiveURL.path,
+            extraEnvironment: ["HOME": home]
+        )
+        process = client.process
+        let proc = try XCTUnwrap(process, "the helper process must exist")
+        let exited = expectation(description: "helper exits")
+        proc.terminationHandler = { _ in exited.fulfill() }
+        client.shutdown()
+        wait(for: [exited], timeout: 30)
+        XCTAssertNotEqual(
+            proc.terminationStatus, 0,
+            "a broken policy file must refuse the launch, not start permissive")
+    }
 }
 
 private struct PolicyE2EError: Error, CustomStringConvertible {
