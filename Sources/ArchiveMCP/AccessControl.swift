@@ -143,6 +143,7 @@ final class AccessContext: @unchecked Sendable {
     let maxCharsPerCall: Int
     let rateLimiter: RateLimiter
     let activityLog: ActivityLog
+    let enabled: Bool
 
     /// True when any exclusion is active — callers use it to drop
     /// zero-count rows that would otherwise leak the sizes of hidden
@@ -156,6 +157,31 @@ final class AccessContext: @unchecked Sendable {
         self.maxCharsPerCall = policy.maxCharsPerCall
         self.rateLimiter = RateLimiter(limit: policy.callsPerMinute)
         self.activityLog = activityLog
+        self.enabled = policy.enabled
+    }
+
+    /// The one gate every agent request passes — tool calls and resource
+    /// reads alike (0053's accountability and rate-limit paragraphs cover
+    /// both surfaces). A refused request is logged like any other so the
+    /// person sees the attempts, then answered with a readable error.
+    /// The disabled check runs first: a policy that turned agents off
+    /// never spends a rate-limit slot on its refusals.
+    func beginRequest(tool: String, query: String?) throws {
+        if !enabled {
+            activityLog.record(tool: tool, query: query, resultCount: nil)
+            throw ArchiveTools.ToolError.disabled
+        }
+        if !rateLimiter.allowCall() {
+            activityLog.record(tool: tool, query: query, resultCount: nil)
+            throw ArchiveTools.ToolError.rateLimited
+        }
+    }
+
+    /// Logs one finished request. Tool calls log their result count;
+    /// resource reads pass `nil` on a refusal, `1` (message) or the page
+    /// size (listing) on success.
+    func endRequest(tool: String, query: String?, resultCount: Int?) {
+        activityLog.record(tool: tool, query: query, resultCount: resultCount)
     }
 
     /// Whether one message is visible. Hidden ids answer `false`, and

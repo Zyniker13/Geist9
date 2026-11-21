@@ -55,11 +55,15 @@ enum ArchiveResources {
     static func list(
         cursor: String?, ctx: ToolContext
     ) throws -> ListResources.Result {
+        // Resource reads pass the same gate as tool calls (0053): the
+        // disabled check, the rate limit, and the activity log.
+        try ctx.access.beginRequest(tool: "list_resources", query: cursor)
         let raw = cursor ?? "m:0"
         let parts = raw.split(separator: ":", maxSplits: 1)
         guard parts.count == 2, let after = Int64(parts[1]),
             parts[0] == "m" || parts[0] == "t"
         else {
+            ctx.access.endRequest(tool: "list_resources", query: cursor, resultCount: nil)
             throw ArchiveTools.ToolError.badArguments("bad cursor: \(raw)")
         }
 
@@ -69,6 +73,8 @@ enum ArchiveResources {
                 after: after, limit: pageSize, visible: ctx.access.visibility)
             var resources = messages.map { messageResource($0, redaction: ctx.access.redaction) }
             if messages.count == pageSize {
+                ctx.access.endRequest(
+                    tool: "list_resources", query: cursor, resultCount: resources.count)
                 return ListResources.Result(
                     resources: resources,
                     nextCursor: "m:\(messages.last!.id)"
@@ -80,22 +86,30 @@ enum ArchiveResources {
                 after: 0, limit: remaining, visible: ctx.access.visibility)
             resources += threads.map { threadResource($0, redaction: ctx.access.redaction) }
             if threads.count == remaining {
+                ctx.access.endRequest(
+                    tool: "list_resources", query: cursor, resultCount: resources.count)
                 return ListResources.Result(
                     resources: resources,
                     nextCursor: "t:\(threads.last!.id)"
                 )
             }
+            ctx.access.endRequest(
+                tool: "list_resources", query: cursor, resultCount: resources.count)
             return ListResources.Result(resources: resources, nextCursor: nil)
         default:
             let threads = try ctx.store.listThreads(
                 after: after, limit: pageSize, visible: ctx.access.visibility)
             let resources = threads.map { threadResource($0, redaction: ctx.access.redaction) }
             if threads.count == pageSize {
+                ctx.access.endRequest(
+                    tool: "list_resources", query: cursor, resultCount: resources.count)
                 return ListResources.Result(
                     resources: resources,
                     nextCursor: "t:\(threads.last!.id)"
                 )
             }
+            ctx.access.endRequest(
+                tool: "list_resources", query: cursor, resultCount: resources.count)
             return ListResources.Result(resources: resources, nextCursor: nil)
         }
     }
@@ -143,7 +157,11 @@ enum ArchiveResources {
     static func read(
         _ uri: String, ctx: ToolContext
     ) throws -> ReadResource.Result {
+        // Resource reads pass the same gate as tool calls (0053): the
+        // disabled check, the rate limit, and the activity log.
+        try ctx.access.beginRequest(tool: "read_resource", query: uri)
         guard uri.hasPrefix(scheme) else {
+            ctx.access.endRequest(tool: "read_resource", query: uri, resultCount: nil)
             throw ArchiveTools.ToolError.badArguments(
                 "unknown resource scheme: \(uri)"
             )
@@ -151,6 +169,7 @@ enum ArchiveResources {
         let rest = uri.dropFirst(scheme.count)
         let segments = rest.split(separator: "/")
         guard segments.count == 2, let id = Int64(segments[1]) else {
+            ctx.access.endRequest(tool: "read_resource", query: uri, resultCount: nil)
             throw ArchiveTools.ToolError.badArguments(
                 "bad resource URI: \(uri)"
             )
@@ -160,20 +179,24 @@ enum ArchiveResources {
         switch segments[0] {
         case "message":
             guard try ctx.access.isVisible(messageID: id, store: ctx.store) else {
+                ctx.access.endRequest(tool: "read_resource", query: uri, resultCount: nil)
                 throw ArchiveTools.ToolError.notFound("message id \(id)")
             }
             value = try messageJSON(id: id, ctx: ctx)
         case "thread":
             guard try ctx.access.threadIsVisible(threadID: id, store: ctx.store) else {
+                ctx.access.endRequest(tool: "read_resource", query: uri, resultCount: nil)
                 throw ArchiveTools.ToolError.notFound("thread id \(id)")
             }
             value = try threadJSON(id: id, ctx: ctx)
         default:
+            ctx.access.endRequest(tool: "read_resource", query: uri, resultCount: nil)
             throw ArchiveTools.ToolError.badArguments(
                 "unknown resource kind: \(segments[0])"
             )
         }
         let text = ArchiveTools.render(value)
+        ctx.access.endRequest(tool: "read_resource", query: uri, resultCount: 1)
         return ReadResource.Result(
             contents: [
                 .text(text, uri: uri, mimeType: "application/json")

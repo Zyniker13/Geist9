@@ -42,18 +42,32 @@ body, snippets, and rendered text are withheld and the response carries an
 explicit `body_omitted: true` marker: absence alone would be
 indistinguishable from "no body was stored".
 
+**The master switch.** `enabled: false` (the app writes it when the person
+turns agents off in Settings) refuses every tool call and resource read
+with a distinct error — agents-off -32003, message "agents are turned off
+in Bristlecone Email Archiver's Settings" — before any rate-limit slot is
+spent, so the person can copy a configuration only while the switch is on
+and an agent pointed at a disabled archive learns that rather than
+thrashing on failures. Absent from the JSON it defaults to true.
+`tools/list` stays static: refusing schema advertisement would only break
+client setup steps without protecting any message.
+
 **Refusals.** Rate limiting (`callsPerMinute`, enforced at dispatch) and
 tool errors map onto JSON-RPC errors with readable messages — bad arguments
--32602, unknown tool -32601, not found -32002, rate limited -32000 — never
-the SDK's opaque "Internal error". A hidden id answers exactly as an
-unknown one (`notFound`), at every surface: tools, resources, threads,
-attachments, contacts. A partially visible thread answers as a thread whose
-messages are the visible ones, with the subject taken from the first
-visible message; a fully hidden thread does not exist.
+-32602, unknown tool -32601, rate limited -32000, not found -32002, agents
+off -32003 — never the SDK's opaque "Internal error". A hidden id answers
+exactly as an unknown one (`notFound`), at every surface: tools, resources,
+threads, attachments, contacts. A partially visible thread answers as a
+thread whose messages are the visible ones, with the subject taken from the
+first visible message; a fully hidden thread does not exist.
 
-**Accountability.** Every tool call and resource read is appended to a
-local activity log (time, tool, arguments shape, result count); the log is
-best-effort and never records returned content.
+**Accountability.** Every tool call and every resource read passes one gate
+(`AccessContext.beginRequest`/`endRequest`): the master switch, then the
+rate limit (one shared bucket — listings and reads of resources count
+toward it, or an agent could pull whole mailboxes around a tight tool
+budget), then the activity log (time, tool, arguments shape, result count;
+refusals log too). The log is best-effort and never records returned
+content.
 
 ## Consequences
 

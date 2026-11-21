@@ -158,6 +158,29 @@ final class AccessControlTests: XCTestCase {
         XCTAssertFalse(try store.messageIsVisible(messageID: f.hiddenAccount, visibility: vis))
     }
 
+    /// The master switch: `enabled: false` is how the app turns agents
+    /// off; absent from the JSON it must default to true so hand-written
+    /// policies and older files keep working.
+    func testEnabledDefaultsToTrueAndSurvivesRoundTrip() throws {
+        let absent = try JSONDecoder().decode(
+            AccessPolicy.self,
+            from: Data(#"{"excludeJunkAndTrash":false}"#.utf8)
+        )
+        XCTAssertTrue(absent.enabled)
+
+        let off = try JSONDecoder().decode(
+            AccessPolicy.self,
+            from: Data(#"{"excludeJunkAndTrash":false,"enabled":false}"#.utf8)
+        )
+        XCTAssertFalse(off.enabled)
+
+        let back = try JSONDecoder().decode(
+            AccessPolicy.self,
+            from: try JSONEncoder().encode(off)
+        )
+        XCTAssertFalse(back.enabled)
+    }
+
     func testUnknownNamesStaySilentAndPermissivePolicySeesAll() throws {
         let (store, f) = try makeArchive()
 

@@ -43,6 +43,9 @@ public enum ArchiveTools {
         case badArguments(String)
         case notFound(String)
         case rateLimited
+        /// The person turned agents off in the app; every request refuses
+        /// with this, tools and resources alike.
+        case disabled
 
         var description: String {
             switch self {
@@ -51,6 +54,8 @@ public enum ArchiveTools {
             case .notFound(let what): return "not found: \(what)"
             case .rateLimited:
                 return "rate limit exceeded: too many tool calls this minute"
+            case .disabled:
+                return "agents are turned off in Bristlecone Email Archiver's Settings"
             }
         }
     }
@@ -296,21 +301,16 @@ public enum ArchiveTools {
     static func call(
         _ name: String, arguments: [String: Value], ctx: ToolContext
     ) throws -> CallTool.Result {
-        guard ctx.access.rateLimiter.allowCall() else {
-            ctx.access.activityLog.record(
-                tool: name, query: queryString(arguments), resultCount: nil)
-            throw ToolError.rateLimited
-        }
+        try ctx.access.beginRequest(tool: name, query: queryString(arguments))
         let result: Value
         do {
             result = try dispatch(name, arguments: arguments, ctx: ctx)
         } catch {
-            ctx.access.activityLog.record(
-                tool: name, query: queryString(arguments), resultCount: nil)
+            ctx.access.endRequest(tool: name, query: queryString(arguments), resultCount: nil)
             throw error
         }
         let text = render(result)
-        ctx.access.activityLog.record(
+        ctx.access.endRequest(
             tool: name, query: queryString(arguments), resultCount: resultCount(result))
         return try CallTool.Result(
             content: [.text(text: text, annotations: nil, _meta: nil)],

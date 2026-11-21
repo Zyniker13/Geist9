@@ -39,6 +39,10 @@ public struct AccessPolicy: Sendable, Equatable {
     public var maxCharsPerCall: Int
     /// Tool calls per minute before the server answers 429-shaped errors.
     public var callsPerMinute: Int
+    /// Whether agents may use this archive at all. The app writes `false`
+    /// when the person turns agents off in Settings; the helper then
+    /// refuses every request. Defaults true when absent from the JSON.
+    public var enabled: Bool = true
 
     public static let `default` = AccessPolicy(
         excludeJunkAndTrash: true,
@@ -48,7 +52,8 @@ public struct AccessPolicy: Sendable, Equatable {
         redaction: .none,
         maxResultsPerCall: 100,
         maxCharsPerCall: 200_000,
-        callsPerMinute: 60
+        callsPerMinute: 60,
+        enabled: true
     )
 }
 
@@ -62,6 +67,7 @@ extension AccessPolicy: Codable {
         case maxResultsPerCall
         case maxCharsPerCall
         case callsPerMinute
+        case enabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -86,6 +92,8 @@ extension AccessPolicy: Codable {
         let calls = try container.decodeIfPresent(
             Int.self, forKey: .callsPerMinute) ?? base.callsPerMinute
         self.callsPerMinute = max(1, calls)
+        self.enabled = try container.decodeIfPresent(
+            Bool.self, forKey: .enabled) ?? true
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -98,6 +106,7 @@ extension AccessPolicy: Codable {
         try container.encode(maxResultsPerCall, forKey: .maxResultsPerCall)
         try container.encode(maxCharsPerCall, forKey: .maxCharsPerCall)
         try container.encode(callsPerMinute, forKey: .callsPerMinute)
+        try container.encode(enabled, forKey: .enabled)
     }
 }
 

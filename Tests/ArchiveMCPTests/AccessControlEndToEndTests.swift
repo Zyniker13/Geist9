@@ -420,6 +420,54 @@ final class AccessControlEndToEndTests: XCTestCase {
         let text = try policyStr(try policyDict(second["error"])["message"])
         XCTAssertTrue(text.contains("rate limit"), "the refusal says why: \(text)")
     }
+
+    // MARK: - 6. Agents off entirely
+
+    /// The app's master switch: `enabled: false` refuses every tool call
+    /// and every resource read with its own error (not "rate limit", not
+    /// "not found"), and the refusal still reads as a sentence. Schema
+    /// advertisement (`tools/list`) stays static so the client's setup
+    /// steps don't break while agents are off.
+    func testDisabledPolicyRefusesToolsAndResources() throws {
+        _ = try makeFilteredFixture()
+        let executable = try helperExecutableURL()
+        let client = try StdioMCPClient(
+            executable: executable, archivePath: archiveURL.path,
+            extraEnvironment: ["BRISTLECONE_ACCESS_POLICY": try writePolicyFile(
+                """
+                {"excludeJunkAndTrash": false, "enabled": false}
+                """
+            )]
+        )
+        defer { client.shutdown() }
+        process = client.process
+
+        try client.requestResult("initialize", params: [
+            "protocolVersion": "2025-06-18",
+            "capabilities": [String: Any](),
+            "clientInfo": ["name": "geist9-policy-test", "version": "0.0.0"],
+        ])
+        client.notify("notifications/initialized")
+
+        let listing = try client.requestResult("tools/list", params: [String: Any]())
+        XCTAssertFalse(try policyArray(listing["tools"]).isEmpty)
+
+        let call = try client.request("tools/call", params: [
+            "name": "archive_stats", "arguments": [String: Any](),
+        ])
+        let callError = try policyDict(call["error"])
+        XCTAssertEqual(try policyInt(callError["code"]), -32003)
+        XCTAssertTrue(
+            try policyStr(callError["message"]).contains("turned off"),
+            "the refusal names the switch: \(callError["message"] ?? "")"
+        )
+
+        let read = try client.request("resources/read", params: [
+            "uri": "emailarchiver://message/1",
+        ])
+        let readError = try policyDict(read["error"])
+        XCTAssertEqual(try policyInt(readError["code"]), -32003)
+    }
 }
 
 private struct PolicyE2EError: Error, CustomStringConvertible {

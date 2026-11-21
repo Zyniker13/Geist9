@@ -208,7 +208,7 @@ public final class ArchiveMCPServer: Sendable {
     /// Map our tool errors onto JSON-RPC errors so callers read a sentence
     /// ("rate limit exceeded: …", "not found: …") instead of the SDK's
     /// opaque "Internal error" fallback. The codes are server-side ranges:
-    /// -32602 for bad arguments, -32601 for unknown tools, -32000..-32002
+    /// -32602 for bad arguments, -32601 for unknown tools, -32000..-32003
     /// for the domain refusals.
     private static func toolErrorAsRPC<T>(_ body: () throws -> T) throws -> T {
         do {
@@ -223,6 +223,8 @@ public final class ArchiveMCPServer: Sendable {
                 throw MCPError.serverError(code: -32002, message: error.description)
             case .rateLimited:
                 throw MCPError.serverError(code: -32000, message: error.description)
+            case .disabled:
+                throw MCPError.serverError(code: -32003, message: error.description)
             }
         }
     }
