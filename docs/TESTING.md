@@ -18,6 +18,8 @@ The project's priority order: data safety, then security, then correctness, then
 | Round trip | Import then export each format, byte-compare; restore to a Dovecot server and compare | Linux and Mac |
 | UI | XCUITest for onboarding per provider type, search, viewer, import, export | Mac |
 | Migration | Every released archive and index version opened by the new build | Mac and Linux |
+| MCP | The stdio helper end to end over real stdio JSON-RPC against a fixture archive built through the public ingest path: every tool's contract (DESIGN 9A), access policies (excluded accounts, folders, labels, redaction, budgets, fail-closed launch) over the wire, untrusted-content wrapping and hidden-text stripping on every returned surface | Linux and macOS CI |
+| MCP conformance | The official MCP inspector (pinned version) drives the built helper against a fixture: `tools/list` returns exactly the DESIGN 9A tools, `search_messages` returns a fenced hit, `resources/read` returns a fenced document linked to its thread, unknown tools are refused with `-32601`, `resources/list` matches the fixture | macOS CI (the Linux container has no node; the protocol contract itself is pinned on both platforms by the MCP unit tests above) |
 
 Search budgets are in [DESIGN.md](DESIGN.md#search-quality-testing) and enforced from M2. Other budgets enforced in CI from M7: sync parsing at least 200 messages per second on an Apple silicon Mac mini, steady memory under 500 MB during a full sync.
 
