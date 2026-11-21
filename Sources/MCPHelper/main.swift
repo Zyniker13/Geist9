@@ -9,6 +9,10 @@ do {
     try await helper.run()
 } catch {
     // stderr only: stdout is the protocol channel (DESIGN 9A).
-    fputs("email-archiver-mcp: \(error)\n", stderr)
+    // FileHandle.standardError rather than the C `stderr` global: Glibc's
+    // stderr is shared mutable state, which Swift 6 language mode rejects
+    // (the Linux build failed on exactly that).
+    let message = "email-archiver-mcp: \(error)\n"
+    FileHandle.standardError.write(message.data(using: .utf8) ?? Data())
     exit(1)
 }
