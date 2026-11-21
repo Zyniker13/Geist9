@@ -450,6 +450,11 @@ public enum IndexSchema {
         }
     }
 
+    /// Number of migrations the current build applies. A read-only reader
+    /// (the MCP helper, DESIGN 9A) checks the archive against this count
+    /// before serving, because readers never migrate.
+    public static var migrationTargetCount: Int { migrator().migrations.count }
+
     public static func openDatabase(at url: URL) throws -> DatabasePool {
         var configuration = Configuration()
         configuration.busyMode = .timeout(10)

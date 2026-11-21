@@ -171,11 +171,12 @@ let coreTargets: [Target] = [
     .target(name: "ArchiveExtract", dependencies: ["CZlib"]),
     // envelope, SQLCipher glue (DESIGN 10)
     .target(name: "ArchiveCrypto"),
-    // MCP server: tools, resources, access policy (DESIGN 9A); the protocol
-    // and transport layers come from the official swift-sdk (decision 0051).
+    // MCP server: tools, resources, access policy (DESIGN 9A); reads the
+    // archive through ArchiveCore (openReadOnly, queries) over the protocol
+    // and transport layers of the official swift-sdk (decision 0051).
     .target(
         name: "ArchiveMCP",
-        dependencies: [.product(name: "MCP", package: "swift-sdk")]
+        dependencies: ["ArchiveCore", .product(name: "MCP", package: "swift-sdk")]
     ),
     // stdio MCP executable (DESIGN 9A): cross-platform sources here so the
     // Linux end-to-end contract test can launch the same helper; the app

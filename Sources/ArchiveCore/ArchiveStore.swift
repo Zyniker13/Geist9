@@ -67,6 +67,45 @@ public final class ArchiveStore: Sendable {
         return ArchiveStore(directory: directory, manifest: manifest, db: db)
     }
 
+    /// Opens an existing archive strictly read-only, for readers that must
+    /// never write: the MCP helper (DESIGN 9A), scripts, tests.
+    ///
+    /// The manifest is validated and the index is opened with SQLite's
+    /// read-only mode, so any attempted write fails at the database layer.
+    /// Unlike `open`, this never migrates, never creates directories, and
+    /// never touches a byte of the archive: if the index is behind the
+    /// current schema the open fails with `schemaBehind` and the person is
+    /// asked to open the archive in the app once so it can upgrade.
+    public static func openReadOnly(at directory: URL) throws -> ArchiveStore {
+        let manifestURL = directory.appendingPathComponent(manifestName)
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+            throw ArchiveError.notAnArchive
+        }
+        let manifest = try ArchiveManifest.read(from: manifestURL)
+        var configuration = Configuration()
+        configuration.readonly = true
+        configuration.busyMode = .timeout(10)
+        configuration.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA mmap_size = 1073741824")
+        }
+        let db = try DatabasePool(
+            path: directory.appendingPathComponent(indexName).path, configuration: configuration
+        )
+        try verifySchemaCurrent(db)
+        return ArchiveStore(directory: directory, manifest: manifest, db: db)
+    }
+
+    /// Read-only readers never migrate: refuse instead (DESIGN 9A).
+    static func verifySchemaCurrent(_ db: DatabasePool) throws {
+        let target = IndexSchema.migrationTargetCount
+        let applied = try db.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM grdb_migrations") ?? 0
+        }
+        guard applied == target else {
+            throw ArchiveError.schemaBehind(applied: applied, target: target)
+        }
+    }
+
     init(directory: URL, manifest: ArchiveManifest, db: DatabasePool) {
         self.directory = directory
         self.manifest = manifest

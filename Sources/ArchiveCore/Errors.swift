@@ -20,4 +20,8 @@ public enum ArchiveError: Error, Equatable, Sendable {
     case invalidSavedSearchName
     /// A saved search needs a non-empty query.
     case invalidSavedSearchQuery
+    /// A read-only reader met an archive whose schema is not at the current
+    /// version: the app migrates, readers never do. `applied` is the number
+    /// of migrations the archive has, `target` what this build expects.
+    case schemaBehind(applied: Int, target: Int)
 }
