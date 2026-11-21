@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 12
+    public static let version = 13
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -34,6 +34,7 @@ public enum IndexSchema {
         ("core-v12", coreV12),
         ("core-v13", coreV13),
         ("core-v14", coreV14),
+        ("core-v15", coreV15),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -436,6 +437,17 @@ public enum IndexSchema {
             on: "message_embedding",
             columns: ["model", "cluster", "id"]
         )
+    }
+
+    /// core-v15: pausable OCR queue (decision 0050). `attachment.text`
+    /// stores the OCR text once the queue runs; `textState` (added in
+    /// core-v1) moves from `pending` to `done` / `noText` when the queue
+    /// finishes a part. Existing rows keep `text = NULL` and their current
+    /// `textState`; the queue only touches `pending` rows.
+    private static func coreV15(_ db: Database) throws {
+        try db.alter(table: "attachment") { t in
+            t.add(column: "text", .text)
+        }
     }
 
     public static func openDatabase(at url: URL) throws -> DatabasePool {

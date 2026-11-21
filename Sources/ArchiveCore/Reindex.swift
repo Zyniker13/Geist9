@@ -107,11 +107,48 @@ extension ArchiveStore {
     /// text tables, stamp the version. The message row itself (hash, size,
     /// headers) is never rewritten; a message whose bytes cannot be read or
     /// parsed today is skipped and left for a future pipeline version.
-    func reindexMessage(id: Int64, hash: Data) throws {
+    /// OCR text is composed from the stored `attachment.text` (decision
+    /// 0050, `.stored` mode): a part the queue has finished (`done` /
+    /// `noText`) is taken from storage and never re-run. A part still
+    /// `pending` has no stored result: a version-bump backfill falls back
+    /// to running the engine inline so no already-extracted text is ever
+    /// lost (older archives never stored text), while the queue's own
+    /// per-part reindex composes strictly from storage
+    /// (`allowInlineOCRFallback: false`) so it never double-OCRs the
+    /// message's other pending parts.
+    func reindexMessage(
+        id: Int64, hash: Data, allowInlineOCRFallback: Bool = true
+    ) throws {
         guard hash.count == 32, id > 0 else { return }
         let url = fileURL(for: MessageHash(bytes: hash))
         guard let data = try? Data(contentsOf: url) else { return }
-        let parsed = MailBridge.parse(for: data)
+        // Read the stored OCR results (decision 0050): the parts the queue
+        // has finished — `done` with text, `noText` with an empty result.
+        // Parts still `pending` have no entry here; the closure below
+        // decides whether they fall back to the engine.
+        let storedOCR: [String: String] = try db.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                SELECT partIndex, COALESCE(text, '') AS text
+                FROM attachment
+                WHERE messageID = ? AND textState IN ('done', 'noText')
+                """,
+                arguments: [id]
+            ).reduce(into: [String: String]()) { result, row in
+                if let partIndex = row["partIndex"] as? String, let text = row["text"] as? String {
+                    result[partIndex] = text
+                }
+            }
+        }
+        let parsed = MailBridge.parse(for: data, ocr: .stored { [storedOCR, allowInlineOCRFallback] partIndex in
+            if let text = storedOCR[partIndex] { return text }
+            // Unfinished part: a backfill runs the engine inline (nil) so no
+            // already-extracted text is ever lost; the queue's own reindex
+            // composes strictly from storage ("") and never double-OCRs the
+            // message's other pending parts.
+            return allowInlineOCRFallback ? nil : ""
+        })
         let tokens = SearchTokens(IngestedMessage(
             record: parsed.record,
             data: data,

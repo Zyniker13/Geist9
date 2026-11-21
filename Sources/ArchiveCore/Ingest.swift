@@ -473,12 +473,26 @@ extension ArchiveStore {
                 }
             }
 
+            // Decision 0050: `pending` means "OCR deferred, the queue has not
+            // run this part yet"; `done` means "extraction finished, the text
+            // lives in the index and is recomputable from the stored bytes
+            // without the OCR engine". Eligibility is derived from the row's
+            // own content type and filename — the same predicate the
+            // extractors use — so the state never depends on a caller
+            // remembering to hand-carry a list. The conflict clause never
+            // touches textState or text: re-ingesting a message never resets
+            // a queue result.
             for attachment in message.attachments {
+                let ocrEligible = MailBridge.isOcrCandidate(
+                    main: attachment.contentType,
+                    filename: attachment.filename
+                )
+                let textState = ocrEligible ? "pending" : "done"
                 try db.execute(
                     sql: """
                     INSERT INTO attachment
                         (messageID, partIndex, filename, contentType, contentID, size, textState)
-                    VALUES (?, ?, ?, ?, ?, ?, 'pending')
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(messageID, partIndex) DO UPDATE SET
                         filename = excluded.filename,
                         contentType = excluded.contentType,
@@ -492,6 +506,7 @@ extension ArchiveStore {
                         attachment.contentType,
                         attachment.contentID,
                         attachment.size,
+                        textState,
                     ]
                 )
             }

@@ -146,6 +146,58 @@ final class ArchiveStoreTests: XCTestCase {
         XCTAssertEqual(try count(store, "SELECT COUNT(*) FROM message"), 2)
     }
 
+    func testIndexMigratesV14ArchiveToV15AttachmentText() throws {
+        // Simulate an archive written before the pausable OCR queue
+        // (decision 0050): index at core-v14 with an attachment row and no
+        // `text` column. Opening it must run core-v15 (add attachment.text)
+        // without touching the stored row, and the migrated schema must
+        // accept the queue's write of the stored text.
+        _ = try ArchiveStore.create(at: archiveURL, appVersion: "0.1.0")
+
+        let indexURL = archiveURL.appendingPathComponent(ArchiveStore.indexName)
+        let pool = try DatabasePool(path: indexURL.path)
+        try IndexSchema.migrator(through: "core-v14").migrate(pool)
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO message (hash, size, subject, normalizedSubject, dateSent, messageID, fromEmail)
+                VALUES (x'01020304', 12, 'Old subject', 'old subject',
+                        '2024-03-05T14:23:01Z', '<old@example.com>', 'alice@example.com')
+                """
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO attachment (messageID, partIndex, filename, contentType, size, textState)
+                VALUES (1, '2.1', 'scan.png', 'image/png', 4096, 'pending')
+                """
+            )
+        }
+
+        let store = try ArchiveStore.open(at: archiveURL)
+        let row = try singleRow(
+            store,
+            "SELECT partIndex, filename, contentType, size, textState, text, textVersion FROM attachment"
+        )
+        XCTAssertEqual(row["partIndex"] as? String, "2.1")
+        XCTAssertEqual(row["filename"] as? String, "scan.png")
+        XCTAssertEqual(row["contentType"] as? String, "image/png")
+        XCTAssertEqual(row["size"] as? Int64, 4096)
+        XCTAssertEqual(row["textState"] as? String, "pending")
+        // The new column exists (added by core-v15) and is NULL for the old
+        // row; the row itself was not rewritten.
+        XCTAssertNil(row["text"] as? String)
+        XCTAssertNil(row["textVersion"] as? Int64)
+        // The migrated schema accepts the queue's write of the stored text.
+        try store.db.write { db in
+            try db.execute(
+                sql: "UPDATE attachment SET text = 'scanned text', textState = 'done' WHERE partIndex = '2.1'"
+            )
+        }
+        let updated = try singleRow(store, "SELECT text, textState FROM attachment")
+        XCTAssertEqual(updated["text"] as? String, "scanned text")
+        XCTAssertEqual(updated["textState"] as? String, "done")
+    }
+
     func testOpenRejectsNonArchiveDirectory() throws {
         try FileManager.default.createDirectory(at: archiveURL, withIntermediateDirectories: true)
         XCTAssertThrowsError(try ArchiveStore.open(at: archiveURL)) { error in

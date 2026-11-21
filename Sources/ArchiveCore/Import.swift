@@ -249,7 +249,7 @@ public enum MailImporter {
                 let relative = file.path(relativeTo: root)
                 let derived = relative.split(separator: "/").dropLast().joined(separator: "/")
                 let box = mailbox ?? (derived.isEmpty ? "Imported" : derived)
-                let parsed = MailBridge.parse(for: data)
+                let parsed = MailBridge.parse(for: data, ocr: .deferred)
                 let result = try ingestOne(
                     store, data: data, parsed: parsed, importSource: "eml",
                     account: account,
@@ -283,7 +283,7 @@ public enum MailImporter {
         do {
             let data = try Data(contentsOf: url)
             let box = mailbox ?? "Imported"
-            let parsed = MailBridge.parse(for: data)
+            let parsed = MailBridge.parse(for: data, ocr: .deferred)
             let result = try ingestOne(
                 store, data: data, parsed: parsed, importSource: "eml",
                 account: account,
@@ -339,7 +339,7 @@ public enum MailImporter {
             report.messagesFound += 1
             do {
                 let data = Data(message.data)
-                let parsed = MailBridge.parse(for: data)
+                let parsed = MailBridge.parse(for: data, ocr: .deferred)
                 let arrival = message.envelopeDate ?? now
                 let result = try ingestOne(
                     store, data: data, parsed: parsed, importSource: importSource,
@@ -416,7 +416,7 @@ public enum MailImporter {
                 report.messagesFound += 1
                 do {
                     let data = try EmlxFile.messageBytes(from: file)
-                    let parsed = MailBridge.parse(for: data)
+                    let parsed = MailBridge.parse(for: data, ocr: .deferred)
                     let result = try ingestOne(
                         store, data: data, parsed: parsed, importSource: "apple-mail",
                         account: account,
@@ -467,7 +467,7 @@ public enum MailImporter {
         report.messagesFound = 1
         do {
             let data = try EmlxFile.messageBytes(from: url)
-            let parsed = MailBridge.parse(for: data)
+            let parsed = MailBridge.parse(for: data, ocr: .deferred)
             let result = try ingestOne(
                 store, data: data, parsed: parsed, importSource: "apple-mail",
                 account: account,

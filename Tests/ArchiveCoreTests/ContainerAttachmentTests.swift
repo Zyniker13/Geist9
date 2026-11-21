@@ -698,6 +698,183 @@ final class ContainerAttachmentTests: XCTestCase {
             "the v10 backfill must restore OCR text: \(attachments)"
         )
     }
+
+    // MARK: - Pausable OCR queue (decision 0050)
+
+    func testImportDefersOCR() throws {
+        let pngBytes = Container.png(["Scanned receipt from Harbor Lane"])
+        let data = Data(Container.message(
+            id: "defer-ocr@example.com", mimeType: "image/png",
+            filename: "receipt.png", attachment: pngBytes
+        ).utf8)
+        // The import path uses .deferred: the search text has no OCR text,
+        // and the part is OCR-eligible by its own content type and filename
+        // (decision 0050: ingest derives the queue state from this
+        // predicate, not from a caller-supplied list).
+        let parsed = MailBridge.parse(for: data, ocr: .deferred)
+        let attachments = parsed.searchText.attachments ?? ""
+        XCTAssertFalse(attachments.contains("Harbor Lane"),
+            "deferred mode must not run OCR inline: \(attachments)")
+        XCTAssertTrue(
+            MailBridge.isOcrCandidate(main: "image/png", filename: "receipt.png"),
+            "the receipt part must be OCR-eligible by content type and filename"
+        )
+        XCTAssertFalse(
+            MailBridge.isOcrCandidate(main: "text/csv", filename: "report.csv"),
+            "a CSV attachment is not OCR-eligible"
+        )
+    }
+
+    func testOCRQueueProcessesPendingParts() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-ocrq-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try ArchiveStore.create(at: tempDir.appendingPathComponent("C.emailarchive"), appVersion: "0.1.0")
+
+        let pngBytes = Container.png(["Scanned receipt from Harbor Lane"])
+        let data = Data(Container.message(
+            id: "queue-ocr@example.com", mimeType: "image/png",
+            filename: "receipt.png", attachment: pngBytes
+        ).utf8)
+        let parsed = MailBridge.parse(for: data, ocr: .deferred)
+        let message = IngestedMessage(
+            record: parsed.record,
+            data: data,
+            memberships: [Membership(mailbox: "INBOX", flags: [])],
+            labels: [],
+            attachments: parsed.attachments,
+            providerThreadID: nil,
+            searchText: parsed.searchText
+        )
+        let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+        guard case .created(let id) = try store.ingest(message, into: account) else {
+            return XCTFail("ingest must create")
+        }
+
+        // Before the queue runs, the search text has no OCR text.
+        let before = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT attachments FROM message_text WHERE rowid = ?", arguments: [id]
+            )
+        }
+        let beforeText = before ?? ""
+        XCTAssertFalse(beforeText.contains("harbor"),
+            "before the queue, no OCR text: \(beforeText)")
+
+        // Ingest marked the OCR-eligible part pending (decision 0050: the
+        // state is derived from the row's own content type and filename).
+        let pendingState = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT textState FROM attachment WHERE messageID = ?", arguments: [id]
+            )
+        }
+        XCTAssertEqual(pendingState, "pending",
+            "ingest must defer OCR-eligible parts: \(pendingState ?? "nil")")
+
+        // The queue runs the OCR and re-indexes the message.
+        let queue = OCRQueue(store: store)
+        let processed = try queue.process(limit: 10)
+        XCTAssertEqual(processed, 1, "the queue must process the pending part")
+
+        // The textState is now done.
+        let state = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT textState FROM attachment WHERE messageID = ?", arguments: [id]
+            )
+        }
+        XCTAssertEqual(state, "done", "the textState must be done: \(state ?? "nil")")
+
+        // The search text now includes the OCR text.
+        let after = try store.db.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT attachments FROM message_text WHERE rowid = ?", arguments: [id]
+            )
+        }
+        let afterText = after ?? ""
+        XCTAssertTrue(afterText.contains("harbor"),
+            "after the queue, the OCR text must be indexed: \(afterText)")
+    }
+
+    func testOCRQueueIsPausable() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-ocrq-p-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let store = try ArchiveStore.create(at: tempDir.appendingPathComponent("C.emailarchive"), appVersion: "0.1.0")
+
+        // Two messages with OCR-eligible parts.
+        for (i, id) in ["pausable-a@example.com", "pausable-b@example.com"].enumerated() {
+            let pngBytes = Container.png(["Scanned receipt \(i) from Harbor Lane"])
+            let data = Data(Container.message(
+                id: id, mimeType: "image/png",
+                filename: "receipt-\(i).png", attachment: pngBytes
+            ).utf8)
+            let parsed = MailBridge.parse(for: data, ocr: .deferred)
+            let message = IngestedMessage(
+                record: parsed.record,
+                data: data,
+                memberships: [Membership(mailbox: "INBOX", flags: [])],
+                labels: [],
+                attachments: parsed.attachments,
+                providerThreadID: nil,
+                searchText: parsed.searchText
+            )
+            let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+            _ = try store.ingest(message, into: account)
+        }
+
+        // Pause the queue before processing: nothing is processed.
+        let queue = OCRQueue(store: store)
+        queue.pause()
+        let processed = try queue.process(limit: 10)
+        XCTAssertEqual(processed, 0, "a paused queue must not process parts")
+
+        // Resume and process: both parts are processed.
+        queue.resume()
+        let processed2 = try queue.process(limit: 10)
+        XCTAssertEqual(processed2, 2, "a resumed queue must process both parts")
+    }
+
+    func testOCRQueueIsPersistent() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("geist9-ocrq-r-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let storeURL = tempDir.appendingPathComponent("C.emailarchive")
+        let store = try ArchiveStore.create(at: storeURL, appVersion: "0.1.0")
+
+        // Two messages with OCR-eligible parts.
+        for (i, id) in ["persist-a@example.com", "persist-b@example.com"].enumerated() {
+            let pngBytes = Container.png(["Scanned receipt \(i) from Harbor Lane"])
+            let data = Data(Container.message(
+                id: id, mimeType: "image/png",
+                filename: "receipt-\(i).png", attachment: pngBytes
+            ).utf8)
+            let parsed = MailBridge.parse(for: data, ocr: .deferred)
+            let message = IngestedMessage(
+                record: parsed.record,
+                data: data,
+                memberships: [Membership(mailbox: "INBOX", flags: [])],
+                labels: [],
+                attachments: parsed.attachments,
+                providerThreadID: nil,
+                searchText: parsed.searchText
+            )
+            let account = AccountIdentity(email: "alice@example.com", displayName: "Alice", providerKind: "import")
+            _ = try store.ingest(message, into: account)
+        }
+
+        // Process one part, then "restart" (a new queue on the same store).
+        let queue1 = OCRQueue(store: store)
+        let processed1 = try queue1.process(limit: 1)
+        XCTAssertEqual(processed1, 1, "the first run must process one part")
+
+        // A new queue (simulating a restart) resumes where it stopped.
+        let queue2 = OCRQueue(store: store)
+        let processed2 = try queue2.process(limit: 10)
+        XCTAssertEqual(processed2, 1, "the second run must process the remaining part")
+    }
 #endif
 
     // MARK: - Nested message/rfc822 (M2.3)

@@ -34,6 +34,19 @@ public struct SearchText: Sendable, Equatable {
     }
 }
 
+/// How `MailBridge.parse` handles OCR-eligible attachments (PDF, image).
+/// `.inline` runs the on-device OCR during the parse (the relevance eval,
+/// `record(for:)`); `.deferred` skips the OCR text and leaves it to the
+/// queue (the import path — the attachment rows are marked `pending` and
+/// the queue runs the OCR later); `.stored` composes the text from a
+/// stored result (reindexing, which never re-runs the engine unless a
+/// backfill needs it).
+public enum AttachmentOCR: Sendable {
+    case inline
+    case deferred
+    case stored(@Sendable (String) -> String?)
+}
+
 public enum MailBridge {
     /// Everything the index needs from one message, parsed in a single pass
     /// over the bytes. Import formats call this once per message; `record(for:)`
@@ -54,8 +67,12 @@ public enum MailBridge {
     }
 
     /// Parses message bytes into everything the index stores, in one pass.
-    /// Never throws: unparseable headers simply stay nil.
-    public static func parse(for data: Data) -> ParsedMail {
+    /// Never throws: unparseable headers simply stay nil. `ocr` controls how
+    /// OCR-eligible attachments (PDF, image) are handled (decision 0050):
+    /// `.inline` runs the on-device OCR during the parse, `.deferred` records
+    /// the parts and defers the OCR to the queue, `.stored` composes the text
+    /// from a stored result.
+    public static func parse(for data: Data, ocr: AttachmentOCR = .inline) -> ParsedMail {
         let block = HeaderScanner.scan(data)
         let headers = Headers(block)
 
@@ -82,7 +99,7 @@ public enum MailBridge {
         var searchText = SearchText(body: nil, quoted: nil)
         if let root = try? parseRoot(data) {
             walk(root, path: "", into: &attachments)
-            searchText = extractSearchText(root)
+            searchText = extractSearchText(root, ocr: ocr)
         }
 
         var gmailLabels: [String] = []
@@ -182,7 +199,9 @@ public enum MailBridge {
         return extractSearchText(root)
     }
 
-    static func extractSearchText(_ root: MIMEPart) -> SearchText {
+    /// The search text of one parsed tree. `ocr` controls how OCR-eligible
+    /// attachments are handled (decision 0050).
+    static func extractSearchText(_ root: MIMEPart, ocr: AttachmentOCR = .inline) -> SearchText {
         var plain: String? = nil
         var html: String? = nil
         walkTextBodies(root) { part in
@@ -195,7 +214,7 @@ public enum MailBridge {
                 html = text
             }
         }
-        let attachments = extractAttachmentText(root)
+        let attachments = extractAttachmentText(root, ocr: ocr)
         let source: String
         if let plain, !plain.isEmpty {
             source = plain
@@ -281,19 +300,22 @@ public enum MailBridge {
     static let maxAttachmentTextLength = 1_000_000
 
     /// The searchable text of the message's attachment parts (decision
-    /// 0029, extended by 0036 and 0044): text/* parts in part order,
-    /// HTML reduced, RTF and the structured text formats (CSV,
-    /// iCalendar, vCard) decoded deliberately, the names of ZIP
-    /// attachments, plus the extracted text of Office Open XML,
-    /// OpenDocument and iWork container attachments, capped at
-    /// `maxAttachmentTextLength`. Per the
+    /// 0029, extended by 0036, 0044 and 0050): text/* parts in part order,
+    /// HTML reduced, RTF and the structured text formats (CSV, iCalendar,
+    /// vCard) decoded deliberately, the names of ZIP attachments, plus the
+    /// extracted text of Office Open XML, OpenDocument and iWork container
+    /// attachments, capped at `maxAttachmentTextLength`. OCR-eligible parts
+    /// (PDF, image) are handled per `ocr` (decision 0050). Per the
     /// DESIGN 6 attachment rule a leaf counts as an attachment when its
     /// disposition says so; text leaves without a disposition are the body,
     /// which the body columns already cover. A container that cannot be
     /// read strictly yields no text (decision 0036): the part is still
     /// listed in the attachment row, but nothing silently wrong reaches the
     /// index.
-    static func extractAttachmentText(_ root: MIMEPart) -> String? {
+    static func extractAttachmentText(
+        _ root: MIMEPart,
+        ocr: AttachmentOCR = .inline
+    ) -> String? {
         var pieces: [String] = []
         var total = 0
         // Nested message/rfc822 prose first (decision 0041), then the
@@ -305,49 +327,49 @@ public enum MailBridge {
             total += clipped.count
             if !clipped.isEmpty { pieces.append(clipped) }
         }
-        walkLeaves(root) { part in
+        walkBodies(root, path: "") { partIndex, part in
             guard total < Self.maxAttachmentTextLength else { return }
             guard part.contentDisposition["content-disposition"] == "attachment" else { return }
             let (main, parameters) = part.contentType
+            let filename = decodedFilename(part)
+            let data = part.decodedBody
             let text: String
             if let extracted = rtfAttachmentText(
                 main: main,
-                filename: decodedFilename(part),
-                data: part.decodedBody
+                filename: filename,
+                data: data
             ) {
                 text = extracted
             } else if let extracted = structuredAttachmentText(
                 main: main,
-                filename: decodedFilename(part),
-                data: part.decodedBody
+                filename: filename,
+                data: data
             ) {
                 text = extracted
             } else if main.hasPrefix("text/") {
-                let decoded = Charset.decode(parameters["charset"], Array(part.decodedBody))
+                let decoded = Charset.decode(parameters["charset"], Array(data))
                 text = main == "text/html" ? htmlToText(decoded) : decoded
-            } else if let extracted = pdfAttachmentText(
-                main: main,
-                filename: decodedFilename(part),
-                data: part.decodedBody
-            ) {
-                text = extracted
-            } else if let extracted = imageAttachmentText(
-                main: main,
-                filename: decodedFilename(part),
-                data: part.decodedBody
-            ) {
-                text = extracted
+            } else if Self.isOcrCandidate(main: main, filename: filename) {
+                // PDF or image (decision 0050): OCR, handled per `ocr`.
+                guard let ocrText = Self.ocrText(
+                    main: main,
+                    filename: filename,
+                    data: data,
+                    partIndex: partIndex,
+                    ocr: ocr
+                ) else { return }
+                text = ocrText
             } else if let extracted = zipAttachmentText(
                 main: main,
-                filename: decodedFilename(part),
-                data: part.decodedBody
+                filename: filename,
+                data: data
             ) {
                 text = extracted
             } else {
                 guard let extracted = containerAttachmentText(
                     main: main,
-                    filename: decodedFilename(part),
-                    data: part.decodedBody
+                    filename: filename,
+                    data: data
                 ) else { return }
                 text = extracted
             }
@@ -359,6 +381,60 @@ public enum MailBridge {
         let joined = pieces.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return joined.isEmpty ? nil : joined
+    }
+
+    /// True when the part is OCR-eligible (PDF or image, decision 0050).
+    static func isOcrCandidate(main: String, filename: String?) -> Bool {
+        let extensionName = filename
+            .flatMap { $0.split(separator: ".").last.map(String.init) }
+            .map { $0.lowercased() }
+        if main == "application/pdf" || extensionName == "pdf" { return true }
+        let imageTypes: Set<String> = [
+            "image/png", "image/jpeg", "image/tiff", "image/bmp", "image/webp",
+        ]
+        let imageExtensions: Set<String> = [
+            "png", "jpg", "jpeg", "tiff", "tif", "bmp", "webp", "heic", "heif",
+        ]
+        return imageTypes.contains(main) || imageExtensions.contains(extensionName ?? "")
+    }
+
+    /// The OCR text for one OCR-eligible part, handled per `ocr` (decision
+    /// 0050). `.inline` runs the on-device engine now; `.deferred` returns
+    /// nil without touching the engine (the import path marks the part
+    /// `pending` and the queue runs the OCR later); `.stored` uses the
+    /// stored result when the queue has finished the part — an empty stored
+    /// string means nothing legible was found and the engine is not re-run —
+    /// and falls back to the engine when there is no stored result, so a
+    /// version-bump backfill of an older archive (whose parts were
+    /// extracted inline and never stored) never loses already-extracted
+    /// text (decision 0050).
+    static func ocrText(
+        main: String,
+        filename: String?,
+        data: [UInt8],
+        partIndex: String,
+        ocr: AttachmentOCR
+    ) -> String? {
+        switch ocr {
+        case .inline:
+            return pdfAttachmentText(main: main, filename: filename, data: data)
+                ?? imageAttachmentText(main: main, filename: filename, data: data)
+        case .deferred:
+            return nil
+        case .stored(let stored):
+            if let text = stored(partIndex) {
+                // The queue already ran the engine on this part: an empty
+                // stored string means nothing legible was found, so the
+                // engine is not re-run.
+                return text.isEmpty ? nil : text
+            }
+            // No stored result: the queue has not reached this part yet.
+            // Run the engine inline so a version-bump backfill of an older
+            // archive (whose parts were extracted inline and never stored)
+            // never loses already-extracted text (decision 0050).
+            return pdfAttachmentText(main: main, filename: filename, data: data)
+                ?? imageAttachmentText(main: main, filename: filename, data: data)
+        }
     }
 
     /// PDF attachment text via PDFKit (decision 0039), with Vision OCR
