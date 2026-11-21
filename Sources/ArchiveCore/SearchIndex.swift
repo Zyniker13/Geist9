@@ -307,6 +307,23 @@ public enum SearchExecutor {
         )
     }
 
+    /// The corrected terms a one-edit rescue would match for `leaf`,
+    /// sorted, or nil when the rescue does not apply: the leaf must be a
+    /// single-term text leaf and at least one one-edit variant must be a
+    /// real indexed term. The "showing results for" line (DESIGN 6A) shows
+    /// these; `typoRescueExpression` matches exactly the same terms.
+    static func typoRescueTerms(
+        for leaf: FTSLeaf, in db: Database
+    ) throws -> [String]? {
+        guard leaf.terms.count == 1, leaf.terms.first != nil,
+              leaf.rescueColumns != nil else { return nil }
+        let candidates = Typo.oneEditVariants(of: leaf.terms.first!)
+        guard !candidates.isEmpty else { return nil }
+        let found = try vocabularyTerms(among: candidates, in: db)
+        guard !found.isEmpty else { return nil }
+        return found.sorted()
+    }
+
     /// The rescued FTS expression for a leaf, or nil when the rescue does
     /// not apply: the leaf must be a single-term text leaf and at least one
     /// one-edit variant must be a real indexed term. Shared by the ranked
@@ -315,17 +332,13 @@ public enum SearchExecutor {
     static func typoRescueExpression(
         for leaf: FTSLeaf, in db: Database
     ) throws -> String? {
-        guard leaf.terms.count == 1, let term = leaf.terms.first,
-              let columns = leaf.rescueColumns else { return nil }
-        let candidates = Typo.oneEditVariants(of: term)
-        guard !candidates.isEmpty else { return nil }
-        let found = try vocabularyTerms(among: candidates, in: db)
-        guard !found.isEmpty else { return nil }
+        guard let columns = leaf.rescueColumns,
+              let terms = try typoRescueTerms(for: leaf, in: db) else { return nil }
         // Match the corrections against exactly the columns the leaf
         // searched, so a rescued query keeps its field filter and never
         // reaches quoted text (DESIGN 6A). Quoted so a correction is
         // always a single term.
-        let quoted = found.map { ftsQuote($0) }.joined(separator: " OR ")
+        let quoted = terms.map { ftsQuote($0) }.joined(separator: " OR ")
         return "\(columns) : (\(quoted))"
     }
 
@@ -439,14 +452,23 @@ public enum SearchExecutor {
 
 extension ArchiveStore {
     /// A full search answer: hits plus any compile warnings (e.g. amount:
-    /// matching nothing until entity extraction lands).
+    /// matching nothing until entity extraction lands). When the ladder
+    /// ended at the one-edit typo rescue (decision 0035), `rescueTerms`
+    /// holds the sorted vocabulary terms the query's single term was
+    /// corrected to — the "showing results for" line (DESIGN 6A) shows
+    /// them. Empty whenever any hit came from the exact index or the
+    /// trigram fallback.
     public struct SearchResults: Sendable, Equatable {
         public var hits: [SearchHit]
         public var warnings: [String]
+        public var rescueTerms: [String]
 
-        public init(hits: [SearchHit], warnings: [String]) {
+        public init(
+            hits: [SearchHit], warnings: [String], rescueTerms: [String] = []
+        ) {
             self.hits = hits
             self.warnings = warnings
+            self.rescueTerms = rescueTerms
         }
     }
 
@@ -484,19 +506,33 @@ extension ArchiveStore {
         let model = semanticEnabled ? semanticModel : nil
         let hybrid = model != nil
         let perSide = hybrid ? limit + offset : limit
-        let hits = try db.read { db in
-            try SearchExecutor.run(
+        let keyword = try db.read { db -> (hits: [SearchHit], rescue: [String]) in
+            let hits = try SearchExecutor.run(
                 compiled.root, in: db, limit: perSide,
                 offset: hybrid ? 0 : offset,
                 withSnippets: withSnippets, groupByThread: groupByThread
             )
+            // The "showing results for" line (DESIGN 6A): the rescue is
+            // the ladder's last rung, so it ran exactly when the keyword
+            // side found hits and every one of them carries viaTypo. The
+            // corrected terms are re-read from the same vocabulary the
+            // rescue matched, sorted so the line is stable.
+            var rescue: [String] = []
+            if !hits.isEmpty, hits.allSatisfy(\.viaTypo),
+               case .fts(let leaf) = compiled.root {
+                rescue = (try SearchExecutor.typoRescueTerms(for: leaf, in: db)) ?? []
+            }
+            return (hits, rescue)
         }
+        let hits = keyword.hits
         guard let model, let queryVector = model.queryEmbed(query) else {
             // Keyword-only (decision 0045): the semantic side can only add
             // hits; with no model, no query embedding, or the off switch
             // set, the answer is exactly the keyword list.
             let final = hybrid ? Array(hits.dropFirst(offset)) : hits
-            return SearchResults(hits: final, warnings: compiled.warnings)
+            return SearchResults(
+                hits: final, warnings: compiled.warnings, rescueTerms: keyword.rescue
+            )
         }
         let vectorHits = try db.read { db in
             try VectorIndex.search(
@@ -553,7 +589,11 @@ extension ArchiveStore {
                 return true
             }
         }
-        return SearchResults(hits: Array(finalHits.dropFirst(offset)), warnings: compiled.warnings)
+        return SearchResults(
+            hits: Array(finalHits.dropFirst(offset)),
+            warnings: compiled.warnings,
+            rescueTerms: keyword.rescue
+        )
     }
 
     /// The as-you-type search answer (decision 0025): term completions for

@@ -76,6 +76,9 @@ final class TrigramSearchTests: XCTestCase {
         XCTAssertEqual(try search(store, "221488"), [1])
         // The hit is honest about coming from the fallback.
         XCTAssertTrue(try store.search("2214").hits.allSatisfy(\.viaTrigram))
+        // And the fallback is not the typo rescue: no "showing results
+        // for" line on a substring match (DESIGN 6A).
+        XCTAssertTrue(try store.search("2214").rescueTerms.isEmpty)
     }
 
     func testExactMatchPreferredOverFallback() throws {

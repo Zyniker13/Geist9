@@ -26,6 +26,11 @@ final class ArchiveModel: ObservableObject {
     /// Why the last typed query produced no list (bad query syntax, for
     /// example). nil while the list is a plain mailbox listing.
     @Published private(set) var searchNotice: String?
+    /// The corrected terms behind the current list, when the ladder ended
+    /// at the one-edit typo rescue (DESIGN 6A): the UI says "showing
+    /// results for …". nil while the list came from the exact index, the
+    /// trigram fallback, or a plain mailbox listing.
+    @Published private(set) var showingResultsFor: String?
     @Published var selection: MessageSummary?
     @Published private(set) var viewer: ViewerMessage?
     @Published var allowRemoteContent = false
@@ -100,6 +105,7 @@ final class ArchiveModel: ObservableObject {
         query = ""
         results = []
         searchNotice = nil
+        showingResultsFor = nil
         selection = nil
         viewer = nil
         allowRemoteContent = false
@@ -262,6 +268,7 @@ final class ArchiveModel: ObservableObject {
         guard !text.isEmpty else {
             results = []
             searchNotice = nil
+            showingResultsFor = nil
             refreshList()
             return
         }
@@ -286,6 +293,8 @@ final class ArchiveModel: ObservableObject {
                 return SearchRow(summary: summary, snippet: hit.snippet)
             }
             searchNotice = nil
+            showingResultsFor = answer.rescueTerms.isEmpty
+                ? nil : answer.rescueTerms.joined(separator: ", ")
         } catch {
             // A malformed query line is a normal typing state: show why,
             // keep the previous list.

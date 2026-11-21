@@ -202,6 +202,18 @@ struct ContentView: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, 4)
             }
+            if let rescue = model.showingResultsFor {
+                // The typo rescue is honest about what it did (DESIGN 6A):
+                // the exact index and the trigram fallback found nothing, so
+                // the query's single term was corrected against the archive's
+                // own vocabulary.
+                Text("Showing results for \(rescue)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 4)
+            }
             messageRows
         }
     }

@@ -391,6 +391,23 @@ final class SearchTests: XCTestCase {
         try assertHits("subject:shiping", ["m4", "m12", "m13"])
         // A typo with no real one-edit neighbours stays an honest zero.
         try assertHits("xqzzjq", [])
+        // The "showing results for" line (DESIGN 6A): the answer carries
+        // the corrected terms, sorted and stable, exactly when the rescue
+        // ran — and every listed term is a real correction that finds hits.
+        let rescuedAnswer = try store.search("shiping")
+        XCTAssertFalse(rescuedAnswer.rescueTerms.isEmpty)
+        XCTAssertEqual(rescuedAnswer.rescueTerms, rescuedAnswer.rescueTerms.sorted())
+        XCTAssertFalse(try hits(rescuedAnswer.rescueTerms[0]).isEmpty)
+        XCTAssertTrue(try store.search("shipping").rescueTerms.isEmpty)
+    }
+
+    func testRescueTermsOnlyAppearForRescuedAnswers() throws {
+        // Exact hits, honest zeros, and a multi-word query (the ladder
+        // stops at the trigram rung) never say "showing results for"; only
+        // an answer whose keyword side is entirely rescue hits does.
+        XCTAssertTrue(try store.search("budget").rescueTerms.isEmpty)
+        XCTAssertTrue(try store.search("xqzzjq").rescueTerms.isEmpty)
+        XCTAssertTrue(try store.search("budget offsite").rescueTerms.isEmpty)
     }
 
     // MARK: Field operators

@@ -129,6 +129,39 @@ final class HybridSearchTests: XCTestCase {
         XCTAssertEqual(hybrid, plain)
     }
 
+    func testRescueTermsFlowThroughHybridSearch() throws {
+        // A rescued query with a registered model: the keyword side is the
+        // one-edit rescue ("shiping" -> "shipping"), the semantic side can
+        // add its own hits on top — the "showing results for" line must
+        // still report the correction (DESIGN 6A), computed from the
+        // keyword side before fusion.
+        let store = try makeStore()
+        var ids: [Int64] = []
+        for body in ["Order shipping today", "Shipping was delayed", "nothing relevant"] {
+            guard case .created(let id) = try store.ingest(
+                makeMessage(subject: "Note \(ids.count + 1)", body: body),
+                into: account
+            ) else {
+                XCTFail("expected .created")
+                continue
+            }
+            ids.append(id)
+        }
+        let model = DeterministicEmbedding()
+        // Give the last message the query's exact vector so the semantic
+        // side contributes a hit no keyword rung would have found.
+        let queryVector = try XCTUnwrap(model.embed("shiping"))
+        try store.db.write { db in
+            try VectorIndex.upsert(
+                db, messageID: ids.last!, model: model.identifier, vector: queryVector
+            )
+        }
+        let results = try store.search("shiping", semanticModel: model)
+        XCTAssertTrue(results.hits.contains { $0.viaSemantic })
+        XCTAssertTrue(results.hits.contains { $0.viaTypo })
+        XCTAssertTrue(results.rescueTerms.contains("shipping"))
+    }
+
     func testSemanticOffSwitchReturnsKeywordOnly() throws {
         let store = try makeStore()
         let ids = try ingest(store, count: 3)
