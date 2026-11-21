@@ -59,3 +59,29 @@ both operators (`amount:>100`) and later facet counts ("has an amount").
 - Excluding signed amounts means a refund shown as "-50 USD" will not match
   `amount:` until sign support arrives; the warning-free empty result keeps
   this quiet. If the judged set later needs refunds, this decision is amended.
+
+## Amendment (2026-11-20): bare two-decimal amounts
+
+The judged set grew to 225 queries and gained its first `amount:` queries
+(q216–q219). They failed before this amendment: the extraction grammar
+recognized only currency-marked amounts, so an invoice total written as
+"total 1,240.00" or "47,510.00" (no currency marker) produced no entity row,
+and the ROADMAP's invoice answers were invisible to `amount:`.
+
+- A number ending in an explicit two-digit fraction ("1,240.00",
+  "47.510,00", "12.40") is now an amount with `currency` nil. It runs
+  after every currency-marked pattern, the date, phone, tracking, booking
+  and domain extractors, and the platform detector, and skips any span one
+  of them claimed — so "€3.250,00" keeps its currency and the European
+  date "14.02.2024" is never sliced into an amount.
+- A bare integer stays unrecognized ("4 units", "2024", "#12345"): too
+  ambiguous to call money. The lone-dot US reading of "1.234" also stands
+  (this decision's original rule). With currency evidence, however,
+  three-digit dot groups now read European: "4.800 EUR" normalizes to
+  4800, since with a currency marker the German reading is the only
+  sensible one.
+- Regression tests: `testBareTwoDecimalNumbersAreAmounts`,
+  `testBareAmountDoesNotStealClaimedSpans`,
+  `testCurrencyResolvesLoneDotThousands`,
+  `testAmountOperatorReadsBareTotals` (EntityTests). The four judged
+  `amount:` queries (q216–q219) gate this from now on.

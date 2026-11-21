@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "note": "Graded judgments for the M2 judged relevance set (DESIGN 6A, decision 0028). Grade 2 = directly about the query topic, grade 1 = supportive or brief mention. Every id refers to a JudgedMessage in Sources/SearchEval/JudgedTopics.swift or JudgedTopics2.swift; edit both together. Queries use only mechanisms the engine implements (decision 0028).",
   "queries": [
     {
@@ -2050,6 +2050,1225 @@
           "id": "j046",
           "grade": 2
         }
+      ],
+      "requires": [
+        "semantic"
+      ]
+    },
+    {
+      "id": "q144",
+      "text": "backorder",
+      "category": "order",
+      "judgments": [
+        {
+          "id": "j008",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q145",
+      "text": "loading dock",
+      "category": "order",
+      "judgments": [
+        {
+          "id": "j003",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q146",
+      "text": "CM-4471",
+      "category": "order",
+      "judgments": [
+        {
+          "id": "j006",
+          "grade": 2
+        },
+        {
+          "id": "j007",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q147",
+      "text": "net-30",
+      "category": "order",
+      "judgments": [
+        {
+          "id": "j004",
+          "grade": 2
+        },
+        {
+          "id": "j032",
+          "grade": 2
+        },
+        {
+          "id": "j137",
+          "grade": 1
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q148",
+      "text": "supplier",
+      "category": "order",
+      "judgments": [
+        {
+          "id": "j002",
+          "grade": 2
+        },
+        {
+          "id": "j009",
+          "grade": 1
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q149",
+      "text": "tracking",
+      "category": "order",
+      "judgments": [
+        {
+          "id": "j003",
+          "grade": 2
+        },
+        {
+          "id": "j010",
+          "grade": 2
+        },
+        {
+          "id": "j011",
+          "grade": 1
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q150",
+      "text": "damaged goods claim",
+      "category": "order",
+      "judgments": [
+        {
+          "id": "j011",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q151",
+      "text": "receipt bundle",
+      "category": "finance",
+      "judgments": [
+        {
+          "id": "j015",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q152",
+      "text": "card receipt",
+      "category": "finance",
+      "judgments": [
+        {
+          "id": "j017",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q153",
+      "text": "deduction",
+      "category": "finance",
+      "judgments": [
+        {
+          "id": "j018",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q154",
+      "text": "pay date",
+      "category": "finance",
+      "judgments": [
+        {
+          "id": "j019",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q155",
+      "text": "bank reconciliation",
+      "category": "finance",
+      "judgments": [
+        {
+          "id": "j024",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q156",
+      "text": "multi-year",
+      "category": "contract",
+      "judgments": [
+        {
+          "id": "j025",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q157",
+      "text": "evaluation data",
+      "category": "contract",
+      "judgments": [
+        {
+          "id": "j027",
+          "grade": 2
+        },
+        {
+          "id": "j030",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q158",
+      "text": "wind-down",
+      "category": "contract",
+      "judgments": [
+        {
+          "id": "j034",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q159",
+      "text": "countersigned",
+      "category": "contract",
+      "judgments": [
+        {
+          "id": "j104",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q160",
+      "text": "badge photo",
+      "category": "hiring",
+      "judgments": [
+        {
+          "id": "j038",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q161",
+      "text": "shadowing",
+      "category": "hiring",
+      "judgments": [
+        {
+          "id": "j039",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q162",
+      "text": "salary band",
+      "category": "hiring",
+      "judgments": [
+        {
+          "id": "j035",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q163",
+      "text": "demand report",
+      "category": "hiring",
+      "judgments": [
+        {
+          "id": "j043",
+          "grade": 1
+        },
+        {
+          "id": "j096",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q164",
+      "text": "thermostat",
+      "category": "housing",
+      "judgments": [
+        {
+          "id": "j045",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q165",
+      "text": "technician",
+      "category": "housing",
+      "judgments": [
+        {
+          "id": "j046",
+          "grade": 2
+        },
+        {
+          "id": "j047",
+          "grade": 2
+        },
+        {
+          "id": "j048",
+          "grade": 1
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q166",
+      "text": "utility closet",
+      "category": "housing",
+      "judgments": [
+        {
+          "id": "j047",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q167",
+      "text": "landlord",
+      "category": "housing",
+      "judgments": [
+        {
+          "id": "j046",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q168",
+      "text": "parking space swap",
+      "category": "housing",
+      "judgments": [
+        {
+          "id": "j052",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q169",
+      "text": "checked bag",
+      "category": "travel",
+      "judgments": [
+        {
+          "id": "j053",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q170",
+      "text": "airport closure",
+      "category": "travel",
+      "judgments": [
+        {
+          "id": "j055",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q171",
+      "text": "Harbor View",
+      "category": "travel",
+      "judgments": [
+        {
+          "id": "j054",
+          "grade": 2
+        },
+        {
+          "id": "j058",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q172",
+      "text": "NA207",
+      "category": "travel",
+      "judgments": [
+        {
+          "id": "j056",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q173",
+      "text": "terminal restaurant",
+      "category": "travel",
+      "judgments": [
+        {
+          "id": "j059",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q174",
+      "text": "Übersicht",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j062",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q175",
+      "text": "Mahngebühr",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j064",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q176",
+      "text": "überfällig",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j064",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q177",
+      "text": "autogiro",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j067",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q178",
+      "text": "verzonden",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j068",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q179",
+      "text": "manutenção",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j069",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q180",
+      "text": "повестка",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j075",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q181",
+      "text": "支払期日",
+      "category": "multilingual",
+      "judgments": [
+        {
+          "id": "j076",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q182",
+      "text": "naïve",
+      "category": "folding",
+      "judgments": [
+        {
+          "id": "j083",
+          "grade": 1
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q183",
+      "text": "Hamburg",
+      "category": "folding",
+      "judgments": [
+        {
+          "id": "j084",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q184",
+      "text": "Hinterhof",
+      "category": "folding",
+      "judgments": [
+        {
+          "id": "j085",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q185",
+      "text": "site visit",
+      "category": "folding",
+      "judgments": [
+        {
+          "id": "j086",
+          "grade": 2
+        },
+        {
+          "id": "j097",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q186",
+      "text": "Rückfahrt",
+      "category": "folding",
+      "judgments": [
+        {
+          "id": "j087",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q187",
+      "text": "priya.natarajan",
+      "category": "names",
+      "judgments": [
+        {
+          "id": "j094",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q188",
+      "text": "kenji.yamamoto",
+      "category": "names",
+      "judgments": [
+        {
+          "id": "j098",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q189",
+      "text": "sofia.petrova",
+      "category": "names",
+      "judgments": [
+        {
+          "id": "j099",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q190",
+      "text": "pallet scan",
+      "category": "names",
+      "judgments": [
+        {
+          "id": "j095",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q191",
+      "text": "outage postmortem during:2019",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j102",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q192",
+      "text": "tax receipt during:2020",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j103",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q193",
+      "text": "contract signed during:2022-06",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j104",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q194",
+      "text": "server maintenance during:2021-03",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j101",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q195",
+      "text": "before:2020-01-01 postmortem",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j102",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q196",
+      "text": "water meter during:2020-01",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j107",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q197",
+      "text": "quarterly numbers during:2024-06",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j108",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q198",
+      "text": "BX-2214 during:\"March 2024\"",
+      "category": "dated",
+      "judgments": [
+        {
+          "id": "j001",
+          "grade": 2
+        },
+        {
+          "id": "j002",
+          "grade": 2
+        },
+        {
+          "id": "j003",
+          "grade": 2
+        },
+        {
+          "id": "j004",
+          "grade": 2
+        },
+        {
+          "id": "j008",
+          "grade": 2
+        },
+        {
+          "id": "j010",
+          "grade": 2
+        },
+        {
+          "id": "j011",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q199",
+      "text": "shipment of the sensors",
+      "category": "phrase",
+      "judgments": [
+        {
+          "id": "j114",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q200",
+      "text": "quarterly tax filing",
+      "category": "phrase",
+      "judgments": [
+        {
+          "id": "j119",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q201",
+      "text": "purchase order number",
+      "category": "phrase",
+      "judgments": [
+        {
+          "id": "j122",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q202",
+      "text": "redline the contract",
+      "category": "phrase",
+      "judgments": [
+        {
+          "id": "j124",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q203",
+      "text": "corner office",
+      "category": "phrase",
+      "judgments": [
+        {
+          "id": "j116",
+          "grade": 1
+        },
+        {
+          "id": "j132",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q204",
+      "text": "hex bolt",
+      "category": "attachment",
+      "judgments": [
+        {
+          "id": "j126",
+          "grade": 2
+        },
+        {
+          "id": "j130",
+          "grade": 2
+        },
+        {
+          "id": "j133",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q205",
+      "text": "campus tour",
+      "category": "attachment",
+      "judgments": [
+        {
+          "id": "j127",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q206",
+      "text": "shelter drill",
+      "category": "attachment",
+      "judgments": [
+        {
+          "id": "j138",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q207",
+      "text": "dormant",
+      "category": "attachment",
+      "judgments": [
+        {
+          "id": "j139",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q208",
+      "text": "cartographer",
+      "category": "attachment",
+      "judgments": [
+        {
+          "id": "j134",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q209",
+      "text": "overtime",
+      "category": "attachment",
+      "judgments": [
+        {
+          "id": "j136",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q210",
+      "text": "2214",
+      "category": "trigram",
+      "judgments": [
+        {
+          "id": "j001",
+          "grade": 2
+        },
+        {
+          "id": "j002",
+          "grade": 2
+        },
+        {
+          "id": "j003",
+          "grade": 2
+        },
+        {
+          "id": "j004",
+          "grade": 2
+        },
+        {
+          "id": "j006",
+          "grade": 2
+        },
+        {
+          "id": "j008",
+          "grade": 2
+        },
+        {
+          "id": "j010",
+          "grade": 2
+        },
+        {
+          "id": "j011",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q211",
+      "text": "2215",
+      "category": "trigram",
+      "judgments": [
+        {
+          "id": "j012",
+          "grade": 2
+        },
+        {
+          "id": "j145",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q212",
+      "text": "7720",
+      "category": "trigram",
+      "judgments": [
+        {
+          "id": "j133",
+          "grade": 2
+        },
+        {
+          "id": "j146",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q213",
+      "text": "8811",
+      "category": "trigram",
+      "judgments": [
+        {
+          "id": "j067",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q214",
+      "text": "90211",
+      "category": "trigram",
+      "judgments": [
+        {
+          "id": "j058",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q215",
+      "text": "58213",
+      "category": "trigram",
+      "judgments": [
+        {
+          "id": "j003",
+          "grade": 2
+        },
+        {
+          "id": "j010",
+          "grade": 2
+        },
+        {
+          "id": "j011",
+          "grade": 1
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q216",
+      "text": "amount:>10000",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j029",
+          "grade": 2
+        },
+        {
+          "id": "j032",
+          "grade": 2
+        },
+        {
+          "id": "j137",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q217",
+      "text": "amount:620",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j006",
+          "grade": 2
+        },
+        {
+          "id": "j007",
+          "grade": 2
+        },
+        {
+          "id": "j021",
+          "grade": 1
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q218",
+      "text": "amount:1180",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j050",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q219",
+      "text": "amount:12400",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j137",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q220",
+      "text": "has:attachment agenda",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j128",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q221",
+      "text": "filename:vat",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j014",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q222",
+      "text": "filename:schedule",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j127",
+          "grade": 2
+        },
+        {
+          "id": "j138",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q223",
+      "text": "domain:norvair.example.com",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j053",
+          "grade": 2
+        },
+        {
+          "id": "j054",
+          "grade": 2
+        },
+        {
+          "id": "j055",
+          "grade": 2
+        },
+        {
+          "id": "j056",
+          "grade": 2
+        },
+        {
+          "id": "j057",
+          "grade": 2
+        },
+        {
+          "id": "j058",
+          "grade": 2
+        },
+        {
+          "id": "j059",
+          "grade": 2
+        },
+        {
+          "id": "j060",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q224",
+      "text": "domain:taxoffice.example.org",
+      "category": "operators",
+      "judgments": [
+        {
+          "id": "j016",
+          "grade": 2
+        },
+        {
+          "id": "j103",
+          "grade": 2
+        },
+        {
+          "id": "j119",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q225",
+      "text": "heater OR radiator",
+      "category": "phrase",
+      "judgments": [
+        {
+          "id": "j045",
+          "grade": 2
+        },
+        {
+          "id": "j046",
+          "grade": 2
+        },
+        {
+          "id": "j048",
+          "grade": 2
+        },
+        {
+          "id": "j049",
+          "grade": 2
+        }
+      ],
+      "requires": []
+    },
+    {
+      "id": "q226",
+      "text": "the message where the airline arranged a place to sleep after the schedule change",
+      "category": "housing",
+      "judgments": [
+        {
+          "id": "j058",
+          "grade": 2
+        },
+        {
+          "id": "j056",
+          "grade": 1
+        },
+        {
+          "id": "j055",
+          "grade": 1
+        }
+      ],
+      "requires": [
+        "semantic"
+      ]
+    },
+    {
+      "id": "q227",
+      "text": "a quiet spot away from the office to hold the review",
+      "category": "folding",
+      "judgments": [
+        {
+          "id": "j081",
+          "grade": 2
+        }
+      ],
+      "requires": [
+        "semantic"
       ]
     }
   ]

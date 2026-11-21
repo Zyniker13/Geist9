@@ -95,7 +95,23 @@ enum EntityExtraction {
         #if canImport(Darwin)
         for (hit, range) in detectorMatches(in: text, occupied: occupied) { add(hit, range) }
         #endif
+        // Bare two-decimal amounts last: every earlier extractor has
+        // claimed the spans it owns (dates especially), so a bare match
+        // only stands when nothing else recognized the range.
+        let fullRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        for match in bareRegex.matches(in: text, range: fullRange) {
+            let matchRange = match.range(at: 1)
+            guard !occupied.contains(where: { $0.location != NSNotFound && rangesOverlap($0, matchRange) })
+            else { continue }
+            if let hit = amount(from: match, in: text, style: .bare) {
+                add(hit, matchRange)
+            }
+        }
         return hits
+    }
+
+    private static func rangesOverlap(_ a: NSRange, _ b: NSRange) -> Bool {
+        a.location < NSMaxRange(b) && b.location < NSMaxRange(a)
     }
 
     // MARK: Amount patterns
@@ -120,11 +136,12 @@ enum EntityExtraction {
         case symbolSuffix
         case codePrefix
         case codeSuffix
+        case bare
 
         var numberGroup: Int {
             switch self {
             case .codePrefix: return 2
-            case .symbolPrefix, .symbolSuffix, .codeSuffix: return 1
+            case .symbolPrefix, .symbolSuffix, .codeSuffix, .bare: return 1
             }
         }
     }
@@ -141,6 +158,19 @@ enum EntityExtraction {
             return (regex, style)
         }
     }()
+
+    /// A number that ends in an explicit two-digit fraction ("1,240.00",
+    /// "47.510,00", "12.40"), recognized without a currency marker: in mail
+    /// a plain two-decimal figure is a money amount far more often than
+    /// anything else, and invoices state totals exactly this way. The
+    /// currency stays nil; a bare integer ("4 units", "2024") is too
+    /// ambiguous and stays unrecognized. Runs after every currency-marked
+    /// pattern, date, phone, and detector match, skipping any range already
+    /// claimed, so "€3.250,00" keeps its currency and a European date
+    /// ("14.02.2024") is never sliced into an amount. The lookbehind keeps
+    /// a match from starting inside a longer number.
+    private static let barePattern = #"(?<![\d.,])(\d[\d,.]*[,.]\d{2})(?!\d)"#
+    private static let bareRegex = try! NSRegularExpression(pattern: barePattern)
 
     private static func amountMatches(in text: String) -> [(EntityHit, NSRange)] {
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
@@ -166,10 +196,31 @@ enum EntityExtraction {
             guard let range = Range(match.range(at: index), in: text) else { return nil }
             return String(text[range])
         }
-        guard let digits = group(style.numberGroup), let normalized = parseAmount(digits) else {
-            return nil
-        }
+        guard let digits = group(style.numberGroup) else { return nil }
         let value = String(text[Range(match.range, in: text)!])
+
+        var currency: String?
+        switch style {
+        case .symbolPrefix:
+            if let first = value.first { currency = currencySymbol(String(first)) }
+        case .symbolSuffix:
+            if let last = value.last { currency = currencySymbol(String(last)) }
+        case .codePrefix: currency = group(1)
+        case .codeSuffix: currency = group(2)
+        case .bare: currency = nil
+        }
+
+        var normalized = parseAmount(digits)
+        // Currency evidence resolves the lone-dot ambiguity: "4.800 EUR" is
+        // four thousand eight hundred euros (three-digit dot groups), while
+        // a bare "1.234" without a currency stays US-style 1.234, the
+        // common reading in mail (decision 0031). A decimal comma anywhere
+        // in the run already settled the question in parseAmount.
+        if currency != nil, normalized != nil,
+           digits.range(of: #"^\d{1,3}(\.\d{3})+$"#, options: .regularExpression) != nil {
+            normalized = Double(digits.replacingOccurrences(of: ".", with: "")) ?? normalized
+        }
+        guard let normalized else { return nil }
 
         // A minus directly before the match is a subtraction ("balance
         // -$50", "refund -50 USD"), not a currency amount; recognizing
@@ -184,15 +235,6 @@ enum EntityExtraction {
             }
         }
 
-        var currency: String?
-        switch style {
-        case .symbolPrefix:
-            if let first = value.first { currency = currencySymbol(String(first)) }
-        case .symbolSuffix:
-            if let last = value.last { currency = currencySymbol(String(last)) }
-        case .codePrefix: currency = group(1)
-        case .codeSuffix: currency = group(2)
-        }
         return EntityHit(kind: .amount, value: value, normalized: normalized, currency: currency)
     }
 

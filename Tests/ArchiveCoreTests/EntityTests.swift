@@ -117,8 +117,58 @@ final class EntityTests: XCTestCase {
     }
 
     func testBareNumbersAreNotAmounts() throws {
+        // Integers without a fraction stay unrecognized: "4 units", "2024",
+        // "#12345" are too ambiguous. A two-decimal figure is covered by
+        // testBareTwoDecimalNumbersAreAmounts.
         XCTAssertEqual(EntityExtraction.entities(in: "42 apples and invoice #12345 shipped"), [])
         XCTAssertEqual(EntityExtraction.entities(in: "version 1.2.3 released"), [])
+        XCTAssertEqual(EntityExtraction.entities(in: "roughly 1.234 of them"), [])
+    }
+
+    func testBareTwoDecimalNumbersAreAmounts() throws {
+        // A plain two-decimal figure is a money amount far more often than
+        // anything else in mail, and invoices state totals exactly this
+        // way; the currency stays unknown. Both separator conventions read
+        // through parseAmount's positional rule.
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "total 1,240.00, due net-30"),
+            [EntityHit(kind: .amount, value: "1,240.00", normalized: 1240, currency: nil)]
+        )
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "renewal 47.510,00 is due"),
+            [EntityHit(kind: .amount, value: "47.510,00", normalized: 47510, currency: nil)]
+        )
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "interest posting 12.40 this month"),
+            [EntityHit(kind: .amount, value: "12.40", normalized: 12.4, currency: nil)]
+        )
+    }
+
+    func testBareAmountDoesNotStealClaimedSpans() throws {
+        // The currency-marked reading wins its span, and a European date is
+        // claimed by the date extractor, never sliced into an amount.
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "summe 1.234,56 € zahlen"),
+            [EntityHit(kind: .amount, value: "1.234,56 €", normalized: 1234.56, currency: "EUR")]
+        )
+        XCTAssertTrue(
+            EntityExtraction.entities(in: "Schaden vom 14.02.2024 gemeldet").allSatisfy { $0.kind != .amount },
+            "a European date must not yield a bare amount"
+        )
+    }
+
+    func testCurrencyResolvesLoneDotThousands() throws {
+        // With a currency, three-digit dot groups read European: "4.800
+        // EUR" is 4,800 euros. Without a currency the lone-dot form stays
+        // US-style 1.234 (decision 0031), so it is not an entity at all.
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "geschätzter Schaden 4.800 EUR"),
+            [EntityHit(kind: .amount, value: "4.800 EUR", normalized: 4800, currency: "EUR")]
+        )
+        XCTAssertEqual(
+            EntityExtraction.entities(in: "Zuleitung 1.140 EUR erneuert"),
+            [EntityHit(kind: .amount, value: "1.140 EUR", normalized: 1140, currency: "EUR")]
+        )
     }
 
     func testNegativeSignIsNotAnAmount() throws {
@@ -191,6 +241,26 @@ final class EntityTests: XCTestCase {
         XCTAssertEqual(try search(store, "amount:1234.56"), [expensive])
         XCTAssertEqual(try search(store, "amount:>1000000"), [])
         XCTAssertNotEqual(try search(store, "amount:>100"), [none])
+    }
+
+    func testAmountOperatorReadsBareTotals() throws {
+        // Regression from the judged set: invoices that state a bare total
+        // ("total 1,240.00", no currency marker) are amounts, so the
+        // amount: operator finds them — including the European "47.510,00"
+        // shape and a lone-dot thousands group beside a currency.
+        let store = try makeStore()
+        let big = try ingest(
+            makeMessage(subject: "Invoice", body: "adjusted renewal, 47,510.00, due net-30"), into: store
+        )
+        let european = try ingest(
+            makeMessage(subject: "Rechnung", body: "Wartung 3.250,00 EUR im Januar"), into: store
+        )
+        let dotted = try ingest(
+            makeMessage(subject: "Schaden", body: "geschätzter Schaden 4.800 EUR"), into: store
+        )
+        XCTAssertEqual(try search(store, "amount:>10000"), [big])
+        XCTAssertEqual(try search(store, "amount:3250"), [european])
+        XCTAssertEqual(try search(store, "amount:4800"), [dotted])
     }
 
     func testAmountOperatorCombinesWithTextAsAND() throws {
