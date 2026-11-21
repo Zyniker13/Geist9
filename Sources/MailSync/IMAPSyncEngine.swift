@@ -144,7 +144,7 @@ public final class IMAPSyncEngine: Sendable {
         store: ArchiveStore,
         credentials user: String,
         password: String,
-        progress: @escaping (SyncProgress) -> Void = { _ in }
+        progress: @escaping @Sendable (SyncProgress) -> Void = { _ in }
     ) async throws -> SyncProgress {
         let config = IMAPConnection.Configuration(
             hostname: profile.host,
@@ -167,10 +167,10 @@ public final class IMAPSyncEngine: Sendable {
         store: ArchiveStore,
         user: String,
         password: String,
-        progress: @escaping (SyncProgress) -> Void
+        progress: @escaping @Sendable (SyncProgress) -> Void
     ) async throws -> SyncProgress {
         var state = SyncProgress()
-        let notify = { (s: SyncProgress) in progress(s) }
+        let notify: @Sendable (SyncProgress) -> Void = { progress($0) }
         try await IMAPConnection.withConnection(configuration: config) { greeting, connection in
             guard case .ok = greeting.status else {
                 throw SyncEngineError.connectionLost
@@ -310,7 +310,7 @@ public final class IMAPSyncEngine: Sendable {
         store: ArchiveStore,
         mailbox: RemoteMailbox,
         progress: inout SyncProgress,
-        notify: (SyncProgress) -> Void
+        notify: @Sendable (SyncProgress) -> Void
     ) async throws -> FolderOutcome {
         // 1. STATUS before SELECT: UIDVALIDITY and UIDNEXT without leaving
         // the selected state (the engine selects one folder at a time).
