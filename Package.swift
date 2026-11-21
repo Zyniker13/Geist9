@@ -155,8 +155,18 @@ let coreTargets: [Target] = [
     ),
     // parser, charsets, threading (DESIGN 7)
     .target(name: "MailMIME"),
-    // IMAP, JMAP, provider database (DESIGN 5)
-    .target(name: "MailSync"),
+    // IMAP, JMAP, provider database, sync engine (DESIGN 5). The IMAP
+    // engine speaks the wire protocol through swift-nio-imap (decision 0002)
+    // and reads/writes the archive through ArchiveCore.
+    .target(
+        name: "MailSync",
+        dependencies: [
+            "ArchiveCore",
+            .product(name: "IMAPCommands", package: "swift-nio-imap"),
+            .product(name: "NIOIMAP", package: "swift-nio-imap"),
+            .product(name: "NIOCore", package: "swift-nio"),
+        ]
+    ),
     // vendored Snowball stemmers, BSD-3 (Sources/CStemmer/PROVENANCE.md,
     // decision 0026)
     .target(name: "CStemmer"),
@@ -219,7 +229,17 @@ let testTargets: [Target] = [
     .testTarget(name: "ArchiveSearchTests", dependencies: ["ArchiveSearch"]),
     .testTarget(name: "ArchiveExtractTests", dependencies: ["ArchiveExtract"]),
     .testTarget(name: "MailMIMETests", dependencies: ["MailMIME"]),
-    .testTarget(name: "MailSyncTests", dependencies: ["MailSync"]),
+    .testTarget(
+        name: "MailSyncTests",
+        dependencies: [
+            "MailSync",
+            "ArchiveCore",
+            .product(name: "IMAPCommands", package: "swift-nio-imap"),
+            .product(name: "NIOIMAP", package: "swift-nio-imap"),
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOPosix", package: "swift-nio"),
+        ]
+    ),
     .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
     // Launches the built email-archiver-mcp executable as a subprocess
     // (DESIGN 9A end-to-end contract), so it needs the ArchiveMCP library

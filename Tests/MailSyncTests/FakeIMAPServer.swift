@@ -1,0 +1,395 @@
+// The scriptable fake IMAP server used by the sync-engine tests (TESTING,
+// "Quirk replay" row and "Servers we test with"). It runs a real TCP server
+// on a loopback high port driven by swift-nio-imap's own `IMAPServerHandler`
+// (the library's server-side protocol codec), so the engine is tested
+// against the real wire protocol end to end — commands parsed by the same
+// parser a production server would use, responses encoded by the same
+// encoder. The scenario (which folders exist, which messages, what fails)
+// is scripted per test; nothing here touches a real account.
+
+import Foundation
+import IMAPCommands
+import NIOIMAP
+import NIOCore
+import NIOPosix
+
+/// One message the fake server holds in one folder.
+struct FakeMessage {
+    var uid: UInt32
+    /// The exact bytes a UID FETCH BODY.PEEK[] returns.
+    var data: Data
+    /// INTERNALDATE components (UTC).
+    var date: (year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) =
+        (2026, 1, 1, 12, 0, 0)
+    var flags: [String] = []
+}
+
+/// One folder the fake server exposes.
+struct FakeFolder {
+    var name: String
+    var messages: [FakeMessage]
+    var uidValidity: UInt32
+}
+
+/// What the fake server does on one command. Beyond the plain protocol
+/// behavior, a scenario can refuse or misbehave per test (quirk replay).
+struct FakeServerScenario: Sendable {
+    var folders: [FakeFolder] = [FakeFolder(name: "INBOX", messages: [], uidValidity: 1)]
+    /// Accept this user/password pair only.
+    var user: String = "alice@example.com"
+    var password: String = "secret"
+    /// Fail every LOGIN with NO (quirk: wrong credentials).
+    var loginFails: Bool = false
+    /// Close the connection right after this many commands (quirk: mid-pass BYE).
+    var disconnectAfterCommands: Int? = nil
+    /// Folders whose STATUS gets a NO reply (quirk: server-side folder problem).
+    var failStatusFor: Set<String> = []
+}
+
+/// A running fake server. Bind on 127.0.0.1 port 0, read back the port.
+/// The scenario is shared mutable state with the per-connection handler:
+/// the lock guards the folders box, `updateFolders` swaps mid-test between
+/// passes exactly the way a real server's content changes between passes.
+final class FakeIMAPServer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var folders: [FakeFolder]
+    private var scenario: FakeServerScenario
+    private var commands: [String] = []
+    private var group: EventLoopGroup?
+    private var channel: Channel?
+    private(set) var port: UInt16 = 0
+
+    init(scenario: FakeServerScenario) {
+        self.folders = scenario.folders
+        self.scenario = scenario
+    }
+
+    /// Swap the folder contents between sync passes.
+    func updateFolders(_ folders: [FakeFolder]) {
+        lock.lock(); defer { lock.unlock() }
+        self.folders = folders
+        self.scenario.folders = folders
+    }
+
+    /// Commands the server processed, for assertions (read-only commands
+    /// only ever expected; a STORE or EXPUNGE in this list fails the test).
+    var seenCommands: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return commands
+    }
+
+    func start() throws {
+        lock.lock()
+        let scenario = self.scenario
+        lock.unlock()
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        self.group = group
+        let bootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.backlog, value: 16)
+            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+        let recorder = self
+        let channel = try bootstrap.childChannelInitializer { channel in
+            let handler = CommandRecorderHandler(scenario: scenario, server: recorder)
+            return channel.pipeline.addHandlers([
+                ByteToMessageHandler(FrameDecoder()),
+                IMAPServerHandler(),
+                handler,
+            ])
+        }.bind(to: SocketAddress(ipAddress: "127.0.0.1", port: 0)).wait()
+        self.channel = channel
+        self.port = UInt16(channel.localAddress!.port!)
+    }
+
+    func stop() {
+        try? channel?.close().wait()
+        try? group?.syncShutdownGracefully()
+        channel = nil
+        group = nil
+    }
+
+    fileprivate func record(_ name: String) {
+        lock.lock(); defer { lock.unlock() }
+        commands.append(name)
+    }
+
+    /// Snapshot for handlers: folders + scenario under the lock.
+    fileprivate func snapshot() -> (FakeServerScenario, [FakeFolder]) {
+        lock.lock(); defer { lock.unlock() }
+        var scenario = self.scenario
+        scenario.folders = self.folders
+        return (scenario, self.folders)
+    }
+}
+
+/// The fake server's brain: reads `CommandStreamPart`s from the pipeline,
+/// answers with `Response`s through the same encoder a real server uses.
+final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
+    typealias InboundIn = CommandStreamPart
+    typealias OutboundIn = Response
+    typealias OutboundOut = Response
+
+    /// The handler pulls a fresh scenario+folders snapshot per command, so
+    /// a test that swaps folder contents between passes is visible to the
+    /// next connection (and mid-connection).
+    private let server: FakeIMAPServer
+    private var commandsSeen = 0
+    private var loggedIn = false
+    private var selected: String?
+    private var byID: [String: FakeFolder] = [:]
+
+    init(scenario: FakeServerScenario, server: FakeIMAPServer) {
+        self.server = server
+        for folder in scenario.folders {
+            self.byID[folder.name] = folder
+        }
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        // The handler receives encoded bytes to forward; nothing to do.
+        context.write(data, promise: promise)
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        // A real server's first bytes are the greeting ("* OK ..."), and
+        // IMAPConnection waits for exactly that before anything else. The
+        // library's `IMAPServerHandler` does not send it, so the fake does.
+        self.emit(context, .untagged(.conditionalState(.ok(ResponseText(
+            code: .capability([.imap4rev1, .id, .idle]),
+            text: "FakeIMAP ready"
+        )))))
+        context.fireChannelActive()
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let part = self.unwrapInboundIn(data)
+        guard case .tagged(let command) = part else { return }
+        self.commandsSeen += 1
+        let tag = String(describing: command.tag)
+        let name = self.commandName(command.command)
+        self.server.record(name)
+        let (scenario, folders) = self.server.snapshot()
+        for folder in folders {
+            self.byID[folder.name] = folder
+        }
+        self.handle(command.command, tag: tag, scenario: scenario, context: context)
+        // Optional scripted misbehavior.
+        if let limit = scenario.disconnectAfterCommands, self.commandsSeen >= limit {
+            context.close(promise: nil)
+        }
+    }
+
+    private func commandName(_ command: Command) -> String {
+        switch command {
+        case .capability: return "CAPABILITY"
+        case .login: return "LOGIN"
+        case .id: return "ID"
+        case .list: return "LIST"
+        case .select: return "SELECT"
+        case .examine: return "EXAMINE"
+        case .status: return "STATUS"
+        case .uidFetch: return "UID FETCH"
+        case .uidSearch: return "UID SEARCH"
+        case .fetch: return "FETCH"
+        case .idleStart: return "IDLE"
+        case .logout: return "LOGOUT"
+        case .noop: return "NOOP"
+        case .enable: return "ENABLE"
+        case .store: return "STORE"
+        case .uidStore: return "UID STORE"
+        case .expunge: return "EXPUNGE"
+        case .uidExpunge: return "UID EXPUNGE"
+        case .copy: return "COPY"
+        case .uidCopy: return "UID COPY"
+        case .move: return "MOVE"
+        case .uidMove: return "UID MOVE"
+        case .create: return "CREATE"
+        case .delete: return "DELETE"
+        case .rename: return "RENAME"
+        case .subscribe: return "SUBSCRIBE"
+        case .unsubscribe: return "UNSUBSCRIBE"
+        case .close: return "CLOSE"
+        case .unselect: return "UNSELECT"
+        case .startTLS: return "STARTTLS"
+        case .check: return "CHECK"
+        case .namespace: return "NAMESPACE"
+        case .lsub: return "LSUB"
+        case .listIndependent: return "LIST (INDEPENDENT)"
+        case .uidBatches: return "UID BATCHES"
+        case .getQuota: return "GETQUOTA"
+        case .getQuotaRoot: return "GETQUOTAROOT"
+        case .setQuota: return "SETQUOTA"
+        case .getMetadata: return "GETMETADATA"
+        case .setMetadata: return "SETMETADATA"
+        case .extendedSearch: return "ESEARCH"
+        case .resetKey: return "RESETKEY"
+        case .generateAuthorizedURL: return "GENURLAUTH"
+        case .urlFetch: return "URLFETCH"
+        case .compress: return "COMPRESS"
+        case .getJMAPAccess: return "GETJMAPACCESS"
+        case .custom: return "CUSTOM"
+        case .authenticate: return "AUTHENTICATE"
+        case .search: return "SEARCH"
+        case .sort: return "SORT"
+        case .uidSort: return "UID SORT"
+        }
+    }
+
+    private func emit(_ context: ChannelHandlerContext, _ response: Response) {
+        context.writeAndFlush(self.wrapOutboundOut(response), promise: nil)
+    }
+
+    private func ok(_ context: ChannelHandlerContext, _ tag: String, _ text: String) {
+        guard let tagValue = Command.Tag(tag) else { return }
+        self.emit(context, .tagged(TaggedResponse(
+            tag: tagValue,
+            state: .ok(ResponseText(code: nil, text: text))
+        )))
+    }
+
+    private func no(_ context: ChannelHandlerContext, _ tag: String, _ text: String) {
+        guard let tagValue = Command.Tag(tag) else { return }
+        self.emit(context, .tagged(TaggedResponse(
+            tag: tagValue,
+            state: .no(ResponseText(code: nil, text: text))
+        )))
+    }
+
+    private func handle(
+        _ command: Command, tag: String, scenario: FakeServerScenario,
+        context: ChannelHandlerContext
+    ) {
+        switch command {
+        case .capability:
+            self.emit(context, .untagged(.capabilityData([.imap4rev1, .id, .idle])))
+            self.ok(context, tag, "CAPABILITY completed")
+        case .login(let user, let password):
+            if scenario.loginFails || user != scenario.user || password != scenario.password {
+                self.no(context, tag, "LOGIN failed")
+            } else {
+                self.loggedIn = true
+                self.ok(context, tag, "LOGIN completed")
+            }
+        case .id:
+            self.emit(context, .untagged(.id(["name": "FakeIMAP", "version": "1.0"])))
+            self.ok(context, tag, "ID completed")
+        case .list(_, _, _, _):
+            for folder in scenario.folders {
+                let name = MailboxName(Array(folder.name.utf8))
+                let path = try! MailboxPath(name: name, pathSeparator: "/")
+                let info = MailboxInfo(
+                    attributes: [.hasNoChildren],
+                    path: path,
+                    objectID: nil,
+                    extensions: [:]
+                )
+                self.emit(context, .untagged(.mailboxData(.list(info))))
+            }
+            self.ok(context, tag, "LIST completed")
+        case .status(let mailbox, let attributes):
+            let name = String(decoding: mailbox.bytes, as: UTF8.self)
+            if scenario.failStatusFor.contains(name) {
+                self.no(context, tag, "STATUS failed (scripted)")
+                return
+            }
+            guard let folder = self.byID[name] else {
+                self.no(context, tag, "Mailbox does not exist")
+                return
+            }
+            var status = MailboxStatus()
+            if attributes.contains(.uidValidity) {
+                status.uidValidity = UIDValidity(exactly: folder.uidValidity)
+            }
+            if attributes.contains(.highestModificationSequence) {
+                status.highestModificationSequence = ModificationSequenceValue(0)
+            }
+            if attributes.contains(.messageCount) {
+                status.messageCount = folder.messages.count
+            }
+            self.emit(context, .untagged(.mailboxData(.status(mailbox, status))))
+            self.ok(context, tag, "STATUS completed")
+        case .select(let mailbox, _):
+            let name = String(decoding: mailbox.bytes, as: UTF8.self)
+            guard let folder = self.byID[name], folder.name != "" else {
+                self.no(context, tag, "Mailbox does not exist")
+                return
+            }
+            self.selected = name
+            self.emit(context, .untagged(.mailboxData(.exists(folder.messages.count))))
+            self.emit(context, .untagged(.conditionalState(.ok(ResponseText(
+                code: .uidValidity(UIDValidity(exactly: folder.uidValidity)!),
+                text: "SELECT completed"
+            )))))
+            self.ok(context, tag, "SELECT completed")
+        case .uidFetch(let set, let attributes, _):
+            guard self.loggedIn, self.selected != nil else {
+                self.no(context, tag, "No mailbox selected")
+                return
+            }
+            let folder = self.byID[self.selected!]!
+            let wantsBody = attributes.contains(where: {
+                if case .bodySection = $0 { return true }
+                return false
+            })
+            let wantsUID = attributes.contains(.uid)
+            let wantsInternalDate = attributes.contains(.internalDate)
+            // The set is a real UID range unless the client asked for "$"
+            // (SEARCH result), which this fake never sees from the engine.
+            let wantedUIDs: Set<UInt32>
+            switch set {
+            case .set(let nonEmpty):
+                wantedUIDs = Set(folder.messages.map { $0.uid }).filter { nonEmpty.set.contains(UID(rawValue: $0)) }
+            case .lastCommand:
+                wantedUIDs = Set(folder.messages.map { $0.uid })
+            }
+            for message in folder.messages.sorted(by: { $0.uid < $1.uid })
+            where wantedUIDs.contains(message.uid) {
+                self.emit(context, .fetch(.start(SequenceNumber(1))))
+                if wantsUID {
+                    self.emit(context, .fetch(.simpleAttribute(.uid(UID(rawValue: message.uid)))))
+                }
+                if wantsInternalDate {
+                    self.emit(context, .fetch(.simpleAttribute(.internalDate(Self.internalDate(message)))))
+                }
+                if wantsBody {
+                    var buffer = ByteBufferAllocator().buffer(capacity: message.data.count)
+                    buffer.writeBytes(message.data)
+                    self.emit(context, .fetch(.streamingBegin(kind: .body(section: .complete, offset: nil), byteCount: message.data.count)))
+                    self.emit(context, .fetch(.streamingBytes(buffer)))
+                    self.emit(context, .fetch(.streamingEnd))
+                }
+                self.emit(context, .fetch(.finish))
+            }
+            self.ok(context, tag, "UID FETCH completed")
+        case .uidSearch:
+            guard self.loggedIn, self.selected != nil else {
+                self.no(context, tag, "No mailbox selected")
+                return
+            }
+            let folder = self.byID[self.selected!]!
+            let ids = folder.messages.map { UnknownMessageIdentifier(UID(rawValue: $0.uid)) }
+            self.emit(context, .untagged(.mailboxData(.search(ids))))
+            self.ok(context, tag, "UID SEARCH completed")
+        case .logout:
+            self.ok(context, tag, "LOGOUT completed")
+        case .idleStart:
+            // Accept IDLE; the engine never uses it in these tests.
+            self.ok(context, tag, "IDLE terminated")
+        default:
+            // Anything that would mutate the server is refused loudly: the
+            // engine must never send it. (The test asserts the recorded
+            // command list contains no mutating command.)
+            self.no(context, tag, "read-only test server: command not supported")
+        }
+    }
+
+    /// The fake's fixed INTERNALDATE (2026-01-01 12:00:00 UTC) as a
+    /// `ServerMessageDate` via the library's own component encoding.
+    private static func internalDate(_ message: FakeMessage) -> ServerMessageDate {
+        let c = ServerMessageDate.Components(
+            year: message.date.year, month: message.date.month, day: message.date.day,
+            hour: message.date.hour, minute: message.date.minute, second: message.date.second,
+            timeZoneMinutes: 0
+        )!
+        return ServerMessageDate(c)
+    }
+}
