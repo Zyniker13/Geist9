@@ -157,6 +157,45 @@ public enum MailBridge {
         return best?.path
     }
 
+    /// The readable body text of the top message (DESIGN 9A get_message):
+    /// plain parts joined when present, otherwise HTML parts reduced to
+    /// readable text. Quoted text is kept — an agent reading one message
+    /// needs the conversation it sits in. Never throws; unparseable input
+    /// or a message without text leaves yields nil.
+    public static func messageBody(for data: Data) -> String? {
+        guard let root = try? parseRoot(data) else { return nil }
+        return bodyText(of: root)
+    }
+
+    /// The body text of a parsed tree: text/plain leaves joined, falling
+    /// back to text/html leaves through `htmlToText`, in document order.
+    static func bodyText(of root: MIMEPart) -> String? {
+        var plains: [String] = []
+        var htmls: [String] = []
+        walkTextBodies(root) { part in
+            let (main, parameters) = part.contentType
+            let text = Charset.decode(parameters["charset"], Array(part.decodedBody))
+            if main == "text/plain" {
+                plains.append(text)
+            } else {
+                htmls.append(text)
+            }
+        }
+        let plain = plains.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !plain.isEmpty { return plain }
+        let html = htmls.map { htmlToText($0) }.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return html.isEmpty ? nil : html
+    }
+
+    /// Every header field of a message in file order, unfolded, with
+    /// encoded words left for the caller to decode (DESIGN 9A get_message:
+    /// the full header list, not just the facts the index stores).
+    public static func headerFields(for data: Data) -> [(name: String, value: String)] {
+        HeaderScanner.scan(data).fields.map { ($0.name, $0.valueText) }
+    }
+
     /// The transfer-decoded bytes, content type, and file name of the MIME
     /// part at `path` — the paths `attachments(for:)` and `bodyPartPath(for:)`
     /// report. nil when the path names no leaf of this message.

@@ -14,6 +14,10 @@ public struct MessageSummary: Sendable, Equatable {
     public var dateSent: Date?
     public var dateReceived: Date?
     public var size: Int
+    /// The conversation this message belongs to (nil when the message never
+    /// joined a thread). Agent access uses it to walk from one hit to its
+    /// whole conversation with get_thread.
+    public var threadID: Int64?
 }
 
 public struct MailboxSummary: Sendable, Equatable {
@@ -102,7 +106,7 @@ extension ArchiveStore {
                 db,
                 sql: """
                 SELECT m.id, m.hash, m.subject, m.fromName, m.fromEmail,
-                       m.dateSent, m.dateReceived, m.size
+                       m.dateSent, m.dateReceived, m.size, m.threadID
                 FROM message m
                 JOIN message_mailbox mm ON mm.messageID = m.id
                 JOIN mailbox mb ON mb.id = mm.mailboxID
@@ -129,7 +133,7 @@ extension ArchiveStore {
                 db,
                 sql: """
                 SELECT id, hash, subject, fromName, fromEmail,
-                       dateSent, dateReceived, size
+                       dateSent, dateReceived, size, threadID
                 FROM message WHERE id = ?
                 """,
                 arguments: [id]
@@ -248,7 +252,7 @@ extension ArchiveStore {
                 db,
                 sql: """
                 SELECT id, hash, subject, fromName, fromEmail,
-                       dateSent, dateReceived, size
+                       dateSent, dateReceived, size, threadID
                 FROM message WHERE threadID = ?
                 ORDER BY COALESCE(dateReceived, dateSent), id
                 """,
@@ -395,7 +399,8 @@ extension MessageSummary: FetchableRecord {
             fromEmail: row["fromEmail"],
             dateSent: (row["dateSent"] as String?).flatMap(Timestamp.date),
             dateReceived: (row["dateReceived"] as String?).flatMap(Timestamp.date),
-            size: row["size"]
+            size: row["size"],
+            threadID: row["threadID"]
         )
     }
 }

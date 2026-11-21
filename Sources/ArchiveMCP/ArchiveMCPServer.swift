@@ -1,4 +1,5 @@
 import Foundation
+import ArchiveCore
 import MCP
 
 /// The MCP server over one archive. Read-only toward the archive and toward
@@ -22,14 +23,21 @@ public final class ArchiveMCPServer: Sendable {
 
     public init(archiveURL: URL) throws {
         // Validate the shape here so misconfiguration fails at launch, not on
-        // the first tool call: an archive is a folder with archive.sqlite3
-        // (DESIGN 6). Opening sessions is cheap; keep the handle-per-call.
-        let sqlite = archiveURL.appending(path: "archive.sqlite3")
-        guard FileManager.default.fileExists(atPath: sqlite.path) else {
+        // the first tool call: openReadOnly refuses a folder without a
+        // manifest (DESIGN 6) and opens the index read-only. Opening the
+        // store once is enough; queries run on the same pool, which is safe
+        // for concurrent readers, and no writer ever runs while a helper is
+        // up (decision 0052: the helper never mutates the archive).
+        self.archiveURL = archiveURL
+        do {
+            self.store = try ArchiveStore.openReadOnly(at: archiveURL)
+        } catch {
             throw SetupError.notAnArchive(archiveURL.path)
         }
-        self.archiveURL = archiveURL
     }
+
+    /// The opened archive, read-only for the whole life of the server.
+    public let store: ArchiveStore
 
     public enum SetupError: Error, CustomStringConvertible {
         case notAnArchive(String)
