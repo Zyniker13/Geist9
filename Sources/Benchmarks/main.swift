@@ -965,16 +965,21 @@ func vectorCluster(_ archiveDir: String, _ repeats: Int, _ seed: UInt64) throws 
     print("== archive: \(stored) embeddings (dim \(vectorDim), model \(vectorModel))")
     guard stored > 0 else { print("FAIL: run vector-prepare first"); exit(1) }
 
-    let t0 = monotonicMs()
-    let clusterCount = try store.db.write { db in
-        try VectorIndex.maybeCluster(db, model: vectorModel, seed: seed)
+    var clusters = try store.db.read { db in try VectorIndex.clusters(db, model: vectorModel) }
+    if clusters.isEmpty {
+        let t0 = monotonicMs()
+        let clusterCount = try store.db.write { db in
+            try VectorIndex.maybeCluster(db, model: vectorModel, seed: seed)
+        }
+        print(String(format: "== buildClusters: %d clusters in %.1f ms", clusterCount, monotonicMs() - t0))
+        guard clusterCount > 0 else {
+            print("FAIL: no clusters built (rows \(stored) below clusterMinRows \(VectorIndex.clusterMinRows)?)")
+            exit(1)
+        }
+        clusters = try store.db.read { db in try VectorIndex.clusters(db, model: vectorModel) }
+    } else {
+        print("== clusters already present: \(clusters.count) (skipping build)")
     }
-    print(String(format: "== buildClusters: %d clusters in %.1f ms", clusterCount, monotonicMs() - t0))
-    guard clusterCount > 0 else {
-        print("FAIL: no clusters built (rows \(stored) below clusterMinRows \(VectorIndex.clusterMinRows)?)")
-        exit(1)
-    }
-    let clusters = try store.db.read { db in try VectorIndex.clusters(db, model: vectorModel) }
     var sizes = clusters.map(\.count)
     sizes.sort()
     let covered = sizes.reduce(0, +)
