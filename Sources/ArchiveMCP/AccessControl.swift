@@ -52,7 +52,7 @@ public enum Redactor {
 
     private static func replace(
         _ text: String, regex: NSRegularExpression, marker: String,
-        keep: (String) -> Bool = { _ in true }
+        keep: @escaping (String) -> Bool = { _ in true }
     ) -> String {
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         var out = ""
