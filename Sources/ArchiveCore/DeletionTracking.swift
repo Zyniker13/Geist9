@@ -25,6 +25,134 @@ public struct DeletionReport: Sendable, Equatable {
 }
 
 extension ArchiveStore {
+    /// One pass-level helper the sync engine calls after LIST: every mailbox
+    /// of `account` NOT among `presentMailboxes` (the folders this pass's
+    /// LIST named) has vanished from the server — mark all its live
+    /// memberships removed. Nothing is ever deleted; the message row, its
+    /// bytes, and its search text all stay.
+    public func markMembershipsInVanishedFolders(
+        account: AccountIdentity, presentMailboxes: [String]
+    ) throws -> DeletionReport {
+        let now = Timestamp.string(Date())
+        return try db.write { db in
+            guard let accountID = try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM account WHERE email = ? AND providerKind = ?",
+                arguments: [account.email.lowercased(), account.providerKind]
+            ) else {
+                return DeletionReport(newlyRemoved: 0, membershipsMarked: 0)
+            }
+            let presentIDs: [Int64] = try presentMailboxes.map { name in
+                try Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM mailbox WHERE accountID = ? AND name = ?",
+                    arguments: [accountID, name]
+                ) ?? -1
+            }
+            let vanishedIDs = try Int64.fetchAll(
+                db,
+                sql: "SELECT id FROM mailbox WHERE accountID = ?",
+                arguments: [accountID]
+            ).filter { !presentIDs.contains($0) }
+            guard !vanishedIDs.isEmpty else {
+                return DeletionReport(newlyRemoved: 0, membershipsMarked: 0)
+            }
+            let placeholders = vanishedIDs.map { _ in "?" }.joined(separator: ", ")
+            var args: [any GRDB.DatabaseValueConvertible] = [now]
+            args.append(contentsOf: vanishedIDs)
+            let changed = try Int.fetchAll(
+                db,
+                sql: """
+                UPDATE message_mailbox
+                SET removedFromServer = 1, lastSeen = ?
+                WHERE mailboxID IN (\(placeholders))
+                  AND removedFromServer = 0
+                RETURNING messageID
+                """,
+                arguments: StatementArguments(args)
+            ).count
+            let newlyRemoved = try Int.fetchOne(
+                db,
+                sql: """
+                SELECT COUNT(*) FROM message m
+                WHERE m.id IN (SELECT messageID FROM message_mailbox WHERE mailboxID IN (\(placeholders)))
+                  AND NOT EXISTS (
+                    SELECT 1 FROM message_mailbox mm
+                    WHERE mm.messageID = m.id AND mm.removedFromServer = 0
+                  )
+                """,
+                arguments: StatementArguments(vanishedIDs)
+            ) ?? 0
+            return DeletionReport(newlyRemoved: newlyRemoved, membershipsMarked: changed)
+        }
+    }
+
+    /// Marks every membership of `account` in `mailbox` whose `uid` is NOT
+    /// in `serverUIDs` — the UIDs the folder's UID SEARCH reported this
+    /// pass — as removed from the server.
+    ///
+    /// The engine calls this once per folder per pass with the folder's
+    /// live UID set. A message that exists but sits above the checkpoint
+    /// keeps its membership (its UID is in the set); only a UID the server
+    /// no longer has is marked. Nothing is ever deleted.
+    public func markMembershipsAbsentFrom(
+        account: AccountIdentity, mailbox: String, serverUIDs: Set<Int64>
+    ) throws -> DeletionReport {
+        let now = Timestamp.string(Date())
+        return try db.write { db in
+            guard let accountID = try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM account WHERE email = ? AND providerKind = ?",
+                arguments: [account.email.lowercased(), account.providerKind]
+            ), let mailboxID = try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM mailbox WHERE accountID = ? AND name = ?",
+                arguments: [accountID, mailbox]
+            ) else {
+                return DeletionReport(newlyRemoved: 0, membershipsMarked: 0)
+            }
+            // A membership is gone when the server's live set no longer
+            // contains its uid. The live UIDs go into a temp table so the
+            // comparison works for folders of any size (no IN-list cap).
+            var changed = 0
+            try db.execute(sql: "CREATE TEMP TABLE liveUIDs (uid INTEGER PRIMARY KEY)")
+            defer { try? db.execute(sql: "DROP TABLE IF EXISTS temp.liveUIDs") }
+            for uid in serverUIDs {
+                try db.execute(
+                    sql: "INSERT INTO temp.liveUIDs (uid) VALUES (?)",
+                    arguments: [uid]
+                )
+            }
+            changed = try Int.fetchAll(
+                db,
+                sql: """
+                UPDATE message_mailbox
+                SET removedFromServer = 1, lastSeen = ?
+                WHERE mailboxID = ? AND removedFromServer = 0
+                  AND uid IS NOT NULL
+                  AND uid NOT IN (SELECT uid FROM temp.liveUIDs)
+                RETURNING messageID
+                """,
+                arguments: [now, mailboxID]
+            ).count
+            // A message is "gone from the server" when EVERY membership that
+            // named it is now removed (it may live in several folders).
+            let newlyRemoved = try Int.fetchOne(
+                db,
+                sql: """
+                SELECT COUNT(*) FROM message m
+                WHERE m.id IN (SELECT messageID FROM message_mailbox WHERE mailboxID = ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM message_mailbox mm
+                    WHERE mm.messageID = m.id AND mm.removedFromServer = 0
+                  )
+                """,
+                arguments: [mailboxID]
+            ) ?? 0
+            return DeletionReport(newlyRemoved: newlyRemoved, membershipsMarked: changed)
+        }
+    }
+
     /// Marks every membership of `accountID` in the given mailboxes that was
     /// NOT seen in this sync pass, as judged by `lastSeen < cutoff`.
     ///
