@@ -8,6 +8,7 @@
 //   bench-search search      <archive-dir> [repeats]
 //   bench-search both        <archive-dir> <count> [repeats]
 //   bench-search as-you-type <archive-dir> [repeats]
+//   bench-search facets      <archive-dir> [repeats]
 //   bench-search vector-prepare <archive-dir> <count> [seed]
 //   bench-search vector-search  <archive-dir> [repeats] [seed]
 //   bench-search vector-prepare-real <archive-dir> <model-dir> [count] [seed]
@@ -123,6 +124,28 @@ struct Corpus {
         (0..<n).map { _ in word() }
     }
 
+    /// 1234567 -> "1,234,567" (US comma grouping for the amount fixtures).
+    static func grouped(_ value: Int) -> String {
+        var digits = String(value)
+        var out: [String] = []
+        while digits.count > 3 {
+            out.insert(String(digits.suffix(3)), at: 0)
+            digits = String(digits.dropLast(3))
+        }
+        out.insert(digits, at: 0)
+        return out.joined(separator: ",")
+    }
+
+    /// 1234567 -> "1.234.567" (German dot grouping for the EUR fixtures).
+    static func loneDot(_ value: Int) -> String {
+        grouped(value).replacingOccurrences(of: ",", with: ".")
+    }
+
+    /// 7 -> "07" (the cents part of the amount fixtures).
+    static func two(_ value: Int) -> String {
+        value < 10 ? "0\(value)" : String(value)
+    }
+
     /// One synthetic message: RFC 822 bytes plus the fields ingest needs.
     /// Bodies run 1-2 KB; subjects 4-9 words; ~5% reply to the previous
     /// message so thread grouping has real chains to walk.
@@ -147,6 +170,21 @@ struct Corpus {
             let count = 25 + rng.uniform(65)
             bodyWords += (0..<count).map { _ in word() }
             if p != paragraphs - 1 { bodyWords.append("\n\n") }
+        }
+        // Roughly a third of messages state a money amount so the entity
+        // facets and the amount: operator have a realistic population at
+        // scale. The form cycles deterministically: currency-marked with
+        // comma grouping, bare two-decimal, and a lone-dot thousands group
+        // beside a currency code (the three shapes the extractor knows).
+        if rng.uniform(3) == 0 {
+            let dollars = 1 + rng.uniform(49_999)
+            let cents = rng.uniform(100)
+            let grouped = Self.grouped(dollars)
+            switch rng.uniform(3) {
+            case 0: bodyWords.append("invoice total $\(grouped).\(Self.two(cents)) due on receipt.")
+            case 1: bodyWords.append("total \(grouped).\(Self.two(cents)) confirmed by accounting.")
+            default: bodyWords.append("budget line EUR \(Self.loneDot(dollars)) approved.")
+            }
         }
         let body = bodyWords.joined(separator: " ")
 
@@ -350,6 +388,94 @@ func monotonicMs() -> Double {
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts)
     return Double(ts.tv_sec) * 1000.0 + Double(ts.tv_nsec) / 1_000_000.0
     #endif
+}
+
+/// DESIGN 6A faceted-counts budget (DESIGN 214): faceted counts under
+/// 300 ms on a 1M-message archive. Measures the two full-match-set
+/// aggregates the app shows beside results — the entity facet kind counts
+/// (`entityFacets`, over the message_entity rows of the whole match set)
+/// and the timeline histogram (`timelineHistogram`, one indexed scan over
+/// the match set's dates) — over the same two-word query set the ranked
+/// phase uses. Also reports index sizes (DESIGN 214 "index size reported
+/// per release"; DESIGN 179: the trigram index's size is measured on 1M).
+func facetsPhase(_ archiveDir: String, _ repeats: Int) throws {
+    let url = URL(fileURLWithPath: archiveDir)
+    let store = try ArchiveStore.open(at: url)
+    let total = try store.countMessages()
+    print("== archive: \(total) messages")
+
+    var corpus = Corpus(seed: 42)
+    var queries: [String] = []
+    for _ in 0..<25 {
+        let w1 = corpus.words[corpus.rng.biased(corpus.words.count)]
+        let w2 = corpus.words[corpus.rng.biased(corpus.words.count)]
+        queries.append("\(w1) \(w2)")
+    }
+    let probe = try store.search(queries[0])
+    print("== probe query '\(queries[0])' hits: \(probe.hits.count)")
+
+    // Warm-up pass, untimed (page cache).
+    for q in queries {
+        _ = try store.entityFacets(matching: q)
+        _ = try store.timelineHistogram(matching: q)
+    }
+
+    var entitySamples: [Double] = []
+    var histogramSamples: [Double] = []
+    for i in 0..<repeats {
+        let q = queries[i % queries.count]
+        let t0 = monotonicMs()
+        let facets = try store.entityFacets(matching: q)
+        let t1 = monotonicMs()
+        _ = try store.timelineHistogram(matching: q)
+        let t2 = monotonicMs()
+        entitySamples.append(t1 - t0)
+        histogramSamples.append(t2 - t1)
+        if i == 0 {
+            let described = facets.map { "\($0.key.rawValue)=\($0.value)" }.sorted().joined(separator: " ")
+            print("== first query facets: \(described.isEmpty ? "(none)" : described)")
+        }
+    }
+    report("entity facets, kind counts", entitySamples)
+    report("timeline histogram", histogramSamples)
+
+    // Index size report: file size, per-table row counts, and the
+    // byte size of the two FTS shadow-table families when dbstat is
+    // available (falling back to counts alone when it is not).
+    let indexURL = url.appendingPathComponent("index.sqlite")
+    let fileSize = (try? FileManager.default.attributesOfItem(
+        atPath: indexURL.path
+    )[.size] as? NSNumber).map { $0.intValue } ?? 0
+    print(String(format: "== index file: %.1f MB", Double(fileSize) / 1_048_576.0))
+    try store.db.read { db in
+        for table in ["message", "message_text", "message_trigram", "message_entity", "message_embedding"] {
+            let count = (try? Int.fetchOne(
+                db, sql: "SELECT COUNT(*) FROM \(table)"
+            )) ?? nil
+            print("== rows \(table): \(count.map(String.init) ?? "n/a")")
+        }
+        if try Bool.fetchOne(
+            db, sql: "SELECT COUNT(*) FROM sqlite_master WHERE name = 'dbstat'"
+        ) == true {
+            for table in ["message_text", "message_trigram"] {
+                // FTS5 keeps its content in shadow tables named <table>_*);
+                // dbstat attributes their pages to those names.
+                let bytes = try Int.fetchOne(
+                    db,
+                    sql: "SELECT SUM(pgsize) FROM dbstat WHERE name LIKE ?",
+                    arguments: ["\(table)%"]
+                ) ?? 0
+                let mb = String(format: "%.1f", Double(bytes) / 1_048_576.0)
+                print("== size \(table): \(mb) MB")
+            }
+        }
+    }
+
+    let entityP95 = percentile(entitySamples.sorted(), 95)
+    let histogramP95 = percentile(histogramSamples.sorted(), 95)
+    let ok = entityP95 < 300.0 && histogramP95 < 300.0
+    print("== budget: entity-facet p95 \(entityP95) ms, histogram p95 \(histogramP95) ms (\(ok ? "PASS" : "FAIL"), <300 each)")
+    if !ok { exit(1) }
 }
 
 func searchPhase(_ archiveDir: String, _ repeats: Int) throws {
@@ -1545,6 +1671,8 @@ do {
         try importFixture(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42, killAfter: killAfter, crashStage: crashStage)
     case "as-you-type":
         try asYouTypePhase(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 300)
+    case "facets":
+        try facetsPhase(parsed[1], parsed.count > 2 ? Int(parsed[2])! : 200)
     case "vector-prepare":
         try vectorPrepare(parsed[1], Int(parsed[2])!, parsed.count > 3 ? UInt64(parsed[3])! : 42)
     case "vector-search":
