@@ -12,5 +12,11 @@ struct EmailArchiverApp: App {
             ContentView()
                 .environmentObject(model)
         }
+        // Agent access (DESIGN 9A): the person's controls for what agents
+        // may see, the copyable client configuration, and the activity log.
+        Settings {
+            AgentSettingsView()
+                .environmentObject(model)
+        }
     }
 }
