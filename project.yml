@@ -24,6 +24,34 @@ targets:
         product: ViewerKit
       - package: EmailArchiver
         product: ArchiveEmbedApple
+    postBuildScripts:
+      # Bundle the helper next to the app (DESIGN 9A): MCP clients point at
+      # <bundle>/Contents/Helpers/email-archiver-mcp, which opens the same
+      # archive read-only and honors the policy file Settings writes. The
+      # helper is built with SwiftPM from the same package state rather than
+      # added as an app dependency: an executable product dependency makes
+      # the generated project's package resolution fail on the systemLibrary
+      # targets in this package graph. Up-to-date incremental builds take
+      # seconds; check.sh builds the package (swift test) before the app.
+      # Ad-hoc re-sign keeps the app launchable on machines without a
+      # Developer ID (maintainer signs for releases, STATUS.md "Needs the
+      # Maintainer").
+      - name: Embed MCP helper
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # SwiftPM spells configurations lowercase; xcodebuild passes "Debug".
+          CONFIG="$(tr '[:upper:]' '[:lower:]' <<<"${CONFIGURATION:-Debug}")"
+          swift build --package-path "$SRCROOT" --configuration "$CONFIG" \
+            --product email-archiver-mcp >/dev/null
+          HELPER="$(swift build --package-path "$SRCROOT" --configuration "$CONFIG" \
+            --product email-archiver-mcp --show-bin-path)/email-archiver-mcp"
+          DEST="$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+          test -x "$HELPER" || { echo "missing helper: $HELPER"; exit 1; }
+          mkdir -p "$DEST"
+          cp -f "$HELPER" "$DEST/email-archiver-mcp"
+          codesign --force --sign - "$DEST/email-archiver-mcp"
+          echo "embedded $DEST/email-archiver-mcp"
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -38,6 +66,9 @@ targets:
         # "Needs the Maintainer"); local and CI builds are unsigned.
         CODE_SIGN_IDENTITY: ""
         CODE_SIGNING_REQUIRED: "NO"
+        # The embed script runs SwiftPM against the package; keep script
+        # phases unsandboxed so they can write the package's build directory.
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"
 schemes:
   EmailArchiver:
     build:
