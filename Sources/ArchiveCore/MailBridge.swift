@@ -736,7 +736,11 @@ public enum MailBridge {
 
     /// Reduces HTML to plain text: drops script/style content and comments,
     /// turns block boundaries into newlines, decodes the common entities.
-    /// Deliberately not a full HTML parser — the goal is search text.
+    /// Hidden text is dropped too (DESIGN 9A): elements the markup hides
+    /// from a reader — a `hidden` attribute, or `display:none` /
+    /// `visibility:hidden` styling — never reach the text, so CSS cannot
+    /// smuggle words past the reader or the index. Deliberately not a full
+    /// HTML parser — the goal is search text.
     static func htmlToText(_ html: String) -> String {
         let scalars = Array(html.unicodeScalars)
         var out = String.UnicodeScalarView()
@@ -769,8 +773,20 @@ public enum MailBridge {
                 continue
             }
             if raw.hasPrefix("!") || raw.hasPrefix("?") { continue }  // comments, declarations
+            if raw.hasPrefix("/") { continue }  // stray close tag, no effect on text
             if bare == "script" || bare == "style" {
                 skipping = bare
+                continue
+            }
+            if isHiddenTag(name) {
+                // The markup hides this subtree from the reader, so its text
+                // must not reach the index or an agent either. Only elements
+                // that can actually own a close tag enter skip mode: a void
+                // element (<img hidden>) would otherwise swallow the rest
+                // of the body, and a self-closed tag owns no content.
+                if !voidElements.contains(bare) && !raw.hasSuffix("/") {
+                    skipping = bare
+                }
                 continue
             }
             if breaks.contains(bare) {
@@ -781,7 +797,47 @@ public enum MailBridge {
         }
         var text = String(out)
         if text.contains("&") { text = decodeEntities(text) }
+        text = stripInvisibleScalars(text)
         return collapseBlankRuns(text)
+    }
+
+    /// Elements the HTML spec calls void: they never take a close tag, so a
+    /// `hidden` attribute on one must not put the reducer into skip mode.
+    private static let voidElements: Set<String> = [
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    ]
+
+    /// True when an open tag hides its content from the reader: a `hidden`
+    /// attribute, or display/visibility styling set to none/hidden. The
+    /// interior is already lowercased; whitespace inside the style value is
+    /// ignored so `display : none` is caught too. A heuristic on purpose —
+    /// the archive keeps the original bytes for the exact rendering.
+    static func isHiddenTag(_ interior: String) -> Bool {
+        for token in interior.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" }) {
+            if token == "hidden" || token.hasPrefix("hidden=") { return true }
+        }
+        let compact = interior.filter { $0 != " " && $0 != "\t" && $0 != "\n" && $0 != "\r" }
+        return compact.contains("display:none") || compact.contains("visibility:hidden")
+    }
+
+    /// Scalars that take no space on screen but split words in the index
+    /// and can carry hidden payload text: soft hyphen, zero-width and
+    /// word-joiner spaces, directional marks and bidi overrides, invisible
+    /// math operators, the zero-width no-break space. Removed wherever HTML
+    /// is reduced to text so neither a human reader nor the index sees them.
+    static func isInvisibleScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x00AD, 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x2064, 0xFEFF:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func stripInvisibleScalars(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: isInvisibleScalar(_:)) else { return text }
+        return String(String.UnicodeScalarView(text.unicodeScalars.filter { !isInvisibleScalar($0) }))
     }
 
     /// Decodes the entities HTML commonly carries; unknown or malformed

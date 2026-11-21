@@ -596,6 +596,113 @@ final class AccessControlEndToEndTests: XCTestCase {
             proc.terminationStatus, 0,
             "a broken policy file must refuse the launch, not start permissive")
     }
+
+    // MARK: - 5. Hidden text never reaches the agent (DESIGN 9A 9A.4b)
+
+    /// An HTML message whose markup hides part of its body (a `hidden`
+    /// element, a `display:none` element, and invisible zero-width scalars)
+    /// is ingested through the real pipeline — the index is built from
+    /// `MailBridge.searchText(for:)`, exactly as the importer does, and the
+    /// stored bytes are the original. Over the wire, neither search nor
+    /// get_message may surface the hidden text: the reducer drops it at the
+    /// boundary, so the index and the read path agree.
+    func testHiddenTextNeverReachesTheAgentOverTheWire() throws {
+        let store = try ArchiveStore.create(at: archiveURL, appVersion: "0.1.0")
+        let html = """
+        <html><body>
+        <p>visible alpha text</p>
+        <div hidden>secret hidden text</div>
+        <span style="display:none">more hidden text</span>
+        <p>visible\u{200B}end\u{200D}text</p>
+        </body></html>
+        """
+        let data = Data("""
+        From: alice@example.com\r
+        Subject: Invisible body test\r
+        Content-Type: text/html; charset=utf-8\r
+        \r
+        \(html)\r
+
+        """.utf8)
+        let record = MessageRecord(
+            subject: "Invisible body test",
+            normalizedSubject: "Invisible body test",
+            dateSent: Timestamp.date("2024-03-01T09:00:00Z"),
+            dateReceived: Timestamp.date("2024-03-01T09:00:00Z"),
+            messageID: "hidden-1@example.com",
+            inReplyTo: [],
+            from: Recipient(name: "Alice", email: "alice@example.com"),
+            to: [Recipient(name: "Alice", email: "alice@example.com")]
+        )
+        // The importer's own search-text extraction, so the index is built
+        // the same way a real import builds it.
+        let searchText = MailBridge.searchText(for: data)
+        _ = try store.ingest(
+            IngestedMessage(
+                record: record,
+                data: data,
+                memberships: [Membership(mailbox: "INBOX", uid: 1)],
+                labels: [],
+                attachments: [],
+                searchText: searchText
+            ),
+            into: AccountIdentity(
+                email: "alice@example.com",
+                displayName: "alice@example.com",
+                providerKind: "import"
+            )
+        )
+
+        // No policy anywhere: the permissive default, so the test checks
+        // the reducer, not the access filter.
+        let home = try makeFakeHome(withStandardPolicy: nil)
+        let client = try StdioMCPClient(
+            executable: try helperExecutableURL(), archivePath: archiveURL.path,
+            extraEnvironment: ["HOME": home]
+        )
+        defer { client.shutdown() }
+        process = client.process
+        try client.requestResult("initialize", params: [
+            "protocolVersion": "2025-06-18",
+            "capabilities": [String: Any](),
+            "clientInfo": ["name": "geist9-hidden-test", "version": "0.0.0"],
+        ])
+        client.notify("notifications/initialized")
+
+        // The visible words are searchable.
+        let search = try client.requestResult("tools/call", params: [
+            "name": "search_messages",
+            "arguments": ["query": "alpha", "limit": 10],
+        ])
+        let searchContent = try policyDict(search["structuredContent"])
+        XCTAssertEqual(try policyInt(searchContent["count"]), 1)
+
+        // The hidden words are not searchable at all.
+        for hidden in ["secret", "hidden", "more"] {
+            let probe = try client.requestResult("tools/call", params: [
+                "name": "search_messages",
+                "arguments": ["query": hidden, "limit": 10],
+            ])
+            let probeContent = try policyDict(probe["structuredContent"])
+            XCTAssertEqual(
+                try policyInt(probeContent["count"]), 0,
+                "hidden word '\(hidden)' must not be indexed")
+        }
+
+        // get_message returns the reduced body: visible text present,
+        // hidden text and invisible scalars absent.
+        let message = try client.requestResult("tools/call", params: [
+            "name": "get_message", "arguments": ["id": 1],
+        ])
+        let messageContent = try policyDict(message["structuredContent"])
+        let body = try policyStr(try policyDict(messageContent["message"])["body"])
+        XCTAssertTrue(body.contains("visible alpha text"), body)
+        XCTAssertTrue(body.contains("endtext"), body)
+        XCTAssertFalse(body.contains("secret hidden text"), body)
+        XCTAssertFalse(body.contains("more hidden text"), body)
+        XCTAssertFalse(body.contains("\u{200B}"), body)
+        XCTAssertFalse(body.contains("\u{200D}"), body)
+    }
 }
 
 private struct PolicyE2EError: Error, CustomStringConvertible {

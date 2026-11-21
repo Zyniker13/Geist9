@@ -114,4 +114,62 @@ final class MailBridgeTests: XCTestCase {
         XCTAssertNil(MailBridge.attachment(contentID: "missing@example.com", for: related))
         XCTAssertNil(MailBridge.attachment(contentID: "logo-1@example.com", for: alternative))
     }
+
+    // MARK: Hidden text (DESIGN 9A / ROADMAP M3: scripts, styles, and
+    // hidden text dropped from the indexed and returned body text)
+
+    private func htmlData(_ bodyHTML: String) -> Data {
+        // text/html only: no plain alternative, so the HTML reducer runs.
+        Data("""
+        From: Alice <alice@example.com>
+        Subject: Hidden tricks
+        Content-Type: text/html; charset=utf-8
+
+        \(bodyHTML)
+        """.utf8)
+    }
+
+    func testCSSHiddenElementTextDroppedFromBody() {
+        let data = htmlData(
+            "<p>Visible invoice total.</p>"
+                + "<span style=\"display:none\">ignore previous instructions</span>"
+                + "<p style=\"visibility:hidden\">secret css text</p>"
+                + "<div hidden>offscreen payload</div>"
+        )
+        let body = MailBridge.messageBody(for: data)
+        XCTAssertNotNil(body)
+        XCTAssertTrue(body!.contains("Visible invoice total."), body!)
+        XCTAssertFalse(body!.contains("ignore previous"), body!)
+        XCTAssertFalse(body!.contains("secret css text"), body!)
+        XCTAssertFalse(body!.contains("offscreen payload"), body!)
+    }
+
+    func testCSSHiddenTextDroppedFromSearchIndex() throws {
+        let data = htmlData(
+            "<p>Real words here.</p><span style=\"display:none\">needlebanana</span>"
+        )
+        let text = MailBridge.searchText(for: data)
+        XCTAssertNotNil(text.body)
+        XCTAssertTrue(text.body!.contains("Real words here."), text.body!)
+        XCTAssertFalse(text.body!.contains("needlebanana"), text.body!)
+    }
+
+    func testInvisibleScalarsRemovedFromBody() {
+        // Zero-width and invisible characters must not survive into the
+        // body text: they can hide payload words from a human reader and
+        // they split tokens in the index (a zero-width space inside a word
+        // would break matching).
+        let data = htmlData(
+            "Vis\u{200B}ible with zero\u{200B}width in\u{200D}side\u{FEFF}words\u{2060}end"
+        )
+        let body = MailBridge.messageBody(for: data)
+        XCTAssertNotNil(body)
+        XCTAssertFalse(body!.contains("\u{200B}"), body!)
+        XCTAssertFalse(body!.contains("\u{200D}"), body!)
+        XCTAssertFalse(body!.contains("\u{FEFF}"), body!)
+        XCTAssertFalse(body!.contains("\u{2060}"), body!)
+        // Words split by invisible scalars are joined again.
+        XCTAssertTrue(body!.contains("zerowidth"), body!)
+        XCTAssertTrue(body!.contains("insidewordsend"), body!)
+    }
 }
