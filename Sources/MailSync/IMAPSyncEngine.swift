@@ -95,14 +95,19 @@ public enum SyncEngineError: Error, Equatable, Sendable {
 }
 
 /// The IMAP sync engine for one account (DESIGN 5).
-public struct IMAPSyncEngine {
+///
+/// A class so `self` can be captured across the connection library's
+/// `@Sendable` closures under every toolchain's strict-concurrency rules
+/// (a struct's mutable copies would trip "sending self" on the 6.1
+/// compiler); every field is a `let`, so it is safely `Sendable`.
+public final class IMAPSyncEngine: Sendable {
     /// Where the connection goes. The engine never resolves providers
     /// itself: onboarding hands it a `ProviderProfile` (MailSync task 2).
-    public var profile: ProviderProfile
+    public let profile: ProviderProfile
     /// The account the archive records this mail under.
-    public var account: AccountIdentity
+    public let account: AccountIdentity
     /// Byte budget per fetch batch (DESIGN 5: batches sized by bytes, not count).
-    public var batchBytes: Int
+    public let batchBytes: Int
 
     /// The archive-store calls block (SQLite, file writes), and a blocked
     /// call inside an async context parks a cooperative-pool thread — the
