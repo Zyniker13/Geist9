@@ -147,18 +147,23 @@ extension ArchiveStore {
         }
     }
 
-    /// All mailboxes of one account, with message counts.
-    public func listMailboxes(accountEmail: String) throws -> [MailboxSummary] {
+    /// All mailboxes of one account, with message counts. `visible` filters
+    /// for agent access (DESIGN 9A): the count is of messages the client may
+    /// see, and mailboxes excluded outright drop out of the listing.
+    public func listMailboxes(
+        accountEmail: String, visible: MessageVisibility? = nil
+    ) throws -> [MailboxSummary] {
         try db.read { db in
             try MailboxSummary.fetchAll(
                 db,
                 sql: """
                 SELECT mb.id, mb.accountID, mb.name, mb.role,
-                       COALESCE(COUNT(mm.messageID), 0) AS messageCount
+                       COALESCE(COUNT(\(visible?.countExpression(messageAlias: "m", joinedColumn: "mm.messageID") ?? "mm.messageID")), 0) AS messageCount
                 FROM mailbox mb
                 JOIN account a ON a.id = mb.accountID
                 LEFT JOIN message_mailbox mm ON mm.mailboxID = mb.id
-                WHERE a.email = ?
+                LEFT JOIN message m ON m.id = mm.messageID
+                WHERE a.email = ? \(visible?.mailboxRowExclusion(mailboxAlias: "mb") ?? "")
                 GROUP BY mb.id
                 ORDER BY mb.name
                 """,
@@ -169,17 +174,22 @@ extension ArchiveStore {
 
     /// Distinct labels of one account with the number of messages carrying
     /// each. Labels with no messages still appear, so the sidebar shows the
-    /// full set an import laid down.
-    public func listLabels(accountEmail: String) throws -> [LabelSummary] {
+    /// full set an import laid down. `visible` filters for agent access
+    /// (DESIGN 9A): the count is of visible messages, and labels excluded
+    /// outright drop out.
+    public func listLabels(
+        accountEmail: String, visible: MessageVisibility? = nil
+    ) throws -> [LabelSummary] {
         try db.read { db in
             try LabelSummary.fetchAll(
                 db,
                 sql: """
-                SELECT l.name, COALESCE(COUNT(ml.messageID), 0) AS messageCount
+                SELECT l.name, COALESCE(COUNT(\(visible?.countExpression(messageAlias: "m", joinedColumn: "ml.messageID") ?? "ml.messageID")), 0) AS messageCount
                 FROM label l
                 JOIN account a ON a.id = l.accountID
                 LEFT JOIN message_label ml ON ml.labelID = l.id
-                WHERE a.email = ?
+                LEFT JOIN message m ON m.id = ml.messageID
+                WHERE a.email = ? \(visible?.labelRowExclusion(labelAlias: "l") ?? "")
                 GROUP BY l.id
                 ORDER BY l.name
                 """,
@@ -189,14 +199,16 @@ extension ArchiveStore {
     }
 
     /// All accounts with message counts, for the sidebar. Accounts with no
-    /// messages still appear.
-    public func listAccounts() throws -> [AccountSummary] {
+    /// messages still appear. `visible` filters for agent access (DESIGN 9A):
+    /// the count is of visible messages; an account whose every mailbox is
+    /// excluded then shows zero, and the caller decides whether to show it.
+    public func listAccounts(visible: MessageVisibility? = nil) throws -> [AccountSummary] {
         try db.read { db in
             try AccountSummary.fetchAll(
                 db,
                 sql: """
                 SELECT a.email, a.displayName,
-                       COALESCE(COUNT(DISTINCT m.id), 0) AS messageCount
+                       COALESCE(COUNT(DISTINCT \(visible?.countExpression(messageAlias: "m", joinedColumn: "m.id") ?? "m.id")), 0) AS messageCount
                 FROM account a
                 LEFT JOIN mailbox mb ON mb.accountID = a.id
                 LEFT JOIN message_mailbox mm ON mm.mailboxID = mb.id
@@ -251,15 +263,21 @@ extension ArchiveStore {
     /// All messages of one thread, oldest first, as the MCP get_thread tool
     /// and any other client list them. Threads hold message ids, so this is
     /// one indexed lookup; ties on the same timestamp break by id, which is
-    /// ingest order (the same rule the ranking uses for ties).
-    public func threadMessages(threadID: Int64) throws -> [MessageSummary] {
+    /// ingest order (the same rule the ranking uses for ties). With a
+    /// visibility filter, hidden messages are left out entirely — callers
+    /// that need to know a thread is partially hidden use messageIsVisible
+    /// on the ids they receive.
+    public func threadMessages(
+        threadID: Int64, visible: MessageVisibility? = nil
+    ) throws -> [MessageSummary] {
         try db.read { db in
             try MessageSummary.fetchAll(
                 db,
                 sql: """
                 SELECT id, hash, subject, fromName, fromEmail,
                        dateSent, dateReceived, size, threadID
-                FROM message WHERE threadID = ?
+                FROM message
+                WHERE threadID = ? \(visible.map { "AND \($0.predicate(messageAlias: "message"))" } ?? "")
                 ORDER BY COALESCE(dateReceived, dateSent), id
                 """,
                 arguments: [threadID]
@@ -280,28 +298,42 @@ extension ArchiveStore {
 
     /// Every message in index-id order, paged after `after` (exclusive), for
     /// MCP resource listing (DESIGN 9A). Index ids are ingest order and never
-    /// reused, so a cursor pages a stable sequence.
-    public func listMessages(after id: Int64, limit: Int) throws -> [MessageSummary] {
+    /// reused, so a cursor pages a stable sequence. With a visibility filter,
+    /// hidden messages are skipped entirely — pagination stays stable because
+    /// the cursor is the last returned id, not a row number.
+    public func listMessages(
+        after id: Int64, limit: Int, visible: MessageVisibility? = nil
+    ) throws -> [MessageSummary] {
         try db.read { db in
             try MessageSummary.fetchAll(
                 db,
                 sql: """
                 SELECT id, hash, subject, fromName, fromEmail,
                        dateSent, dateReceived, size, threadID
-                FROM message WHERE id > ? ORDER BY id LIMIT ?
+                FROM message
+                WHERE id > ? \(visible.map { "AND \($0.predicate(messageAlias: "message"))" } ?? "")
+                ORDER BY id LIMIT ?
                 """,
                 arguments: [id, limit]
             )
         }
     }
 
-    /// Every thread in id order, paged after `after` (exclusive), for MCP
-    /// resource listing (DESIGN 9A).
-    public func listThreads(after id: Int64, limit: Int) throws -> [ThreadRef] {
+    /// Every thread with at least one visible message, in id order, paged
+    /// after `after` (exclusive), for MCP resource listing (DESIGN 9A).
+    public func listThreads(
+        after id: Int64, limit: Int, visible: MessageVisibility? = nil
+    ) throws -> [ThreadRef] {
         try db.read { db in
             try Row.fetchAll(
                 db,
-                sql: "SELECT id, rootSubject FROM thread WHERE id > ? ORDER BY id LIMIT ?",
+                sql: """
+                SELECT thread.id, thread.rootSubject
+                FROM thread
+                WHERE thread.id > ?
+                  \(visible.map { "AND EXISTS (SELECT 1 FROM message WHERE message.threadID = thread.id AND \($0.predicate(messageAlias: "message")))" } ?? "")
+                ORDER BY thread.id LIMIT ?
+                """,
                 arguments: [id, limit]
             )
             .map { ThreadRef(id: $0["id"], subject: $0["rootSubject"]) }
@@ -347,8 +379,12 @@ extension ArchiveStore {
     /// most-recent messages first by count. A message counts for an address
     /// once, whatever roles (from, to, cc, bcc, reply-to) it carries the
     /// address in. Counts and dates come from the message rows, so a
-    /// deleted message leaves the counts too.
-    public func findContacts(limit: Int = 50) throws -> [ContactSummary] {
+    /// deleted message leaves the counts too. `visible` filters for agent
+    /// access (DESIGN 9A): an address whose messages are all excluded does
+    /// not appear.
+    public func findContacts(
+        limit: Int = 50, visible: MessageVisibility? = nil
+    ) throws -> [ContactSummary] {
         let capped = max(1, min(limit, 10_000))
         return try db.read { db in
             try ContactSummary.fetchAll(
@@ -361,6 +397,7 @@ extension ArchiveStore {
                 FROM address a
                 JOIN message_address ma ON ma.addressID = a.id
                 JOIN message m ON m.id = ma.messageID
+                     AND \(visible?.predicate(messageAlias: "m") ?? "1")
                 GROUP BY a.id
                 ORDER BY messageCount DESC, a.email
                 LIMIT ?
@@ -373,10 +410,13 @@ extension ArchiveStore {
     /// Archive totals by account, year, and sender (DESIGN 9A
     /// archive_stats), for questions like "how much mail from X per year".
     /// `senderLimit` caps the sender list; the year and account lists are
-    /// always complete.
-    public func archiveStats(senderLimit: Int = 50) throws -> ArchiveStats {
+    /// always complete. `visible` filters for agent access (DESIGN 9A):
+    /// excluded messages leave every total.
+    public func archiveStats(
+        senderLimit: Int = 50, visible: MessageVisibility? = nil
+    ) throws -> ArchiveStats {
         let cappedSenders = max(1, min(senderLimit, 10_000))
-        let accounts = try listAccounts().map {
+        let accounts = try listAccounts(visible: visible).map {
             ArchiveStats.AccountCount(
                 email: $0.email,
                 displayName: $0.displayName,
@@ -390,6 +430,7 @@ extension ArchiveStore {
                 SELECT substr(COALESCE(dateReceived, dateSent, 'none'), 1, 4) AS year,
                        COUNT(*) AS messageCount
                 FROM message
+                WHERE \(visible?.predicate(messageAlias: "message") ?? "1")
                 GROUP BY year
                 ORDER BY year
                 """
@@ -403,12 +444,14 @@ extension ArchiveStore {
                 SELECT m.fromEmail AS email,
                        (SELECT m2.fromName FROM message m2
                         WHERE m2.fromEmail = m.fromEmail AND m2.fromName != ''
+                          AND \(visible?.predicate(messageAlias: "m2") ?? "1")
                         ORDER BY COALESCE(m2.dateReceived, m2.dateSent) DESC, m2.id DESC
                         LIMIT 1) AS name,
                        COUNT(*) AS messageCount,
                        MIN(COALESCE(m.dateReceived, m.dateSent)) AS firstDate,
                        MAX(COALESCE(m.dateReceived, m.dateSent)) AS lastDate
                 FROM message m
+                WHERE \(visible?.predicate(messageAlias: "m") ?? "1")
                 GROUP BY m.fromEmail
                 ORDER BY messageCount DESC, email
                 LIMIT ?

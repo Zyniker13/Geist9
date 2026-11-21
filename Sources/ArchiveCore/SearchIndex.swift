@@ -57,12 +57,14 @@ public enum SearchExecutor {
         limit: Int = 200,
         offset: Int = 0,
         withSnippets: Bool = false,
-        groupByThread: Bool = false
+        groupByThread: Bool = false,
+        visible: MessageVisibility? = nil
     ) throws -> [SearchHit] {
         if case .fts(let leaf) = node {
             let hits = try ranked(
                 leaf.expression, in: db, limit: limit, offset: offset,
-                withSnippets: withSnippets, groupByThread: groupByThread
+                withSnippets: withSnippets, groupByThread: groupByThread,
+                visible: visible
             )
             if !hits.isEmpty { return hits }
             // Zero exact hits and a trigram fallback exists: retry as a
@@ -74,7 +76,7 @@ public enum SearchExecutor {
                     fallback, in: db, limit: limit, offset: offset,
                     withSnippets: withSnippets, groupByThread: groupByThread,
                     table: "message_trigram", weightSQL: trigramWeights,
-                    viaTrigram: true
+                    viaTrigram: true, visible: visible
                 )
                 if !trigramHits.isEmpty { return trigramHits }
             }
@@ -84,13 +86,24 @@ public enum SearchExecutor {
             // re-matches; hits carry viaTypo.
             if let typoHits = try typoRescue(
                 for: leaf, in: db, limit: limit, offset: offset,
-                withSnippets: withSnippets, groupByThread: groupByThread
+                withSnippets: withSnippets, groupByThread: groupByThread,
+                visible: visible
             ) {
                 return typoHits
             }
             return hits
         }
         let (whereSQL0, arguments0) = predicate(for: node)
+        // Access control (DESIGN 9A): the visibility predicate is inline
+        // SQL (no bind parameters), so it ANDs into the tree's WHERE
+        // clause before LIMIT/OFFSET — hidden messages never enter the
+        // ranked page, and counts and offsets stay consistent with the
+        // listings and tools that share the predicate.
+        func withVisibility(_ sql: String) -> String {
+            guard let visible, !visible.isPermissive else { return sql }
+            return "(\(sql)) AND \(visible.predicate(messageAlias: "m"))"
+        }
+        let whereSQL = withVisibility(whereSQL0)
         let selected = "m.id AS id, m.threadID AS threadID"
         func fetch(_ whereSQL: String, _ arguments: [String]) throws -> [Row] {
             if groupByThread {
@@ -129,7 +142,7 @@ public enum SearchExecutor {
                 arguments: StatementArguments(arguments)
             )
         }
-        var rows = try fetch(whereSQL0, arguments0)
+        var rows = try fetch(whereSQL, arguments0)
         var viaTrigram = false
         if rows.isEmpty, hasFallbackableLeaf(node) {
             // Whole-tree zero-hit retry: the exact form found nothing, so
@@ -138,8 +151,8 @@ public enum SearchExecutor {
             // preferred: the retry only rescues queries that found nothing
             // at all, and the hits say honestly that they came from the
             // trigram.
-            let (whereSQL, arguments) = predicate(for: node, useFallbacks: true)
-            rows = try fetch(whereSQL, arguments)
+            let (fallbackSQL0, fallbackArguments) = predicate(for: node, useFallbacks: true)
+            rows = try fetch(withVisibility(fallbackSQL0), fallbackArguments)
             viaTrigram = true
         }
         return rows.map { row -> SearchHit in
@@ -198,7 +211,8 @@ public enum SearchExecutor {
         _ expression: String, in db: Database, limit: Int, offset: Int,
         withSnippets: Bool, groupByThread: Bool,
         table: String = "message_text", weightSQL: String? = nil, viaTrigram: Bool = false,
-        viaTypo: Bool = false
+        viaTypo: Bool = false,
+        visible: MessageVisibility? = nil
     ) throws -> [SearchHit] {
         let weights = weightSQL
             ?? QueryCompiler.bm25Weights
@@ -214,10 +228,23 @@ public enum SearchExecutor {
             SELECT \(table).rowid AS id, r.threadID AS threadID,
                    bm25(\(table), \(weights)) AS score
             """
+        // Access control (DESIGN 9A): with a filter active, the ranked
+        // path joins `message` and applies the visibility predicate before
+        // LIMIT — the ranking SQL is otherwise byte-identical, so the
+        // permissive path keeps its measured budget exactly.
+        let filterJoin: String
+        let filterWhere: String
+        if let visible, !visible.isPermissive {
+            filterJoin = " JOIN message m ON m.id = \(table).rowid"
+            filterWhere = " AND \(visible.predicate(messageAlias: "m"))"
+        } else {
+            filterJoin = ""
+            filterWhere = ""
+        }
         let baseFrom = """
-            FROM \(table)
+            FROM \(table)\(filterJoin)
             JOIN message_rank r ON r.id = \(table).rowid
-            WHERE \(table) MATCH :q
+            WHERE \(table) MATCH :q\(filterWhere)
             """
         let sql: String
         if groupByThread {
@@ -295,7 +322,8 @@ public enum SearchExecutor {
     /// correction is a real term.
     static func typoRescue(
         for leaf: FTSLeaf, in db: Database, limit: Int, offset: Int,
-        withSnippets: Bool, groupByThread: Bool
+        withSnippets: Bool, groupByThread: Bool,
+        visible: MessageVisibility? = nil
     ) throws -> [SearchHit]? {
         guard let expression = try typoRescueExpression(for: leaf, in: db) else {
             return nil
@@ -303,7 +331,7 @@ public enum SearchExecutor {
         return try ranked(
             expression, in: db, limit: limit, offset: offset,
             withSnippets: withSnippets, groupByThread: groupByThread,
-            viaTypo: true
+            viaTypo: true, visible: visible
         )
     }
 
@@ -491,7 +519,8 @@ extension ArchiveStore {
         groupByThread: Bool = false,
         now: Date? = nil,
         semanticModel: (any EmbeddingModel)? = nil,
-        semanticEnabled: Bool = true
+        semanticEnabled: Bool = true,
+        visible: MessageVisibility? = nil
     ) throws -> SearchResults {
         guard let node = try QueryParser.parse(query, now: now) else {
             return SearchResults(hits: [], warnings: [])
@@ -510,7 +539,8 @@ extension ArchiveStore {
             let hits = try SearchExecutor.run(
                 compiled.root, in: db, limit: perSide,
                 offset: hybrid ? 0 : offset,
-                withSnippets: withSnippets, groupByThread: groupByThread
+                withSnippets: withSnippets, groupByThread: groupByThread,
+                visible: visible
             )
             // The "showing results for" line (DESIGN 6A): the rescue is
             // the ladder's last rung, so it ran exactly when the keyword
@@ -534,13 +564,41 @@ extension ArchiveStore {
                 hits: final, warnings: compiled.warnings, rescueTerms: keyword.rescue
             )
         }
+        // The semantic side has no SQL LIMIT to hide behind (the scan
+        // ranks in memory), so under a filter it over-fetches, then drops
+        // hidden ids with the same predicate before fusion; the added
+        // cost is one small IN-query, and the permissive path is
+        // untouched.
+        let filtering = !(visible?.isPermissive ?? true)
         let vectorHits = try db.read { db in
             try VectorIndex.search(
-                db, model: model.identifier, query: queryVector, limit: perSide
+                db, model: model.identifier, query: queryVector,
+                limit: filtering ? perSide * 4 : perSide
             )
         }
+        let semanticIDs: [Int64]
+        if filtering, let visible {
+            semanticIDs = try db.read { db in
+                let idsJSON = "[" +
+                    vectorHits.map { String($0.messageID) }.joined(separator: ",") + "]"
+                let visibleIDs = Set(try Int64.fetchAll(
+                    db,
+                    sql: """
+                    SELECT m.id FROM json_each(?) j
+                    JOIN message m ON m.id = j.value
+                    WHERE \(visible.predicate(messageAlias: "m"))
+                    """,
+                    arguments: [idsJSON]
+                ))
+                return vectorHits
+                    .filter { visibleIDs.contains($0.messageID) }
+                    .map(\.messageID)
+            }
+        } else {
+            semanticIDs = vectorHits.map(\.messageID)
+        }
         let fused = RankFusion.rrf(
-            [hits.map(\.messageID), vectorHits.map(\.messageID)], limit: perSide
+            [hits.map(\.messageID), semanticIDs], limit: perSide
         )
         var keywordByID = Dictionary(
             hits.map { ($0.messageID, $0) }, uniquingKeysWith: { first, _ in first }
