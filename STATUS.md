@@ -1,8 +1,8 @@
 # Status
 
-- **Current milestone:** M2 (Deep Search) — M1 closed 2026-11-18 (1M benchmark: ranked p95 107.6 ms < 200 ms, executor v2).
-- **Last done:** The judged relevance set grew to 225 curated queries (decision 0028's ~200 commitment met; q144–q227 added: trigram, natural dates including the quoted `during:"March 2024"` form, phrase traps, attachment text, multilingual, folding, names, `amount:`/`filename:`/`has:`/`domain:` operators, `OR`, and two more semantic queries). The expansion immediately paid for itself three ways: the first four `amount:` queries all failed — extraction only recognized currency-marked amounts, so bare invoice totals ("total 1,240.00", "47.510,00") were invisible to `amount:` (decision 0031 amended: bare two-decimal figures are now amounts with unknown currency, skipping spans other extractors claim; with a currency, "4.800 EUR" now reads 4800) — fixed with four EntityTests + an operator test; q143 (the ROADMAP semantic exemplar) was missing its `requires: ["semantic"]` tag so it scored 0 in the keyword gate instead of testing the mechanism it was written for — tagged; and `during:March 2024` showed operator values are single tokens unless quoted — rewritten as `during:"March 2024"` (1.000/1.000). Keyword gate: mean nDCG@10 0.9895, recall@50 0.9989 over 221 queries (macOS baseline floors 0.9710/0.9782 both cleared). Full check.sh green.
-- **Next step:** Commit/push this expansion, watch CI (the Linux leg re-scores the whole set — the new queries use shared-platform mechanisms only, and q143's zero leaving the Linux gate should raise that aggregate). Then the M2 close-out walk: every "Done when" line in ROADMAP with its real command output recorded in STATUS, then M3 (MCP).
+- **Current milestone:** M2 (Deep Search) **closed 2026-11-20** — every "Done when" line shown with real output below. M3 (Agent Access, MCP) starting.
+- **Last done:** The M2 close-out walk (see "M2 close-out" below). Just before it: `bench-search` gained a `facets` phase (decision 0e43001) measuring `entityFacets` kind counts + `timelineHistogram` against DESIGN 214's 300 ms faceted-counts budget over the ranked phase's 25 two-word queries, with index size and per-table row reporting; the generator now emits deterministic money amounts in ~1/3 of bodies (currency-marked comma-grouped, bare two-decimal, lone-dot thousands beside EUR) so entity facets and `amount:` have realistic population at scale; and `vector-cluster` was fixed to reuse an already-clustered archive instead of failing on it (`maybeCluster` correctly returns 0 when clusters exist and are fresh — the mode now reads them first, `8596b44`).
+- **Next step:** M3 per ROADMAP: `ArchiveMCP` with every DESIGN 9A tool/resource, the stdio helper in the app bundle, Settings › Agents, untrusted-content wrapping, access-control tests, and the scripted contract tests on Linux and macOS. First move: the M0 MCP spike re-read + decision record choosing the official `modelcontextprotocol/swift-sdk` (v0.12.1, MIT→Apache-2.0 — license verified).
 - **Blocked on:** nothing. (Stalwart bring-up parked, not blocking: released 1.1.1 does not serve the API its own current docs and CLI describe; revisit on a matching release.)
 
 ## Needs the Maintainer
@@ -19,18 +19,39 @@
 |--------|-------|------------|
 | 20k messages | Ingest | 410 msg/s (parallel token precompute, name caches, fsync) |
 | 20k messages | Search (ranked p95) | 4 ms (budget: <200 ms) |
-| 1M messages | Search (two-word ranked p95, limit 25) | 107.6 ms (budget: <200 ms) — **met** (executor v2; the limit-10 pass is the same shape, informational) |
-| 1M messages | Search (as-you-type, 1-char first keystroke) | 1.0 ms p95 (budget: <50 ms) — **met** (first-letter table) |
+| 1M messages | Search (two-word ranked p95, limit 25) | 130.3 ms (budget: <200 ms) — **met** (quiet machine, warm cache; M1 re-anchor measured 107.6 ms; the first pass after a neighboring 17 GB bulk write was 212.6 ms cold, disk-bound — see the close-out caveat) |
+| 1M messages | Search (as-you-type, 1-char first keystroke) | 0.8 ms p95 (budget: <50 ms) — **met** (first-letter table) |
 | 1M messages | Search (as-you-type, 2-char completion) | 0.7 ms p95 (budget: <50 ms) — **met** (persistent vocabulary table, core-v9: single b-tree range; was 60.3 ms over the live 35-segment `fts5vocab` scan) |
-| 1M messages | Search (as-you-type, 4-char gated ranked) | 68.6 ms p95 over all 4-char queries (harness budget: <200 ms ranked-page budget — met; the 2/300 gate-passing queries return a ranked page, the rest completions; stem expansion widens match sets, so far fewer prefixes qualify than the pre-stemming 180/300) |
+| 1M messages | Search (as-you-type, 4-char gated ranked) | 48.4 ms p95 over all 4-char queries (harness budget: <200 ms ranked-page budget — met; the 2/300 gate-passing queries return a ranked page, the rest completions) |
+| 1M messages (334k entity rows) | Facets: entity kind counts + timeline histogram | 100.6 / 155.8 ms p95 (budget: <300 ms each, DESIGN 214) — **met** (`bench-search facets`) |
+| 1M messages × 384 dims | Semantic clustered-scan query | 83.4 ms p95 (budget: <300 ms) — **met** (`bench-search vector-cluster`; 1024 clusters, coverage 1M/1M) |
+| 100k messages, entity-bearing generator | Ingest | 209.9 msg/s (budget: ≥200 msg/s) — **met** (the M1-era 300+ msg/s was pre-entity-generator) |
 
 Benchmark dirs are temporary scratch dirs outside the repository; recreate
-with `bench-search both <dir> 1000000 200`. The 1M numbers above were taken
-under heavy machine load (~74 load on 12 cores), so quiet-machine numbers
-should improve; the current re-anchor runs on a quiet machine.
+with `bench-search both <dir> 1000000 200` (plus `prepare <dir> <n> <seed>`,
+`vector-prepare`, `facets`, `vector-cluster` for the close-out modes). The
+1M numbers above were taken under heavy machine load (~74 load on 12 cores);
+the current re-anchor runs on a quiet machine.
+
+## M2 close-out (2026-11-20)
+
+Every M2 "Done when" line from ROADMAP, each shown with the command run on the closing day (quiet machine):
+
+1. **nDCG@10 and recall@50 meet the M0 targets, in CI.** Targets (TESTING.md): recall@50 ≥ 0.75, nDCG@10 ≥ 0.45. `bench-search relevance` → `gate: nDCG@10=0.9895 recall@50=0.9989 topRank=1.0 queries=221`. CI runs the same gate on every push and stayed green through `8596b44`.
+2. **Every DESIGN 6A budget met on the 1-million-message synthetic archive.**
+   - first keystroke < 50 ms: as-you-type 1-char p95 0.8 ms, 2-char p95 0.7 ms — PASS
+   - ranked page < 200 ms: ranked p95 130.3 ms — PASS (caveat recorded below)
+   - faceted counts < 300 ms (DESIGN 214): `bench-search facets bench-1m-ent 200` → entity facets p95 100.6 ms, timeline histogram p95 155.8 ms (1M messages, 334,206 entity rows) — PASS
+   - semantic < 300 ms: `bench-search vector-cluster bench-1m-vec 200 42` → clustered-scan p95 83.4 ms on 1M × 384 (coverage 1,000,000/1,000,000; probe rank-1 correct) — PASS
+   - ingest ≥ 200 msg/s: fresh 100k ingest with the entity-bearing generator → 209.9 msg/s (476 s) — PASS
+   - index size reported: `bench-1m-ent` index file 17,428.7 MB for 1M messages; per-table dbstat: message_trigram ≈ 9.9 GB (DESIGN 179), message_text ≈ 6.6 GB
+   - *Caveat:* the first ranked pass immediately after a neighboring 17 GB write measured p95 212.6 ms (p99 409) — cold, disk-bound pages; the second pass on the same archive was 130.3 ms. A resident index is the operating assumption; a cold-cache spike is a page-cache effect, not a search-path regression. Re-measure after any bulk write before judging the budget.
+3. **Fixture lines.** `MultilingualFixtureTests` 5/5 passed: the Chinese, Korean, and Russian fixtures found by their own words, the German fixture found by its own words, and the German compound found by one of its parts through the trigram fallback. `ScannedReceiptSearchTests` passed: an in-test rendered PNG receipt, Vision OCR, found by a word printed on the scan.
+4. **Semantic top-3 without keyword sharing.** `SemanticSliceTests.testSemanticSliceTop3` passed: judged query q143 recalls its sole relevant target in the top 3.
 
 ## Log
 
+- 2026-11-20: M2 closed. Close-out walk above with fresh numbers. Same day: `bench-search` `facets` phase (DESIGN 214 budgets on 1M: entity facets p95 100.6 ms, histogram p95 155.8 ms on 334,206 entity rows; index sizes reported), deterministic money amounts in the generator (~1/3 of bodies, three shapes) so entity facets and `amount:` have realistic scale population, and a `vector-cluster` fix: the mode now reuses an already-clustered archive instead of failing on `maybeCluster`'s legitimate 0. Clean ingest rate with the entity-bearing generator: 209.9 msg/s on 100k.
 - 2026-11-16: Repository created. M0 starts.
 - 2026-11-17: DESIGN, PROVIDERS, TESTING docs; Package.swift (eight targets per DESIGN 12); check.sh + CI (Linux + macOS); threat model; archive format v1 draft; XcodeGen app spec and placeholder window; app target builds unsigned in check.sh.
 - 2026-11-17: CI fix: macOS job now installs xcodegen before check.sh.
