@@ -35,6 +35,7 @@ public enum IndexSchema {
         ("core-v13", coreV13),
         ("core-v14", coreV14),
         ("core-v15", coreV15),
+        ("core-v16", coreV16),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -447,6 +448,26 @@ public enum IndexSchema {
     private static func coreV15(_ db: Database) throws {
         try db.alter(table: "attachment") { t in
             t.add(column: "text", .text)
+        }
+    }
+
+    /// core-v16: resumable sync checkpoints (DESIGN 5, ARCHIVE-FORMAT
+    /// `sync_state`). One row per (account, mailbox) holding the last
+    /// completed checkpoint as JSON: the UIDVALIDITY the high-water UID was
+    /// measured under, the highest UID fetched, and the HIGHESTMODSEQ the
+    /// CONDSTORE fetch returned. The sync engine reads this before each
+    /// folder and writes it after each batch, so a killed sync resumes from
+    /// its last checkpoint and a forced UIDVALIDITY change (step 3) resets
+    /// the high-water UID to zero. The index is disposable by design; this
+    /// is the one table whose value is not regenerable from the `.eml`
+    /// files, so it is kept in the index and never dropped by a rebuild.
+    private static func coreV16(_ db: Database) throws {
+        try db.create(table: "sync_state") { t in
+            t.autoIncrementedPrimaryKey("id")
+            t.column("accountID", .integer).notNull().references("account", onDelete: .cascade)
+            t.column("mailboxID", .integer).notNull().references("mailbox", onDelete: .cascade)
+            t.column("checkpointJSON", .text).notNull()
+            t.uniqueKey(["accountID", "mailboxID"])
         }
     }
 
