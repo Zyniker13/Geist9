@@ -1,6 +1,7 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.1
 // Bristlecone Email Archiver. Core packages build and test on macOS and Linux; see docs/DESIGN.md section 12.
-// The macOS-only targets (App, LoginItem, MCPHelper, OnePasswordHelper) live in the XcodeGen project, not here.
+// The macOS-only app targets (App, LoginItem, OnePasswordHelper) live in the XcodeGen project; the
+// stdio MCP helper (MCPHelper) is a package target here and the project copies it into the bundle.
 import PackageDescription
 
 // M0 spikes are throwaway tools, not product targets. The IMAP spike builds
@@ -111,6 +112,7 @@ let products: [Product] = [
     .library(name: "ArchiveCrypto", targets: ["ArchiveCrypto"]),
     .library(name: "ArchiveMCP", targets: ["ArchiveMCP"]),
     .library(name: "Credentials", targets: ["Credentials"]),
+    .executable(name: "email-archiver-mcp", targets: ["MCPHelper"]),
     .executable(name: "bench-search", targets: ["Benchmarks"]),
 ] + viewerProducts + appleExtractProducts + appleEmbedProducts
 
@@ -127,6 +129,9 @@ let dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.12.0"),
     // SHA-256 for content addressing (DESIGN 6); decision 0014. Same Crypto API on Linux and macOS.
     .package(url: "https://github.com/apple/swift-crypto.git", exact: "5.1.1"),
+    // MCP protocol + transports (DESIGN 9A); decision 0051. Exact pin, never
+    // `from:`: a bump that changes a tool schema must break tests, not agents.
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
 ]
 
 var archiveCoreDependencies: [Target.Dependency] = [
@@ -166,8 +171,19 @@ let coreTargets: [Target] = [
     .target(name: "ArchiveExtract", dependencies: ["CZlib"]),
     // envelope, SQLCipher glue (DESIGN 10)
     .target(name: "ArchiveCrypto"),
-    // MCP server: tools, resources, access policy (DESIGN 9A)
-    .target(name: "ArchiveMCP"),
+    // MCP server: tools, resources, access policy (DESIGN 9A); the protocol
+    // and transport layers come from the official swift-sdk (decision 0051).
+    .target(
+        name: "ArchiveMCP",
+        dependencies: [.product(name: "MCP", package: "swift-sdk")]
+    ),
+    // stdio MCP executable (DESIGN 9A): cross-platform sources here so the
+    // Linux end-to-end contract test can launch the same helper; the app
+    // bundle copies it via the XcodeGen project.
+    .executableTarget(
+        name: "MCPHelper",
+        dependencies: ["ArchiveMCP", .product(name: "MCP", package: "swift-sdk")]
+    ),
     // CredentialStore, Keychain and 1Password backends (DESIGN 4)
     .target(name: "Credentials"),
     // scale benchmark harness (ROADMAP M1 "Done when", docs/TESTING.md;
