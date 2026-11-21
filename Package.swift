@@ -113,6 +113,7 @@ let products: [Product] = [
     .library(name: "ArchiveMCP", targets: ["ArchiveMCP"]),
     .library(name: "Credentials", targets: ["Credentials"]),
     .executable(name: "email-archiver-mcp", targets: ["MCPHelper"]),
+    .executable(name: "mcp-fixture-builder", targets: ["MCPFixtureBuilder"]),
     .executable(name: "bench-search", targets: ["Benchmarks"]),
 ] + viewerProducts + appleExtractProducts + appleEmbedProducts
 
@@ -185,6 +186,10 @@ let coreTargets: [Target] = [
         name: "MCPHelper",
         dependencies: ["ArchiveMCP", .product(name: "MCP", package: "swift-sdk")]
     ),
+    // Builds the tiny fixture archive the inspector gate script drives
+    // (DESIGN 9A), through the same public ingest path as the e2e tests so
+    // the fixture follows schema migrations automatically.
+    .executableTarget(name: "MCPFixtureBuilder", dependencies: ["ArchiveCore"]),
     // CredentialStore, Keychain and 1Password backends (DESIGN 4)
     .target(name: "Credentials"),
     // scale benchmark harness (ROADMAP M1 "Done when", docs/TESTING.md;

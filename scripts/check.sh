@@ -47,7 +47,9 @@ mark() {
 
 echo "== Swift build and tests"
 mark swift-build begin
-run_logged swift build
+# Both executables must exist as linked products: a plain `swift build` can
+# leave a newly added executable unlinked until its product is requested.
+run_logged swift build --product email-archiver-mcp --product mcp-fixture-builder --product bench-search
 mark swift-build done
 mark swift-test begin
 run_logged swift test --parallel
@@ -80,6 +82,15 @@ if [[ "$(uname)" == "Darwin" ]]; then
     -configuration Debug -destination 'platform=macOS' build \
     CODE_SIGNING_ALLOWED=NO 2>&1 | tail -3
   mark app done
+
+  # Official MCP inspector conformance (ROADMAP M3, DESIGN 9A): drive the
+  # stdio helper with the inspector CLI. Darwin-only: the Linux CI container
+  # has no node; the cross-platform protocol contract is pinned by
+  # StdioEndToEndTests, which runs on both platforms.
+  echo "== MCP inspector conformance"
+  mark inspector begin
+  run_logged ./scripts/mcp-inspector-check.sh
+  mark inspector done
 fi
 
 echo "== All checks passed"
