@@ -1,10 +1,12 @@
 // MCP resources over one archive (DESIGN 9A). Every message is
 // `emailarchiver://message/<id>` and every thread is
 // `emailarchiver://thread/<id>`, so clients that browse resources can
-// attach them. Like the tools, the resource layer is read-only: it
-// opens no connection and writes nothing; message-derived text is
-// wrapped as untrusted. Listing pages with a cursor so a large archive
-// never returns one unbounded response.
+// attach them. Like the tools, the resource layer is read-only and goes
+// through the same AccessContext as the tools: hidden messages and
+// threads never appear in listings, a read of a hidden id answers
+// "not found", and names, descriptions and content are redacted by the
+// policy. Listing pages with a cursor so a large archive never returns
+// one unbounded response.
 
 import ArchiveCore
 import Foundation
@@ -46,9 +48,12 @@ enum ArchiveResources {
     /// One page of resources. The cursor is `"m:<id>"` while messages are
     /// being listed and `"t:<id>"` for threads; `nil`/`""` starts at the
     /// first message. The page ends when a full page of threads runs out,
-    /// or when both tables are exhausted (`nextCursor` nil).
+    /// or when both tables are exhausted (`nextCursor` nil). With a
+    /// visibility filter, hidden rows are skipped by the query itself, so
+    /// pages stay full and the cursor (a last id, not a row number) stays
+    /// stable.
     static func list(
-        cursor: String?, store: ArchiveStore
+        cursor: String?, ctx: ToolContext
     ) throws -> ListResources.Result {
         let raw = cursor ?? "m:0"
         let parts = raw.split(separator: ":", maxSplits: 1)
@@ -60,8 +65,9 @@ enum ArchiveResources {
 
         switch parts[0] {
         case "m":
-            let messages = try store.listMessages(after: after, limit: pageSize)
-            var resources = messages.map(messageResource)
+            let messages = try ctx.store.listMessages(
+                after: after, limit: pageSize, visible: ctx.access.visibility)
+            var resources = messages.map { messageResource($0, redaction: ctx.access.redaction) }
             if messages.count == pageSize {
                 return ListResources.Result(
                     resources: resources,
@@ -70,8 +76,9 @@ enum ArchiveResources {
             }
             // Messages exhausted: continue into threads on the same page.
             let remaining = pageSize - messages.count
-            let threads = try store.listThreads(after: 0, limit: remaining)
-            resources += threads.map(threadResource)
+            let threads = try ctx.store.listThreads(
+                after: 0, limit: remaining, visible: ctx.access.visibility)
+            resources += threads.map { threadResource($0, redaction: ctx.access.redaction) }
             if threads.count == remaining {
                 return ListResources.Result(
                     resources: resources,
@@ -80,8 +87,9 @@ enum ArchiveResources {
             }
             return ListResources.Result(resources: resources, nextCursor: nil)
         default:
-            let threads = try store.listThreads(after: after, limit: pageSize)
-            let resources = threads.map(threadResource)
+            let threads = try ctx.store.listThreads(
+                after: after, limit: pageSize, visible: ctx.access.visibility)
+            let resources = threads.map { threadResource($0, redaction: ctx.access.redaction) }
             if threads.count == pageSize {
                 return ListResources.Result(
                     resources: resources,
@@ -92,12 +100,22 @@ enum ArchiveResources {
         }
     }
 
-    static func messageResource(_ summary: MessageSummary) -> Resource {
-        Resource(
-            name: summary.subject ?? "Message \(summary.id)",
+    static func messageResource(
+        _ summary: MessageSummary, redaction: AccessPolicy.Redaction
+    ) -> Resource {
+        // Name and description are rendered by clients: subject and the
+        // from address are content, so the redaction policy applies here
+        // too, not only inside the message JSON.
+        let name = summary.subject.map {
+            Redactor.apply(redaction, to: $0)
+        } ?? "Message \(summary.id)"
+        let from = Redactor.apply(
+            redaction, to: summary.fromEmail ?? "unknown")
+        return Resource(
+            name: name,
             uri: "\(scheme)message/\(summary.id)",
             description: """
-            From \(summary.fromEmail ?? "unknown"), \
+            From \(from), \
             \(iso(summary.dateReceived ?? summary.dateSent)) \
             (\(summary.size) bytes)
             """,
@@ -105,9 +123,12 @@ enum ArchiveResources {
         )
     }
 
-    static func threadResource(_ ref: ThreadRef) -> Resource {
+    static func threadResource(
+        _ ref: ThreadRef, redaction: AccessPolicy.Redaction
+    ) -> Resource {
         Resource(
-            name: ref.subject ?? "Thread \(ref.id)",
+            name: ref.subject.map { Redactor.apply(redaction, to: $0) }
+                ?? "Thread \(ref.id)",
             uri: "\(scheme)thread/\(ref.id)",
             description: "An archived conversation.",
             mimeType: "application/json"
@@ -117,9 +138,10 @@ enum ArchiveResources {
     // MARK: Reading
 
     /// One resource's content. Unknown schemes and ids fail the request;
-    /// nothing is ever invented to fill a gap.
+    /// nothing is ever invented to fill a gap. A hidden id fails the same
+    /// way as an unknown one.
     static func read(
-        _ uri: String, store: ArchiveStore
+        _ uri: String, ctx: ToolContext
     ) throws -> ReadResource.Result {
         guard uri.hasPrefix(scheme) else {
             throw ArchiveTools.ToolError.badArguments(
@@ -137,9 +159,15 @@ enum ArchiveResources {
         let value: Value
         switch segments[0] {
         case "message":
-            value = try messageJSON(id: id, store: store)
+            guard try ctx.access.isVisible(messageID: id, store: ctx.store) else {
+                throw ArchiveTools.ToolError.notFound("message id \(id)")
+            }
+            value = try messageJSON(id: id, ctx: ctx)
         case "thread":
-            value = try threadJSON(id: id, store: store)
+            guard try ctx.access.threadIsVisible(threadID: id, store: ctx.store) else {
+                throw ArchiveTools.ToolError.notFound("thread id \(id)")
+            }
+            value = try threadJSON(id: id, ctx: ctx)
         default:
             throw ArchiveTools.ToolError.badArguments(
                 "unknown resource kind: \(segments[0])"
@@ -154,63 +182,86 @@ enum ArchiveResources {
     }
 
     /// One message as JSON. The shape mirrors the get_message tool (same
-    /// untrusted wrapping, same body cap) with the raw store data left out:
-    /// resource readers want the readable message, not its bytes.
-    static func messageJSON(
-        id: Int64, store: ArchiveStore, maxBodyChars: Int = maxBodyChars
-    ) throws -> Value {
+    /// untrusted wrapping, same body cap, same redaction and headers-only
+    /// handling) with the raw store data left out: resource readers want
+    /// the readable message, not its bytes.
+    static func messageJSON(id: Int64, ctx: ToolContext) throws -> Value {
+        let store = ctx.store
+        let access = ctx.access
         guard let summary = try store.message(id: id) else {
             throw ArchiveTools.ToolError.notFound("message id \(id)")
         }
         let data = try store.messageData(summary.hash)
         let headers = MailBridge.headerFields(for: data)
+        // Header values are where addresses live; the redaction mode
+        // applies to them in every non-`none` mode.
         let headerObject = Value.object(
             Dictionary(
-                uniqueKeysWithValues: headers.map { ($0.name, Value.string($0.value)) }
+                uniqueKeysWithValues: headers.map {
+                    ($0.name, .string(Redactor.apply(access.redaction, to: $0.value)))
+                }
             )
         )
 
         var body = MailBridge.messageBody(for: data) ?? ""
-        let truncated = body.count > maxBodyChars
-        if truncated { body = String(body.prefix(maxBodyChars)) }
-        let bodyValue: Value = body.isEmpty
-            ? .null
-            : .string(ArchiveTools.untrusted("message body", body))
-
-        return .object([
+        let cap = min(maxBodyChars, access.maxCharsPerCall)
+        let truncated = body.count > cap
+        if truncated { body = String(body.prefix(cap)) }
+        // `headersOnly` omits the body field entirely — the absence is the
+        // policy speaking, and `null` would be indistinguishable from "no
+        // body was stored".
+        var object: [String: Value] = [
             "id": .int(Int(summary.id)),
             "thread_id": .optional(summary.threadID.map { .int(Int($0)) }),
             "date": .string(iso(summary.dateReceived ?? summary.dateSent)),
-            "from": .string(addressLine(summary)),
+            "from": .string(
+                ArchiveTools.red("from", addressLine(summary), redaction: access.redaction)),
             "headers": headerObject,
             "subject": summary.subject.map {
-                .string(ArchiveTools.untrusted("subject", $0))
+                .string(ArchiveTools.red("subject", $0, redaction: access.redaction))
             } ?? .null,
-            "body": bodyValue,
-            "body_truncated": .bool(truncated),
-        ])
+        ]
+        if access.redaction == .headersOnly {
+            object["body_omitted"] = .bool(true)
+        } else {
+            let bodyValue: Value = body.isEmpty
+                ? .null
+                : .string(ArchiveTools.red("message body", body, redaction: access.redaction))
+            object["body"] = bodyValue
+            object["body_truncated"] = .bool(truncated)
+        }
+        return .object(object)
     }
 
-    /// One thread as JSON: the stored subject and every message in it, in
-    /// conversation order (the threadMessages ordering).
-    static func threadJSON(id: Int64, store: ArchiveStore) throws -> Value {
-        guard let subject = try store.threadSubject(threadID: id) else {
+    /// One thread as JSON: the visible messages in conversation order.
+    /// The subject comes from the first visible message, not the thread
+    /// row: the stored root subject may be a hidden message's subject,
+    /// and that would leak exactly once, quietly.
+    static func threadJSON(id: Int64, ctx: ToolContext) throws -> Value {
+        let store = ctx.store
+        let messages = try store.threadMessages(
+            threadID: id, visible: ctx.access.visibility)
+        guard let first = messages.first else {
             throw ArchiveTools.ToolError.notFound("thread id \(id)")
         }
-        let messages = try store.threadMessages(threadID: id)
+        let subject = first.subject ?? "Thread \(id)"
         let messageValues = messages.map { summary -> Value in
             .object([
                 "id": .int(Int(summary.id)),
                 "date": .string(iso(summary.dateReceived ?? summary.dateSent)),
-                "from": .string(addressLine(summary)),
+                "from": .string(
+                    ArchiveTools.red(
+                        "from", addressLine(summary), redaction: ctx.access.redaction)),
                 "subject": summary.subject.map {
-                    .string(ArchiveTools.untrusted("subject", $0))
+                    .string(ArchiveTools.red("subject", $0, redaction: ctx.access.redaction))
                 } ?? .null,
             ])
         }
         return .object([
             "thread_id": .int(Int(id)),
-            "subject": .string(ArchiveTools.untrusted("thread subject", subject)),
+            "subject": .string(
+                ArchiveTools.red(
+                    "thread subject", subject, redaction: ctx.access.redaction)),
             "message_count": .int(messages.count),
             "messages": .array(messageValues),
         ])

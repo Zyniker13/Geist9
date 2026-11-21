@@ -343,15 +343,20 @@ final class StdioMCPClient {
     private var nextID = 0
     private var closed = false
 
-    init(executable: URL, archivePath: String) throws {
+    init(
+        executable: URL, archivePath: String,
+        extraEnvironment: [String: String] = [:]
+    ) throws {
         process = Process()
         process.executableURL = executable
-        // Minimal environment: the helper reads ARCHIVE_PATH and nothing
-        // else; it must not inherit more than it needs.
+        // Minimal environment: the helper reads ARCHIVE_PATH, the access
+        // policy override, and nothing else; it must not inherit more than
+        // it needs. extraEnvironment exists for policy tests, which set
+        // BRISTLECONE_ACCESS_POLICY to a file they wrote.
         process.environment = [
             "ARCHIVE_PATH": archivePath,
             "PATH": "/usr/bin:/bin",
-        ]
+        ].merging(extraEnvironment) { _, new in new }
         let stdout = Pipe()
         let stdin = Pipe()
         process.standardOutput = stdout

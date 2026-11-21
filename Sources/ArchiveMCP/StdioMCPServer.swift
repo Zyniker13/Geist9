@@ -4,9 +4,11 @@
 /// an activity log. Every returned body, subject, and attachment text is wrapped and
 /// labelled as untrusted content, because email is the classic prompt-injection channel.
 ///
-/// M3 work in progress: the stdio server skeleton (lifecycle + tool registry shape);
-/// tool bodies, resources, access policy, redaction, limits, and the activity log land
-/// next, each with contract tests.
+/// The archive comes from `ARCHIVE_PATH`; the access policy from
+/// `BRISTLECONE_ACCESS_POLICY` (a JSON file; absent means the permissive
+/// default), resolved once at launch by `ArchiveMCPServer` — a policy that
+/// cannot be read or resolved refuses the launch rather than starting
+/// permissive.
 
 import Foundation
 import MCP
