@@ -21,8 +21,10 @@ if [[ -n "$SUMMARY" ]]; then
     echo "### Failed: $*" >> "$SUMMARY"
     tail_summary "$log"
     # Also emit errors as job annotations: those are readable through the
-    # public checks API even when the full log is not.
-    grep -E "error:" "$log" | head -20 | while IFS= read -r line; do
+    # public checks API even when the full log is not. Match the common
+    # case-insensitive spellings; some tools (java, maven) say "Error:"
+    # or "Exception in thread" instead of "error:".
+    grep -iE "(error|exception|failed|refused|never answered)" "$log" | head -20 | while IFS= read -r line; do
       printf '::error::%s\n' "$line"
     done
     rm -f "$log"

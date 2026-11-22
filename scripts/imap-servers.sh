@@ -23,7 +23,9 @@ PASSWORD="secret"
 
 
 wait_ready() {
-    local deadline=$((SECONDS + 60))
+    # 120 s: the deadline also covers a cold GreenMail jar download on a
+    # fresh CI container, not just server startup.
+    local deadline=$((SECONDS + 120))
     while (( SECONDS < deadline )); do
         if exec 3<>"/dev/tcp/$HOST/$PORT" 2>/dev/null; then
             local greeting
@@ -59,7 +61,8 @@ start_greenmail() {
     mkdir -p "$SCRATCH_DIR"
     if [[ ! -s "$JAR" ]]; then
         echo "imap-servers: downloading GreenMail $GREENMAIL_VERSION" >&2
-        curl -fsSL -o "$JAR" "$URL"
+        # Transient maven/TLS hiccups otherwise kill a whole CI run.
+        curl -fsSL --retry 3 --retry-delay 2 -o "$JAR" "$URL"
     fi
     # Already answering? Nothing to do (idempotent: another session may have
     # started it).
