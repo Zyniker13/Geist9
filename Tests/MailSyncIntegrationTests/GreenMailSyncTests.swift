@@ -292,9 +292,19 @@ final class GreenMailSyncTests: XCTestCase {
 
     // MARK: - The Done-when flow
 
+    /// Every server-touching test runs under this cross-process lock:
+    /// `swift test --parallel` schedules more than one runner process for a
+    /// single test bundle, and the tests share one server whose fixture
+    /// reset (a global content purge) must never interleave with another
+    /// test's sync pass. Serial within a process and across processes.
+    func locked<T>(_ body: () async throws -> T) async throws -> T {
+        try await FileLock(name: "geist9-greenmail-\(GreenMail.port).lock").withLock(body)
+    }
+
     func testFullThenIncrementalThenUIDValidityChange() async throws {
-        try await GreenMail.requireServer()
-        let store = try makeStore()
+        try await self.locked {
+            try await GreenMail.requireServer()
+            let store = try makeStore()
         let engine = IMAPSyncEngine(profile: self.profile(), account: self.account)
 
         // Seed the fixture folder: five distinct messages. The per-run fresh
@@ -347,6 +357,7 @@ final class GreenMailSyncTests: XCTestCase {
         XCTAssertEqual(try self.count(store, "SELECT COUNT(*) FROM message"), 7)
         let allSeven: Set<String> = ["gm-m1", "gm-m2", "gm-m3", "gm-m4", "gm-m5", "gm-m6", "gm-m7"]
         XCTAssertEqual(allSeven, try self.storedSubjects(store))
+        }
     }
 
     func testEngineSendsNoMutatingCommand() async throws {
@@ -354,6 +365,7 @@ final class GreenMailSyncTests: XCTestCase {
         // never rewrites rows; seeded flags stay unset because the engine
         // never writes flags); the fake-server suite asserts the recorded
         // command list directly, which no public server exposes.
+        try await self.locked {
         try await GreenMail.requireServer()
         let store = try makeStore()
         let engine = IMAPSyncEngine(profile: self.profile(), account: self.account)
@@ -373,5 +385,6 @@ final class GreenMailSyncTests: XCTestCase {
         }
         XCTAssertEqual(rows.count, 2)
         XCTAssertTrue(rows.allSatisfy { $0.flags == nil || $0.flags!.isEmpty })
+        }
     }
 }
