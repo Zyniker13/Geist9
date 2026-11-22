@@ -162,6 +162,7 @@ let coreTargets: [Target] = [
         name: "MailSync",
         dependencies: [
             "ArchiveCore",
+            "Credentials",
             .product(name: "IMAPCommands", package: "swift-nio-imap"),
             .product(name: "NIOIMAP", package: "swift-nio-imap"),
             .product(name: "NIOCore", package: "swift-nio"),
@@ -234,6 +235,7 @@ let testTargets: [Target] = [
         dependencies: [
             "MailSync",
             "ArchiveCore",
+            "Credentials",
             .product(name: "IMAPCommands", package: "swift-nio-imap"),
             .product(name: "NIOIMAP", package: "swift-nio-imap"),
             .product(name: "NIOCore", package: "swift-nio"),

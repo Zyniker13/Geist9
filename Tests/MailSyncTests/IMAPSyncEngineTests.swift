@@ -74,6 +74,71 @@ final class IMAPSyncEngineTests: XCTestCase {
         }
     }
 
+    // MARK: - Connection test (onboarding)
+
+    func testConnectionTestSucceedsWithCorrectPasswordAndSendsNoMutatingCommand() async throws {
+        let scenario = FakeServerScenario(folders: [
+            FakeFolder(name: "INBOX", messages: [
+                FakeMessage(uid: 1, data: message("alpha")),
+            ], uidValidity: 7),
+        ])
+        let server = FakeIMAPServer(scenario: scenario)
+        try server.start()
+        defer { server.stop() }
+
+        let engine = IMAPSyncEngine(profile: profile(port: server.port), account: account)
+        let mailboxes = try await engine.testConnection(
+            credentials: "alice@example.com", password: "secret"
+        )
+        // The probe reports the folders it saw, so onboarding can confirm the
+        // server looks like a real mailbox before the first sync.
+        XCTAssertEqual(mailboxes, ["INBOX"])
+        // Read-only: only LOGIN / ID / LIST / LOGOUT on the wire.
+        self.assertReadOnly(server)
+        // And nothing was listed beyond LIST: no STATUS/SELECT/UID FETCH.
+        XCTAssertFalse(
+            server.seenCommands.contains("STATUS"),
+            "the connection test must not go past the folder list"
+        )
+    }
+
+    func testConnectionTestThrowsAuthenticationErrorOnWrongPasswordWithoutEchoingIt() async throws {
+        let scenario = FakeServerScenario(folders: [
+            FakeFolder(name: "INBOX", messages: [], uidValidity: 7),
+        ])
+        let server = FakeIMAPServer(scenario: scenario)
+        try server.start()
+        defer { server.stop() }
+
+        let engine = IMAPSyncEngine(profile: profile(port: server.port), account: account)
+        do {
+            _ = try await engine.testConnection(
+                credentials: "alice@example.com", password: "wrong-password"
+            )
+            XCTFail("a wrong password must fail the connection test")
+        } catch let error as SyncEngineError {
+            guard case .authenticationFailed = error else {
+                return XCTFail("expected authenticationFailed, got \(error)")
+            }
+            let text = String(describing: error)
+            XCTAssertFalse(text.contains("wrong-password"), "the error must not echo the password")
+        }
+        self.assertReadOnly(server)
+    }
+
+    func testConnectionTestReportsConnectionLossWhenTheServerIsUnreachable() async throws {
+        // A port with nothing listening on loopback: the OS refuses it.
+        let engine = IMAPSyncEngine(profile: profile(port: 1), account: account)
+        do {
+            _ = try await engine.testConnection(credentials: "alice@example.com", password: "x")
+            XCTFail("an unreachable server must fail the connection test")
+        } catch let error as SyncEngineError {
+            guard case .connectionLost = error else {
+                return XCTFail("expected connectionLost, got \(error)")
+            }
+        }
+    }
+
     // MARK: - Helpers for assertions
 
     private func count(_ store: ArchiveStore, _ sql: String) throws -> Int {

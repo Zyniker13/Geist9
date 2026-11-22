@@ -44,6 +44,15 @@ public struct SyncState: Sendable, Equatable, Codable {
 }
 
 extension ArchiveStore {
+    /// Creates the account row if it doesn't exist, and returns its id.
+    /// Onboarding calls this when a person adds a mail account; re-adding
+    /// the same address and kind returns the existing row (idempotent).
+    public func getOrCreateAccount(_ identity: AccountIdentity) throws -> Int64 {
+        try db.write { db in
+            try ArchiveStore.getOrCreateAccount(identity, db: db)
+        }
+    }
+
     /// The last completed sync checkpoint for a mailbox, or `nil` when the
     /// account or mailbox has never been synced (a fresh full sync).
     public func syncState(account: AccountIdentity, mailbox: String) throws -> SyncState? {

@@ -297,6 +297,48 @@ public final class IMAPSyncEngine: Sendable {
         return mailboxes
     }
 
+    /// The onboarding connection test: sign in and list the folders, nothing
+    /// more (no STATUS/SELECT/fetch — the person has asked to check the
+    /// door, not walk in). Returns the selectable folder paths, so the
+    /// setup screen can show "connected; 12 folders". Read-only: LOGIN, ID,
+    /// LIST, LOGOUT only. A NO/BAD on LOGIN throws `authenticationFailed`
+    /// with the server's own status text (no secret material); connection
+    /// problems surface as `connectionLost`.
+    public func testConnection(
+        credentials user: String,
+        password: String
+    ) async throws -> [String] {
+        let config = IMAPConnection.Configuration(
+            hostname: profile.host,
+            port: UInt16(port),
+            useTLS: usesImplicitTLS,
+            logging: .noLogging
+        )
+        do {
+            return try await IMAPConnection.withConnection(configuration: config) { greeting, connection in
+                guard case .ok = greeting.status else {
+                    throw SyncEngineError.connectionLost
+                }
+                try await send(connection, .login(username: user, password: password)) { response in
+                    guard case .tagged(let t) = response else { return false }
+                    guard case .ok = t.state else {
+                        throw SyncEngineError.authenticationFailed(Self.statusText(t.state))
+                    }
+                    return true
+                }
+                try await send(connection, .id(["name": "Bristlecone", "version": "0.1.0"])) { response in
+                    if case .tagged = response { return true }
+                    return false
+                }
+                return try await listMailboxes(connection)
+                    .filter(\.isSelectable)
+                    .map(\.path)
+            }
+        } catch _ as IMAPConnection.Error {
+            throw SyncEngineError.connectionLost
+        }
+    }
+
     // MARK: - Per-folder sync
 
     private struct FolderOutcome {
