@@ -203,7 +203,19 @@ public final class IMAPSyncEngine: Sendable {
                     account: account, presentMailboxes: presentPaths
                 )
             }
-            for mailbox in mailboxes where mailbox.isSelectable {
+            // Gmail label mode (DESIGN 5): only [Gmail]/All Mail is
+            // downloaded; the per-label folders re-serve the same bytes and
+            // would multiply the 2,500 MB/day cap for nothing. Spam and
+            // Trash stay out too unless a later milestone opts in.
+            let gmailMode = profile.quirks.contains(.gmailLabels)
+            let selectedFolders = mailboxes.filter { mailbox in
+                guard mailbox.isSelectable else { return false }
+                if gmailMode {
+                    return mailbox.path == "[Gmail]/All Mail"
+                }
+                return true
+            }
+            for mailbox in selectedFolders {
                 let folderState = try await syncFolder(
                     connection, store: store, mailbox: mailbox, progress: &state, notify: notify
                 )
@@ -404,7 +416,8 @@ public final class IMAPSyncEngine: Sendable {
             // batch continues above this one's highest UID until the
             // window is exhausted (bounded by `highestLiveUID`).
             let batch = try await fetchBatch(
-                connection, from: lower, maxBytes: batchBytes
+                connection, from: lower, maxBytes: batchBytes,
+                wantsLabels: profile.quirks.contains(.gmailLabels)
             )
             guard !batch.messages.isEmpty else { break }
             var storedCount = 0
@@ -550,6 +563,8 @@ public final class IMAPSyncEngine: Sendable {
         var uid: UInt32
         var data: Data
         var internalDate: Date?
+        /// Gmail X-GM-LABELS, when the server reports them.
+        var labels: [String] = []
     }
 
     private struct Batch {
@@ -564,7 +579,7 @@ public final class IMAPSyncEngine: Sendable {
     /// path hashes and writes to disk). The batch ends at `maxBytes` of
     /// streamed body bytes.
     private func fetchBatch(
-        _ connection: IMAPConnection, from: Int64, maxBytes: Int
+        _ connection: IMAPConnection, from: Int64, maxBytes: Int, wantsLabels: Bool = false
     ) async throws -> Batch {
         // Window of candidate UIDs: one above the high-water mark up to
         // UID maximum. The server answers with what exists.
@@ -576,8 +591,14 @@ public final class IMAPSyncEngine: Sendable {
 
         // 1. Stream bodies for the window, stopping at maxBytes.
         var collector = BodyCollector(maxBytes: maxBytes)
+        var attributes: [FetchAttribute] = [
+            .uid, .internalDate, .bodySection(peek: true, .complete, nil),
+        ]
+        if wantsLabels {
+            attributes.append(.gmailLabels)
+        }
         try await connection.send(
-            .uidFetch(window, [.uid, .internalDate, .bodySection(peek: true, .complete, nil)], [])
+            .uidFetch(window, attributes, [])
         ) { _, stream in
             for try await response in stream {
                 switch response {
@@ -612,6 +633,7 @@ public final class IMAPSyncEngine: Sendable {
         var currentDate: Date?
         var currentData = Data()
         var currentExpected = 0
+        var currentLabels: [String] = []
         /// True when the batch stopped because the byte budget ran out.
         var budgetReached = false
 
@@ -645,6 +667,11 @@ public final class IMAPSyncEngine: Sendable {
                 currentUID = uid.rawValue
             case .simpleAttribute(.internalDate(let d)):
                 currentDate = Self.date(d)
+            case .simpleAttribute(.gmailLabels(let raw)):
+                // Gmail labels arrive as mailbox-style byte strings; decode
+                // the same way folder names decode (modified UTF-7 with an
+                // ASCII fallback).
+                currentLabels = raw.map { $0.makeDisplayString() }
             case .simpleAttribute:
                 break
             case .streamingBegin(_, let count):
@@ -655,13 +682,15 @@ public final class IMAPSyncEngine: Sendable {
             case .streamingEnd:
                 if let uid = currentUID, currentData.count == currentExpected, !self.budgetReached {
                     messages.append(FetchedMessage(
-                        uid: uid, data: Data(currentData), internalDate: currentDate
+                        uid: uid, data: Data(currentData), internalDate: currentDate,
+                        labels: currentLabels
                     ))
                     bytes += currentData.count
                 }
                 currentUID = nil
                 currentDate = nil
                 currentData = Data()
+                currentLabels = []
             case .finish:
                 break
             }
@@ -696,6 +725,7 @@ public final class IMAPSyncEngine: Sendable {
                 flags: [],
                 dateReceived: fetchedBox.internalDate ?? record.dateSent
             )],
+            labels: fetchedBox.labels.map { LabelName(name: $0) },
             searchText: parsed.searchText
         )
         let account = self.account

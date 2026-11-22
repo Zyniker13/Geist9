@@ -22,6 +22,9 @@ struct FakeMessage {
     var date: (year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) =
         (2026, 1, 1, 12, 0, 0)
     var flags: [String] = []
+    // Gmail labels (X-GM-LABELS) the message carries, when the fake plays
+    // the Gmail extension.
+    var gmLabels: [String] = []
 }
 
 /// One folder the fake server exposes.
@@ -48,6 +51,9 @@ struct FakeServerScenario: Sendable {
     /// without CONDSTORE): any STATUS whose request includes one gets a
     /// tagged NO naming the first refused item, exactly like a real server.
     var refuseStatusItems: Set<String> = []
+    // 163/126 (PROVIDERS row 8): the first SELECT without a prior RFC 2971
+    // ID in the same session is refused ("Unsafe Login"); after ID it works.
+    var refuseSelectBeforeID: Bool = false
 }
 
 /// A running fake server. Bind on 127.0.0.1 port 0, read back the port.
@@ -73,6 +79,13 @@ final class FakeIMAPServer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         self.folders = folders
         self.scenario.folders = folders
+    }
+
+    /// Change the scripted disconnect point between passes (a test that
+    /// replays "Yahoo dropped me once" then lets the retry finish).
+    func setDisconnectAfterCommands(_ limit: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        self.scenario.disconnectAfterCommands = limit
     }
 
     /// Commands the server processed, for assertions (read-only commands
@@ -138,6 +151,7 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
     private let server: FakeIMAPServer
     private var commandsSeen = 0
     private var loggedIn = false
+    private var sentID = false
     private var selected: String?
     private var byID: [String: FakeFolder] = [:]
 
@@ -274,6 +288,7 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
                 self.ok(context, tag, "LOGIN completed")
             }
         case .id:
+            self.sentID = true
             self.emit(context, .untagged(.id(["name": "FakeIMAP", "version": "1.0"])))
             self.ok(context, tag, "ID completed")
         case .list(_, _, _, _):
@@ -317,6 +332,12 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
             self.emit(context, .untagged(.mailboxData(.status(mailbox, status))))
             self.ok(context, tag, "STATUS completed")
         case .select(let mailbox, _):
+            // 163's documented rule: no ID in this session yet → refuse
+            // SELECT ("Unsafe Login"); once ID has been sent, it works.
+            if scenario.refuseSelectBeforeID && !self.sentID {
+                self.no(context, tag, "Unsafe Login. Please contact us for more info")
+                return
+            }
             let name = String(decoding: mailbox.bytes, as: UTF8.self)
             guard let folder = self.byID[name], folder.name != "" else {
                 self.no(context, tag, "Mailbox does not exist")
@@ -372,6 +393,11 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
                 }
                 if wantsInternalDate {
                     self.emit(context, .fetch(.simpleAttribute(.internalDate(Self.internalDate(message)))))
+                }
+                if wantsUID, !message.gmLabels.isEmpty {
+                    // Gmail X-GM-EXT-1: the labels attribute as Gmail sends it.
+                    let labels = message.gmLabels.map { GmailLabel(ByteBufferAllocator().buffer(string: $0)) }
+                    self.emit(context, .fetch(.simpleAttribute(.gmailLabels(labels))))
                 }
                 if wantsBody {
                     var buffer = ByteBufferAllocator().buffer(capacity: message.data.count)
