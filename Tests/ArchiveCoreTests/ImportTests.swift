@@ -657,4 +657,155 @@ final class ImportTests: XCTestCase {
             Set(try mailboxesOf(subject: "Shared")), ["Imported", "Shared"]
         )
     }
+
+    // MARK: - Maildir (M4, DESIGN 8: flags from file names)
+
+    /// A minimal Maildir tree: tmp/new/cur with `:2,` info suffixes on cur
+    /// file names carrying the standard flags (D= draft, F = flagged,
+    /// R = answered, S = seen, T = trashed). New messages have no info.
+    private func makeMaildir(_ root: URL, folder: String, files: [(name: String, message: Data)]) throws {
+        let folderURL = folder.isEmpty
+            ? root
+            : root.appendingPathComponent(folder, isDirectory: true)
+        for sub in ["tmp", "new", "cur"] {
+            try FileManager.default.createDirectory(
+                at: folderURL.appendingPathComponent(sub, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+        for (name, message) in files {
+            // Files are born in tmp and moved into new/cur, which leaves
+            // them in new or cur; nothing may remain in tmp.
+            let dir = name.hasSuffix("S") || name.contains("2,")
+                ? "cur" : "new"
+            try message.write(
+                to: folderURL.appendingPathComponent(dir, isDirectory: true)
+                    .appendingPathComponent(name)
+            )
+        }
+    }
+
+    private func flagsOf(subject: String) throws -> [String] {
+        try store.db.read { db in
+            try String.fetchAll(
+                db,
+                sql: """
+                SELECT mm.flags FROM message_mailbox mm
+                JOIN message m ON m.id = mm.messageID
+                WHERE m.subject = ?
+                """,
+                arguments: [subject]
+            )
+        }.flatMap { $0.split(separator: " ").map(String.init) }
+    }
+
+    func testMaildirImportsNewAndCurWithFlagsFromNames() throws {
+        let maildir = tempDir.appendingPathComponent("Maildir")
+        try makeMaildir(maildir, folder: "", files: [
+            // new: no info suffix, no flags.
+            ("1729500000.m1.host1:,", eml(subject: "New one")),
+            // cur, seen only.
+            ("1729500001.m1.host1:2,S", eml(subject: "Seen one")),
+            // cur, seen + flagged + answered.
+            ("1729500002.m1.host1:2,FSR", eml(subject: "Flagged one")),
+            // cur, trashed.
+            ("1729500003.m1.host1:2,T", eml(subject: "Trashed one")),
+            // cur, draft.
+            ("1729500004.m1.host1:2,D", eml(subject: "Draft one")),
+        ])
+
+        let report = try MailImporter.import(store, from: maildir, now: importTime)
+
+        XCTAssertEqual(report.format, .maildir)
+        XCTAssertEqual(report.messagesFound, 5)
+        XCTAssertEqual(report.imported, 5)
+        assertArithmetic(report)
+        // Flags from file names.
+        XCTAssertEqual(try flagsOf(subject: "New one"), [])
+        XCTAssertEqual(Set(try flagsOf(subject: "Seen one")), ["seen"])
+        XCTAssertEqual(Set(try flagsOf(subject: "Flagged one")), ["seen", "flagged", "answered"])
+        XCTAssertEqual(Set(try flagsOf(subject: "Trashed one")), ["deleted"])
+        XCTAssertEqual(Set(try flagsOf(subject: "Draft one")), ["draft"])
+        // Arrival date: the file name's epoch seconds (Maildir has no
+        // envelope date; the mtime is the documented stand-in, but the
+        // file name's timestamp is stable across copies).
+        XCTAssertEqual(
+            try storedDateReceived(subject: "Seen one"),
+            Date(timeIntervalSince1970: 1_729_500_001)
+        )
+        XCTAssertEqual(try scalar("SELECT importSource FROM message WHERE subject = 'Seen one'"), "maildir")
+    }
+
+    func testMaildirSubfolderStructureBecomesMailboxNames() throws {
+        let maildir = tempDir.appendingPathComponent("Maildir")
+        try makeMaildir(maildir, folder: "", files: [
+            ("1729500010.m1.host1:2,S", eml(subject: "In root")),
+        ])
+        try makeMaildir(maildir, folder: ".Lists.Newsletters", files: [
+            ("1729500011.m1.host1:2,S", eml(subject: "In nested")),
+        ])
+
+        let report = try MailImporter.import(store, from: maildir, now: importTime)
+
+        XCTAssertEqual(report.imported, 2)
+        // Dovecot-style .folder names map to visible names: the leading
+        // dot is the separator marker, inner dots become hierarchy.
+        XCTAssertEqual(try mailboxesOf(subject: "In root"), ["INBOX"])
+        XCTAssertEqual(try mailboxesOf(subject: "In nested"), ["Lists/Newsletters"])
+    }
+
+    func testMaildirTmpFilesAreNeverImported() throws {
+        let maildir = tempDir.appendingPathComponent("Maildir")
+        try makeMaildir(maildir, folder: "", files: [
+            ("1729500020.m1.host1:2,S", eml(subject: "Kept")),
+        ])
+        // A half-delivered message in tmp must never be imported.
+        try write(eml(subject: "Half delivered"), to:
+            maildir.appendingPathComponent("tmp/1729500021.m1.host1"))
+
+        let report = try MailImporter.import(store, from: maildir, now: importTime)
+
+        XCTAssertEqual(report.messagesFound, 1)
+        XCTAssertEqual(report.imported, 1)
+        assertArithmetic(report)
+        XCTAssertEqual(try count("SELECT COUNT(*) FROM message"), 1)
+    }
+
+    func testMaildirReimportAddsNothingTwice() throws {
+        let maildir = tempDir.appendingPathComponent("Maildir")
+        try makeMaildir(maildir, folder: "", files: [
+            ("1729500030.m1.host1:2,S", eml(subject: "Stable")),
+        ])
+        _ = try MailImporter.import(store, from: maildir, now: importTime)
+        let second = try MailImporter.import(store, from: maildir, now: importTime)
+
+        XCTAssertEqual(second.imported, 0)
+        XCTAssertEqual(second.duplicates, 1)
+        assertArithmetic(second)
+        XCTAssertEqual(try count("SELECT COUNT(*) FROM message"), 1)
+    }
+
+    func testMaildirCorruptFileIsolatesItsFailure() throws {
+        let maildir = tempDir.appendingPathComponent("Maildir")
+        try makeMaildir(maildir, folder: "", files: [
+            ("1729500040.m1.host1:2,S", eml(subject: "Good")),
+        ])
+        // A directory named like a cur file: unreadable as a message, even
+        // for a root process (the established corrupt-fixture trick).
+        try FileManager.default.createDirectory(
+            at: maildir.appendingPathComponent("cur/1729500041.m1.host1:2,S"),
+            withIntermediateDirectories: false
+        )
+
+        let report = try MailImporter.import(store, from: maildir, now: importTime)
+
+        // The directory was attempted, failed, and isolated: the good
+        // message still stored, the failure reported and counted.
+        XCTAssertEqual(report.messagesFound, 2)
+        XCTAssertEqual(report.imported, 1)
+        XCTAssertEqual(report.failed, 1)
+        XCTAssertEqual(report.failedFiles, ["1729500041.m1.host1:2,S"])
+        assertArithmetic(report)
+        XCTAssertEqual(try count("SELECT COUNT(*) FROM message"), 1)
+    }
 }

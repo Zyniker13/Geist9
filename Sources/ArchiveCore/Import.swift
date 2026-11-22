@@ -18,6 +18,7 @@ public enum ImportFormat: String, Sendable, CaseIterable {
     case mbox = "mbox"
     case appleMail = "apple-mail"
     case googleTakeout = "takeout"
+    case maildir = "maildir"
 }
 
 /// What an import run did. `messagesFound` equals imported + duplicates +
@@ -164,6 +165,12 @@ public enum MailImporter {
             return report
         }
 
+        // Maildir: a folder whose children are tmp/new/cur (or Dovecot-style
+        // .subfolders beside them). Detected before the .eml fallback.
+        if Self.looksLikeMaildir(url) {
+            return try importMaildir(store, root: url, account: account, mailbox: mailbox, now: now)
+        }
+
         // Otherwise: an .eml folder tree.
         return try importEMLFolder(store, root: url, account: account, mailbox: mailbox, now: now)
     }
@@ -300,6 +307,149 @@ public enum MailImporter {
         // tables now that every row of this import is in the index.
         try store.refreshAsYouTypeVocabulary()
         return report
+    }
+
+
+    // MARK: - Maildir
+
+    /// True when `url` is a Maildir root: it holds tmp/new/cur, or it holds
+    /// Dovecot-style `.folder` Maildir children plus (optionally) those three.
+    static func looksLikeMaildir(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        let hasCore = ["tmp", "new", "cur"].allSatisfy {
+            fm.fileExists(atPath: url.appendingPathComponent($0).path)
+        }
+        if hasCore { return true }
+        // Children that are dot-prefixed Maildirs.
+        let children = (try? fm.contentsOfDirectory(atPath: url.path)) ?? []
+        return children.contains { child in
+            child.hasPrefix(".") && child != "." && child != ".." &&
+                fm.fileExists(atPath: url.appendingPathComponent(child, isDirectory: true)
+                    .appendingPathComponent("cur").path)
+        }
+    }
+
+    /// One Maildir folder: its mailbox name and its new/cur files.
+    private struct MaildirFolder {
+        var mailbox: String
+        var files: [(url: URL, flags: [String], epoch: Int)]
+    }
+
+    /// Imports a Maildir tree (DESIGN 8: "Maildir — flags from file names").
+    /// Structure: the root folder is INBOX; each Dovecot-style `.Name`
+    /// child is a subfolder with `.` replaced by `/` in its visible name.
+    /// Only new/ and cur/ are read; tmp/ is skipped (a half-delivered
+    /// message is by definition incomplete). Flags come from the cur
+    /// file name's `:2,<FLAGS>` info (D F R S T); the arrival date is the
+    /// file name's epoch seconds, which stays stable across copies.
+    static func importMaildir(
+        _ store: ArchiveStore,
+        root: URL,
+        account: AccountIdentity,
+        mailbox: String?,
+        now: Date
+    ) throws -> ImportReport {
+        var report = ImportReport(format: .maildir)
+        let start = Date()
+
+        var folders: [MaildirFolder] = []
+        folders.append(contentsOf: maildirFolders(in: root, mailboxOverride: mailbox))
+
+        let fm = FileManager.default
+        let children = (try? fm.contentsOfDirectory(atPath: root.path))?.sorted() ?? []
+        for child in children where child.hasPrefix(".") && child != "." && child != ".." {
+            let childURL = root.appendingPathComponent(child, isDirectory: true)
+            guard fm.fileExists(atPath: childURL.appendingPathComponent("cur").path) else { continue }
+            // Dovecot: ".Lists.Newsletters" → "Lists/Newsletters". The
+            // person's explicit mailbox argument wins when given.
+            let visible = String(child.dropFirst()).replacingOccurrences(of: ".", with: "/")
+            folders.append(
+                contentsOf: maildirFolders(in: childURL, mailboxOverride: mailbox ?? visible)
+            )
+        }
+
+        for folder in folders {
+            for entry in folder.files {
+                report.filesSeen += 1
+                report.messagesFound += 1
+                do {
+                    let data = try Data(contentsOf: entry.url)
+                    let parsed = MailBridge.parse(for: data, ocr: .deferred)
+                    let arrival = Date(timeIntervalSince1970: TimeInterval(entry.epoch))
+                    let result = try ingestOne(
+                        store, data: data, parsed: parsed, importSource: "maildir",
+                        account: account,
+                        membership: Membership(
+                            mailbox: folder.mailbox, uid: nil, flags: entry.flags,
+                            dateReceived: arrival
+                        ),
+                        dateReceived: arrival, gmailMetadata: false, now: now
+                    )
+                    report.count(result: result)
+                } catch {
+                    report.failed += 1
+                    report.failedFiles.append(entry.url.lastPathComponent)
+                }
+            }
+        }
+
+        report.duration = Date().timeIntervalSince(start)
+        // As-you-type vocabulary (decision 0025): refresh now that every
+        // row of this import is in the index.
+        try store.refreshAsYouTypeVocabulary()
+        return report
+    }
+
+    /// The new/ and cur/ files of one Maildir folder, with flags decoded.
+    private static func maildirFolders(
+        in url: URL, mailboxOverride: String?
+    ) -> [MaildirFolder] {
+        let fm = FileManager.default
+        let newDir = url.appendingPathComponent("new", isDirectory: true)
+        let curDir = url.appendingPathComponent("cur", isDirectory: true)
+        guard fm.fileExists(atPath: newDir.path) || fm.fileExists(atPath: curDir.path) else {
+            return []
+        }
+        // The root Maildir's folder name: INBOX unless the caller names it.
+        let mailbox = mailboxOverride ?? "INBOX"
+        var files: [(url: URL, flags: [String], epoch: Int)] = []
+        for (dir, isCur) in [(newDir, false), (curDir, true)] {
+            let names = (try? fm.contentsOfDirectory(atPath: dir.path))?.sorted() ?? []
+            for name in names {
+                let url = dir.appendingPathComponent(name)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                // Directories are kept in the list: reading one throws, and
+                // the import counts it as a failed entry (an unreadable
+                // entry is reported, never silently skipped).
+                var flags: [String] = []
+                var epoch: TimeInterval = 0
+                // File name shape: <epoch>.<unique>.<host>[:2,<FLAGS>]
+                var stem = name
+                if let range = name.range(of: ":2,") {
+                    let raw = name[range.upperBound...]
+                    stem = String(name[..<range.lowerBound])
+                    for ch in raw {
+                        switch ch {
+                        case "D": flags.append("draft")
+                        case "F": flags.append("flagged")
+                        case "R": flags.append("answered")
+                        case "S": flags.append("seen")
+                        case "T": flags.append("deleted")
+                        default: break // P (resent/forwarded) and unknowns ignored
+                        }
+                    }
+                }
+                // The epoch is the first dot-delimited component.
+                let first = stem.split(separator: ".", maxSplits: 1).first ?? ""
+                epoch = TimeInterval(first) ?? 0
+                if epoch == 0, let attrs = try? fm.attributesOfItem(atPath: url.path),
+                   let modified = attrs[.modificationDate] as? Date {
+                    epoch = modified.timeIntervalSince1970
+                }
+                files.append((url, flags.sorted(), Int(epoch)))
+            }
+        }
+        return [MaildirFolder(mailbox: mailbox, files: files)]
     }
 
     // MARK: - mbox
