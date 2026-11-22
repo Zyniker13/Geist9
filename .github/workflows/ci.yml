@@ -24,7 +24,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Python for the docs check and SQLite headers for GRDB
-        run: apt-get update -qq && apt-get install -y -qq python3 libsqlite3-dev >/dev/null
+        run: apt-get update -qq && apt-get install -y -qq python3 libsqlite3-dev default-jre-headless >/dev/null
       - run: scripts/check.sh
 
   macos:

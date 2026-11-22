@@ -51,9 +51,16 @@ mark swift-build begin
 # leave a newly added executable unlinked until its product is requested.
 run_logged swift build --product email-archiver-mcp --product mcp-fixture-builder --product bench-search
 mark swift-build done
+# The IMAP integration suite needs a real local server (TESTING.md, Protocol
+# row): start GreenMail before the tests, stop it after. Start is idempotent
+# and unprivileged; failure to start fails the run loudly.
+mark imap-servers begin
+run_logged bash scripts/imap-servers.sh start
+mark imap-servers done
 mark swift-test begin
 run_logged swift test --parallel
 mark swift-test done
+run_logged bash scripts/imap-servers.sh stop
 
 echo "== Docs: every relative link in a Markdown file points at a file that exists"
 mark docs begin
