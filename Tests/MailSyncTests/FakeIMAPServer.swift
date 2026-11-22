@@ -32,6 +32,9 @@ struct FakeFolder {
     var name: String
     var messages: [FakeMessage]
     var uidValidity: UInt32
+    /// SPECIAL-USE attributes the LIST response reports (RFC 6154),
+    /// e.g. ["\\Sent"] — used by the localized-folders quirk replay.
+    var specialUse: [String] = []
 }
 
 /// What the fake server does on one command. Beyond the plain protocol
@@ -43,6 +46,9 @@ struct FakeServerScenario: Sendable {
     var password: String = "secret"
     /// Fail every LOGIN with NO (quirk: wrong credentials).
     var loginFails: Bool = false
+    /// Flaky-auth replay (Comcast/Xfinity): the first N LOGIN attempts get
+    /// NO regardless of credentials; a later one succeeds. Zero = off.
+    var failFirstLogins: Int = 0
     /// Close the connection right after this many commands (quirk: mid-pass BYE).
     var disconnectAfterCommands: Int? = nil
     /// Folders whose STATUS gets a NO reply (quirk: server-side folder problem).
@@ -152,11 +158,15 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
     private var commandsSeen = 0
     private var loggedIn = false
     private var sentID = false
+    /// Remaining flaky-auth rejections, decrementing per LOGIN (seeded from
+    /// the scenario this connection was created with).
+    private var failFirstLoginsRemaining = 0
     private var selected: String?
     private var byID: [String: FakeFolder] = [:]
 
     init(scenario: FakeServerScenario, server: FakeIMAPServer) {
         self.server = server
+        self.failFirstLoginsRemaining = scenario.failFirstLogins
         for folder in scenario.folders {
             self.byID[folder.name] = folder
         }
@@ -281,7 +291,10 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
             self.emit(context, .untagged(.capabilityData([.imap4rev1, .id, .idle])))
             self.ok(context, tag, "CAPABILITY completed")
         case .login(let user, let password):
-            if scenario.loginFails || user != scenario.user || password != scenario.password {
+            if scenario.failFirstLogins > 0 {
+                self.failFirstLoginsRemaining -= 1
+                self.no(context, tag, "LOGIN failed")
+            } else if scenario.loginFails || user != scenario.user || password != scenario.password {
                 self.no(context, tag, "LOGIN failed")
             } else {
                 self.loggedIn = true
@@ -295,8 +308,14 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
             for folder in scenario.folders {
                 let name = MailboxName(Array(folder.name.utf8))
                 let path = try! MailboxPath(name: name, pathSeparator: "/")
+                var attrs: [MailboxInfo.Attribute] = [.hasNoChildren]
+                for use in folder.specialUse {
+                    if let attribute = MailboxInfo.Attribute(use) {
+                        attrs.append(attribute)
+                    }
+                }
                 let info = MailboxInfo(
-                    attributes: [.hasNoChildren],
+                    attributes: attrs,
                     path: path,
                     objectID: nil,
                     extensions: [:]

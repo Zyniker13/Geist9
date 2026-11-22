@@ -92,6 +92,10 @@ public enum SyncEngineError: Error, Equatable, Sendable {
     case commandFailed(String)
     /// The connection closed unexpectedly.
     case connectionLost
+    /// A server whose profile demands a confirmed self-signed certificate
+    /// (`.selfSignedLocalhost`, Proton Bridge) was reached without one
+    /// confirmed by the person. Fail closed, before any connection.
+    case certificateNotConfirmed
 }
 
 /// The IMAP sync engine for one account (DESIGN 5).
@@ -146,6 +150,13 @@ public final class IMAPSyncEngine: Sendable {
         password: String,
         progress: @escaping @Sendable (SyncProgress) -> Void = { _ in }
     ) async throws -> SyncProgress {
+        // Fail closed on unconfirmed self-signed certificates (decision
+        // 0058): a Bridge-style server is only contacted after the person
+        // confirmed its fingerprint, and the refusal precedes any I/O.
+        if profile.quirks.contains(.selfSignedLocalhost)
+            && profile.confirmedFingerprints.isEmpty {
+            throw SyncEngineError.certificateNotConfirmed
+        }
         let config = IMAPConnection.Configuration(
             hostname: profile.host,
             port: UInt16(port),
@@ -320,6 +331,11 @@ public final class IMAPSyncEngine: Sendable {
         credentials user: String,
         password: String
     ) async throws -> [String] {
+        // Same fail-closed rule as sync (decision 0058).
+        if profile.quirks.contains(.selfSignedLocalhost)
+            && profile.confirmedFingerprints.isEmpty {
+            throw SyncEngineError.certificateNotConfirmed
+        }
         let config = IMAPConnection.Configuration(
             hostname: profile.host,
             port: UInt16(port),
@@ -373,6 +389,12 @@ public final class IMAPSyncEngine: Sendable {
         }
         let account = self.account
         let path = mailbox.path
+        // The folder's role comes from SPECIAL-USE only (RFC 6154): localized
+        // folder names are unreliable (PROVIDERS "localizedFolders").
+        let role = Self.roleForSpecialUse(mailbox.attributes)
+        // The row exists even for folders that hold no messages (this pass
+        // or ever): their SPECIAL-USE role would otherwise be lost.
+        try await self.offPool { try store.ensureMailbox(account: account, name: path, role: role) }
         let stored = try await self.offPool { try store.syncState(account: account, mailbox: path) }
         let serverValidity = status.uidValidity.map { Int64($0) } ?? 0
         if stored?.uidValidity != serverValidity {
@@ -422,7 +444,7 @@ public final class IMAPSyncEngine: Sendable {
             guard !batch.messages.isEmpty else { break }
             var storedCount = 0
             for message in batch.messages {
-                let result = try await self.ingest(message, into: store, mailbox: path)
+                let result = try await self.ingest(message, into: store, mailbox: path, role: role)
                 switch result {
                 case .created: storedCount += 1
                 case .duplicate: progress.messagesDuplicate += 1
@@ -702,9 +724,26 @@ public final class IMAPSyncEngine: Sendable {
         }
     }
 
+    /// RFC 6154 SPECIAL-USE → the archive's mailbox role. The attribute is
+    /// the only reliable signal; folder names differ per language.
+    static func roleForSpecialUse(_ attributes: [String]) -> String? {
+        for attribute in attributes {
+            switch attribute.lowercased() {
+            case "\\sent": return "sent"
+            case "\\drafts": return "drafts"
+            case "\\trash": return "trash"
+            case "\\junk": return "junk"
+            case "\\archive": return "archive"
+            case "\\all", "\\flagged": return nil  // Gmail's All Mail archives elsewhere
+            default: continue
+            }
+        }
+        return nil
+    }
+
     // MARK: - Ingest
 
-    private func ingest(_ fetched: FetchedMessage, into store: ArchiveStore, mailbox: String) async throws -> IngestResult {
+    private func ingest(_ fetched: FetchedMessage, into store: ArchiveStore, mailbox: String, role: String?) async throws -> IngestResult {
         // The parse is pure CPU over the fetched bytes; the store call
         // blocks (SQLite + fsync) and must leave the cooperative pool.
         let fetchedBox = fetched
@@ -723,7 +762,8 @@ public final class IMAPSyncEngine: Sendable {
                 mailbox: mailbox,
                 uid: Int64(fetchedBox.uid),
                 flags: [],
-                dateReceived: fetchedBox.internalDate ?? record.dateSent
+                dateReceived: fetchedBox.internalDate ?? record.dateSent,
+                role: role
             )],
             labels: fetchedBox.labels.map { LabelName(name: $0) },
             searchText: parsed.searchText

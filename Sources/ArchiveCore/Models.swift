@@ -101,12 +101,21 @@ public struct Membership: Sendable, Equatable {
     public var flags: [String]
     /// INTERNALDATE for IMAP, or the message's date for imports.
     public var dateReceived: Date?
+    /// The mailbox's role as the server declared it via SPECIAL-USE
+    /// (RFC 6154), e.g. "sent". nil for imports and for servers that
+    /// report none; the ingest then falls back to deriving a coarse role
+    /// from the folder name.
+    public var role: String?
 
-    public init(mailbox: String, uid: Int64? = nil, flags: [String] = [], dateReceived: Date? = nil) {
+    public init(
+        mailbox: String, uid: Int64? = nil, flags: [String] = [],
+        dateReceived: Date? = nil, role: String? = nil
+    ) {
         self.mailbox = mailbox
         self.uid = uid
         self.flags = flags
         self.dateReceived = dateReceived
+        self.role = role
     }
 }
 

@@ -202,4 +202,115 @@ final class QuirkReplayTests: XCTestCase {
         XCTAssertEqual(count, 2)
         assertReadOnly(server)
     }
+
+    // MARK: - Localized folders: SPECIAL-USE beats names
+
+    /// PROVIDERS: some servers report localized folder names ("送信済み"
+    /// for Sent, "ゴミ箱" for Trash). The engine must never decide a
+    /// folder's role from its name: the SPECIAL-USE attribute in the LIST
+    /// response is the only reliable signal, and the stored mailbox row
+    /// has to carry that role.
+    func testLocalizedFoldersGetTheirRoleFromSpecialUseNotNames() async throws {
+        let body = message("localized")
+        let server = FakeIMAPServer(scenario: FakeServerScenario(folders: [
+            FakeFolder(name: "INBOX", messages: [FakeMessage(uid: 1, data: body)], uidValidity: 1),
+            FakeFolder(name: "送信済みアイテム", messages: [], uidValidity: 2, specialUse: ["\\Sent"]),
+            FakeFolder(name: "ゴミ箱", messages: [], uidValidity: 3, specialUse: ["\\Trash"]),
+        ]))
+        try server.start()
+        defer { server.stop() }
+
+        let store = try makeStore()
+        let engine = IMAPSyncEngine(profile: profile(port: server.port, quirks: [.localizedFolders]), account: account)
+        _ = try await engine.sync(store: store, credentials: "alice@example.com", password: "secret")
+
+        // Both localized folders exist with the role the server declared,
+        // not one guessed from the (non-English) name.
+        XCTAssertEqual(try role(of: "送信済みアイテム", in: store), "sent")
+        XCTAssertEqual(try role(of: "ゴミ箱", in: store), "trash")
+        assertReadOnly(server)
+    }
+
+    private func role(of name: String, in store: ArchiveStore) throws -> String? {
+        try store.db.read { db in
+            try String.fetchOne(db, sql: "SELECT role FROM mailbox WHERE name = ?", arguments: [name])
+        }
+    }
+
+    // MARK: - Proton Bridge: self-signed localhost
+
+    /// PROVIDERS: Proton Bridge serves IMAP on localhost with a
+    /// self-signed certificate; trust requires the person's explicit
+    /// fingerprint confirmation. Fail closed: a profile that demands
+    /// confirmation with none recorded refuses before any connection —
+    /// and with a matching recorded fingerprint the pass proceeds.
+    func testSelfSignedLocalhostRefusesWithoutAConfirmedFingerprint() async throws {
+        let server = FakeIMAPServer(scenario: FakeServerScenario(
+            folders: [FakeFolder(name: "INBOX", messages: [], uidValidity: 1)]
+        ))
+        try server.start()
+        defer { server.stop() }
+
+        let store = try makeStore()
+        var profile = self.profile(port: server.port, quirks: [.selfSignedLocalhost])
+        profile.confirmedFingerprints = []
+
+        let engine = IMAPSyncEngine(profile: profile, account: account)
+        do {
+            _ = try await engine.sync(store: store, credentials: "alice@example.com", password: "secret")
+            XCTFail("an unconfirmed self-signed certificate must be refused")
+        } catch let error as SyncEngineError {
+            XCTAssertEqual(error, .certificateNotConfirmed, "the refusal must be its own error, not connectionLost")
+        }
+        // Nothing connected: the fake server never saw a single command.
+        XCTAssertTrue(server.seenCommands.isEmpty, "refusal happens before any connection")
+    }
+
+    func testSelfSignedLocalhostConnectsWithTheConfirmedFingerprint() async throws {
+        let server = FakeIMAPServer(scenario: FakeServerScenario(
+            folders: [FakeFolder(name: "INBOX", messages: [FakeMessage(uid: 1, data: message("bridge"))], uidValidity: 1)]
+        ))
+        try server.start()
+        defer { server.stop() }
+
+        let store = try makeStore()
+        var profile = self.profile(port: server.port, quirks: [.selfSignedLocalhost])
+        profile.confirmedFingerprints = [Self.knownBridgeFingerprint]
+
+        let engine = IMAPSyncEngine(profile: profile, account: account)
+        _ = try await engine.sync(store: store, credentials: "alice@example.com", password: "secret")
+        XCTAssertEqual(try sqlCount(store, "SELECT COUNT(*) FROM message"), 1)
+        assertReadOnly(server)
+    }
+
+    /// The fingerprint the fixture reports (in production this is shown
+    /// to the person and stored only after they confirm it).
+    private static let knownBridgeFingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+    // MARK: - Comcast/Xfinity: flaky auth
+
+    /// PROVIDERS: Comcast/Xfinity re-prompts on auth repeatedly and can
+    /// reject valid credentials during an outage. The engine must surface
+    /// the failure clearly (authenticationFailed with the server's own
+    /// status text) and must NOT retry-login itself — the caller decides.
+    func testFlakyAuthSurfacesTheFailureWithoutRetrying() async throws {
+        let server = FakeIMAPServer(scenario: FakeServerScenario(
+            folders: [FakeFolder(name: "INBOX", messages: [], uidValidity: 1)],
+            failFirstLogins: 2
+        ))
+        try server.start()
+        defer { server.stop() }
+
+        let store = try makeStore()
+        let engine = IMAPSyncEngine(profile: profile(port: server.port, quirks: [.flakyAuth]), account: account)
+        do {
+            _ = try await engine.sync(store: store, credentials: "alice@example.com", password: "secret")
+            XCTFail("a failed LOGIN must surface")
+        } catch let error as SyncEngineError {
+            XCTAssertEqual(error, .authenticationFailed("LOGIN failed"))
+        }
+        // No retry loop: exactly one LOGIN reached the server.
+        XCTAssertEqual(server.seenCommands.filter { $0 == "LOGIN" }.count, 1, "the engine must not auto-retry authentication")
+        assertReadOnly(server)
+    }
 }

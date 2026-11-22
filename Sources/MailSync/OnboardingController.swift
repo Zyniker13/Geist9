@@ -86,6 +86,8 @@ public final class OnboardingController: Sendable {
                 return .failed("Could not reach the mail server. Check the address, the port, and the network.")
             case .commandFailed(let message):
                 return .failed("The server refused the connection test: \(message)")
+            case .certificateNotConfirmed:
+                return .failed("Confirm the server's certificate fingerprint before connecting.")
             }
         } catch {
             return .failed("The connection test failed: \(error)")

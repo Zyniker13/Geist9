@@ -408,7 +408,7 @@ extension ArchiveStore {
                     mailboxID = cached
                 } else {
                     mailboxID = try Self.getOrCreateMailbox(
-                        accountID: accountID, name: membership.mailbox, db: db
+                        accountID: accountID, name: membership.mailbox, role: membership.role, db: db
                     )
                     mailboxCache[mailboxKey] = mailboxID
                 }
@@ -737,14 +737,29 @@ extension ArchiveStore {
         return db.lastInsertedRowID
     }
 
-    static func getOrCreateMailbox(accountID: Int64, name: String, db: Database) throws -> Int64 {
+    static func getOrCreateMailbox(
+        accountID: Int64, name: String, role: String? = nil, db: Database
+    ) throws -> Int64 {
         if let id = try Int64.fetchOne(
             db, sql: "SELECT id FROM mailbox WHERE accountID = ? AND name = ?",
             arguments: [accountID, name]
-        ) { return id }
+        ) {
+            // A later SPECIAL-USE answer refines a role the name guess left
+            // unknown; a name guess never overrides one the server declared.
+            if let role {
+                try db.execute(
+                    sql: """
+                    UPDATE mailbox SET role = ?
+                    WHERE accountID = ? AND name = ? AND (role IS NULL OR role = ?)
+                    """,
+                    arguments: [role, accountID, name, Self.role(for: name)]
+                )
+            }
+            return id
+        }
         try db.execute(
             sql: "INSERT INTO mailbox (accountID, name, role) VALUES (?, ?, ?)",
-            arguments: [accountID, name, Self.role(for: name)]
+            arguments: [accountID, name, role ?? Self.role(for: name)]
         )
         return db.lastInsertedRowID
     }
@@ -808,6 +823,19 @@ extension ArchiveStore {
 }
 
 extension ArchiveStore {
+    /// Makes sure a mailbox row exists for `name`, recording the server's
+    /// SPECIAL-USE `role` when the server declared one. Empty folders never
+    /// pass through ingest, so the sync calls this directly: a folder the
+    /// person keeps empty (an archive of Trash, say) still needs its row.
+    public func ensureMailbox(account: AccountIdentity, name: String, role: String?) throws {
+        try db.write { db in
+            _ = try Self.getOrCreateMailbox(
+                accountID: try Self.getOrCreateAccount(account, db: db),
+                name: name, role: role, db: db
+            )
+        }
+    }
+
     /// Runs `body(index)` for `count` indices on the cooperative global
     /// concurrent queue and waits for all of them. Used by batch ingest to
     /// overlap fsync latency across files; the per-index work is independent

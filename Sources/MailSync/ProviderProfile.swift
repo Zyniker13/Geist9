@@ -104,6 +104,11 @@ public struct ProviderProfile: Sendable, Equatable {
     public var helpURL: URL?
     public var politeness: PolitenessProfile
     public var quirks: Set<ProviderQuirk>
+    /// SHA-256 certificate fingerprints the person explicitly confirmed
+    /// (decision 0058): required before the engine connects to a server
+    /// whose profile carries `.selfSignedLocalhost` (Proton Bridge), and
+    /// matched against the presented certificate.
+    public var confirmedFingerprints: Set<String> = []
     /// The primary domain plus every alias domain that resolves to this
     /// provider (e.g. AT&T's legacy domains, GMX's .com, Orange's wanadoo).
     /// All lower-case, no leading dot.
