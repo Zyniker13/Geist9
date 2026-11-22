@@ -27,10 +27,25 @@ public enum OCRText {
     /// the data is not a readable image or nothing legible was found.
     public static func text(_ data: Data) -> String? {
         guard data.count <= maxInputBytes else { return nil }
-        let handler = VNImageRequestHandler(data: data, options: [:])
-        let request = makeRequest()
-        guard let observations = performBounded(handler, request: request) else { return nil }
-        return joinedLines(from: observations)
+        return withLevels([.accurate, .fast], data: data)
+    }
+
+    /// Runs the recognition levels in order and returns the first that yields
+    /// text. The accurate level's ML pipeline can fail machine-wide (on some
+    /// hosts the ANE compute path errors out: the call either throws or comes
+    /// back with zero observations). Falling back to the fast level in the
+    /// same call keeps scanned mail searchable on such hosts instead of
+    /// storing noText. Levels empty means "use the plain accurate request".
+    static func withLevels(_ levels: [VNRequestTextRecognitionLevel], data: Data) -> String? {
+        for level in levels {
+            let handler = VNImageRequestHandler(data: data, options: [:])
+            let request = makeRequest()
+            request.recognitionLevel = level
+            guard let observations = performBounded(handler, request: request),
+                  let text = joinedLines(from: observations) else { continue }
+            return text
+        }
+        return nil
     }
 
     /// Per-page text of a PDF: embedded text when the page has any, OCR of
@@ -94,10 +109,15 @@ public enum OCRText {
 
     private static func ocr(page: PDFPage) -> String? {
         guard let image = rendered(page: page) else { return nil }
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        let request = makeRequest()
-        guard let observations = performBounded(handler, request: request) else { return nil }
-        return joinedLines(from: observations)
+        for level in [VNRequestTextRecognitionLevel.accurate, .fast] {
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            let request = makeRequest()
+            request.recognitionLevel = level
+            guard let observations = performBounded(handler, request: request),
+                  let text = joinedLines(from: observations) else { continue }
+            return text
+        }
+        return nil
     }
 
     /// Runs one recognition call on a worker thread and waits at most

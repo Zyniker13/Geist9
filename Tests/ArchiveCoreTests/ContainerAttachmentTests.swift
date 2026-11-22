@@ -16,6 +16,7 @@ import PDFKit
 #endif
 
 @testable import ArchiveCore
+@testable import ArchiveExtractApple
 
 final class ContainerAttachmentTests: XCTestCase {
     // MARK: Fixture builder: stored-entry ZIPs, correct CRC and sizes.
@@ -1178,5 +1179,17 @@ final class ContainerAttachmentTests: XCTestCase {
             attachments.contains("plan review"),
             "the backfill must restore deliberate-format text: \(attachments)"
         )
+    }
+
+    /// Vision's accurate-level recognition can fail machine-wide (ANE compute
+    /// errors surface as a thrown error or zero observations). The extractor
+    /// must fall back to the fast level in the same call rather than storing
+    /// noText for text that is plainly legible. (Machine fault found in the
+    /// wild 2026-11-22: every .accurate call errored; .fast worked.)
+    func testOCRFallsBackToFastRecognitionWhenAccurateYieldsNothing() throws {
+        let text = try XCTUnwrap(OCRText.withLevels(
+            [.fast], data: Container.png(["Scanned receipt from Harbor Lane"])
+        ))
+        XCTAssertTrue(text.contains("receipt"), "the fast level must recognize the fixture text, got: \(text)")
     }
 }
