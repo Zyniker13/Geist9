@@ -177,11 +177,13 @@ final class IMAPSyncEngineTests: XCTestCase {
         let second = try await runSync(engine, store: store)
         XCTAssertEqual(second.messagesStored, 0)
         XCTAssertEqual(second.messagesDuplicate, 0)
-        // The server saw: pass 1 = full batch + one empty-window probe;
-        // pass 2 = one empty-window probe above the checkpoint. A pass that
-        // re-fetched the folder would push the count past 3.
+        // The server saw: pass 1 = one full batch (the wrap-guarded loop no
+        // longer sends an empty probe after the last message — it stops at
+        // the folder's highest live UID); pass 2 = zero fetches, because the
+        // checkpoint already sits at that highest UID. A pass that
+        // re-fetched the folder would push the count past 1.
         let fetchCount = server.seenCommands.filter { $0 == "UID FETCH" }.count
-        XCTAssertEqual(fetchCount, 3, "incremental pass must not re-fetch the folder")
+        XCTAssertEqual(fetchCount, 1, "incremental pass must not re-fetch the folder")
         self.assertReadOnly(server)
     }
 
@@ -212,6 +214,85 @@ final class IMAPSyncEngineTests: XCTestCase {
         }
         XCTAssertEqual(stored, 5)
         XCTAssertEqual(try syncState(store, "INBOX")?.highestUID, 5)
+        self.assertReadOnly(server)
+    }
+
+    // MARK: - STATUS item quirks
+
+    /// A server without CONDSTORE/QRESYNC rejects HIGHESTMODSEQ in STATUS
+    /// with a tagged NO naming the item (GreenMail 2.1.3 does exactly this).
+    /// The pass must still succeed: the engine retries the STATUS without the
+    /// refused item and records a nil mod-sequence.
+    func testStatusRefusingHighestModSeqStillSyncs() async throws {
+        var scenario = FakeServerScenario(folders: [
+            FakeFolder(
+                name: "INBOX",
+                messages: [
+                    FakeMessage(uid: 1, data: message("alpha")),
+                    FakeMessage(uid: 2, data: message("beta")),
+                ],
+                uidValidity: 7
+            ),
+        ])
+        scenario.refuseStatusItems = ["HIGHESTMODSEQ"]
+        let server = FakeIMAPServer(scenario: scenario)
+        try server.start()
+        defer { server.stop() }
+
+        let store = try makeStore()
+        let engine = IMAPSyncEngine(profile: profile(port: server.port), account: account)
+        let progress = try await runSync(engine, store: store)
+
+        XCTAssertEqual(progress.messagesStored, 2, "the pass succeeds without HIGHESTMODSEQ")
+        XCTAssertEqual(try self.count(store, "SELECT COUNT(*) FROM message"), 2)
+        let state = try self.syncState(store, "INBOX")
+        XCTAssertEqual(state?.uidValidity, 7)
+        XCTAssertEqual(state?.highestUID, 2)
+        self.assertReadOnly(server)
+    }
+
+    // MARK: - Star-range wrap
+
+    /// RFC 3501 §6.4.8: a UID range "n:*" whose lower bound exceeds the
+    /// folder's highest UID still matches the last message. Real servers
+    /// (GreenMail) answer a stale incremental window with that message
+    /// forever; the engine must not re-fetch it in a loop. The incremental
+    /// pass bounds its fetch window by the folder's known highest UID (from
+    /// its own UID SEARCH) and stops once it is above it.
+    func testIncrementalPassStopsWhenWindowExceedsHighestUID() async throws {
+        var scenario = FakeServerScenario(folders: [
+            FakeFolder(
+                name: "INBOX",
+                messages: [
+                    FakeMessage(uid: 1, data: message("alpha")),
+                    FakeMessage(uid: 2, data: message("beta")),
+                    FakeMessage(uid: 3, data: message("gamma")),
+                ],
+                uidValidity: 7
+            ),
+        ])
+        // Full pass: everything stored once.
+        let server = FakeIMAPServer(scenario: scenario)
+        try server.start()
+        defer { server.stop() }
+
+        let store = try makeStore()
+        let engine = IMAPSyncEngine(profile: profile(port: server.port), account: account)
+        let full = try await runSync(engine, store: store)
+        XCTAssertEqual(full.messagesStored, 3)
+
+        // No server-side change. The next pass must send exactly ONE UID
+        // FETCH (the empty-window probe above the checkpoint) and must NOT
+        // loop: with the wrap bug the stale "4:*" window re-matches UID 3
+        // forever, piling thousands of duplicate ingests.
+        let incremental = try await runSync(engine, store: store)
+        XCTAssertEqual(incremental.messagesStored, 0)
+        let fetchCount = server.seenCommands.filter { $0 == "UID FETCH" }.count
+        XCTAssertEqual(
+            fetchCount, 1,
+            "an unchanged folder pass probes once above the checkpoint; more fetches mean the star-range wrap re-matches the last UID"
+        )
+        XCTAssertEqual(try self.count(store, "SELECT COUNT(*) FROM message"), 3)
         self.assertReadOnly(server)
     }
 

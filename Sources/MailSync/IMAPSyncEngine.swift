@@ -336,7 +336,11 @@ public final class IMAPSyncEngine: Sendable {
         // 2b. The folder's live UID set (UID SEARCH ALL): what the server
         // has right now, independent of the checkpoint. Feeds deletion
         // tracking below — a membership the search no longer names is gone
-        // from the server; one it names stays, fetched or not.
+        // from the server; one it names stays, fetched or not. Its maximum
+        // also bounds the fetch loop: a window starting above the folder's
+        // highest live UID would, per RFC 3501 §6.4.8, still match the last
+        // message ("n:*" wraps), re-serving it forever — so the loop stops
+        // before sending that window at all.
         let serverUIDs = try await liveUIDs(connection)
 
         var outcome = FolderOutcome(bytesThisFolder: 0)
@@ -344,13 +348,19 @@ public final class IMAPSyncEngine: Sendable {
         // The high-water the pass has reached so far; the checkpoint's
         // high-water only grows (it starts from the stored one).
         var passHighWater = highWater
-        while true {
+        // RFC 3501 §6.4.8 star-range wrap guard: no candidate UID can exist
+        // above the folder's highest live UID, and asking for one re-matches
+        // the last message on servers that honor the wrap. Skip the fetch
+        // entirely when the window would start above it (the empty probe the
+        // old loop sent is exactly that wrap window when it wraps).
+        let highestLiveUID = serverUIDs.max() ?? 0
+        while passHighWater < highestLiveUID {
             batches += 1
             let lower = passHighWater + 1
             // Fetch in byte-sized batches above the high-water mark. The
             // budget caps one batch (at least one message fits); the next
             // batch continues above this one's highest UID until the
-            // server says the window is empty.
+            // window is exhausted (bounded by `highestLiveUID`).
             let batch = try await fetchBatch(
                 connection, from: lower, maxBytes: batchBytes
             )
@@ -399,15 +409,29 @@ public final class IMAPSyncEngine: Sendable {
         var highestModSeq: ModificationSequenceValue?
     }
 
+    /// STATUS for the checkpoint's UIDVALIDITY and HIGHESTMODSEQ. A server
+    /// without CONDSTORE/QRESYNC rejects HIGHESTMODSEQ with a tagged NO
+    /// naming the item (GreenMail 2.1.3 does); then the STATUS is retried
+    /// with UIDVALIDITY alone and the mod-sequence stays nil — the sync is
+    /// still correct, just without MODSEQ-based incremental narrowing.
     private func statusOf(_ connection: IMAPConnection, _ path: String) async throws -> StatusInfo? {
+        do {
+            return try await self.statusOnce(connection, path, items: [.uidValidity, .highestModificationSequence])
+        } catch let error as SyncEngineError {
+            // Only a NO naming HIGHESTMODSEQ falls back; anything else is real.
+            guard case .commandFailed(let message) = error,
+                  message.contains("HIGHESTMODSEQ")
+            else { throw error }
+            return try await self.statusOnce(connection, path, items: [.uidValidity])
+        }
+    }
+
+    private func statusOnce(
+        _ connection: IMAPConnection, _ path: String, items: [MailboxAttribute]
+    ) async throws -> StatusInfo? {
         var info = StatusInfo(uidValidity: nil, highestModSeq: nil)
         var sawDone = false
-        try await connection.send(
-            .status(
-                MailboxName(Array(path.utf8)),
-                [.uidValidity, .highestModificationSequence]
-            )
-        ) { _, stream in
+        try await connection.send(.status(MailboxName(Array(path.utf8)), items)) { _, stream in
             for try await response in stream {
                 switch response {
                 case .untagged(.mailboxData(.status(_, let st))):

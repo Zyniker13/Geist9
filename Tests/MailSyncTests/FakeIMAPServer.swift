@@ -44,6 +44,10 @@ struct FakeServerScenario: Sendable {
     var disconnectAfterCommands: Int? = nil
     /// Folders whose STATUS gets a NO reply (quirk: server-side folder problem).
     var failStatusFor: Set<String> = []
+    /// Status items the server refuses (e.g. GreenMail rejects HIGHESTMODSEQ
+    /// without CONDSTORE): any STATUS whose request includes one gets a
+    /// tagged NO naming the first refused item, exactly like a real server.
+    var refuseStatusItems: Set<String> = []
 }
 
 /// A running fake server. Bind on 127.0.0.1 port 0, read back the port.
@@ -291,6 +295,11 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
                 self.no(context, tag, "STATUS failed (scripted)")
                 return
             }
+            let refused = scenario.refuseStatusItems
+            if let first = attributes.first(where: { refused.contains($0.rawValue) }) {
+                self.no(context, tag, "Unknown status item: '\(first.rawValue)'")
+                return
+            }
             guard let folder = self.byID[name] else {
                 self.no(context, tag, "Mailbox does not exist")
                 return
@@ -334,10 +343,24 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
             let wantsInternalDate = attributes.contains(.internalDate)
             // The set is a real UID range unless the client asked for "$"
             // (SEARCH result), which this fake never sees from the engine.
+            // RFC 3501 §6.4.8: a range whose lower bound exceeds the folder's
+            // highest UID still matches the LAST message ("*"): real servers
+            // (GreenMail) answer a stale "n:*" with the final message, so the
+            // fake must reproduce that or a wrap-driven bug hides.
             let wantedUIDs: Set<UInt32>
             switch set {
             case .set(let nonEmpty):
-                wantedUIDs = Set(folder.messages.map { $0.uid }).filter { nonEmpty.set.contains(UID(rawValue: $0)) }
+                let folderMax = folder.messages.map { $0.uid }.max() ?? 0
+                var matched = Set<UInt32>(
+                    folder.messages.map { $0.uid }.filter {
+                        nonEmpty.set.contains(UID(rawValue: $0))
+                    }
+                )
+                let lower = nonEmpty.set.min()?.rawValue ?? 0
+                if folderMax > 0, lower > folderMax, let last = folder.messages.map({ $0.uid }).max() {
+                    matched.insert(last)
+                }
+                wantedUIDs = matched
             case .lastCommand:
                 wantedUIDs = Set(folder.messages.map { $0.uid })
             }
