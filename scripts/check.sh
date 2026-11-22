@@ -20,6 +20,9 @@ if [[ -n "$SUMMARY" ]]; then
     fi
     echo "### Failed: $*" >> "$SUMMARY"
     tail_summary "$log"
+    # The full log also goes to stderr, so the failure cause is in the job
+    # log itself, not only in the step summary.
+    tail -80 "$log" >&2 || true
     # Also emit errors as job annotations: those are readable through the
     # public checks API even when the full log is not. Match the common
     # case-insensitive spellings; some tools (java, maven) say "Error:"
