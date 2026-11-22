@@ -122,6 +122,7 @@ Gmail special case: archive `[Gmail]/All Mail` (plus Spam and Trash if the perso
 - A first sync of a large Gmail account will take days by design. The UI says so up front, shows the projected finish date, and lets the person raise or lower the pace.
 - Exponential backoff with jitter on `BYE`, throttling responses, and timeouts; a provider-specific "come back later" when a daily cap is hit.
 - `IDLE` on Inbox only while the app is open; otherwise scheduled polling (default every 30 minutes).
+- The scheduler (decision 0063) runs one pass across all accounts at a time, accounts serially in row order; a "Sync now" while a pass is running is a no-op, not a second pass. An account whose secret is unreachable is skipped with "Unlock the app to continue archiving" — never reported as an authentication failure.
 
 ### JMAP
 

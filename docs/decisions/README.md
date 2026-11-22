@@ -62,3 +62,4 @@
 - [0060-cancellation-is-not-connection-loss](0060-cancellation-is-not-connection-loss.md)
 - [0061-ocr-falls-back-to-fast-recognition](0061-ocr-falls-back-to-fast-recognition.md)
 - [0062-sync-profile-travels-with-the-account-row](0062-sync-profile-travels-with-the-account-row.md)
+- [0063-one-scheduler-pass-at-a-time](0063-one-scheduler-pass-at-a-time.md)
