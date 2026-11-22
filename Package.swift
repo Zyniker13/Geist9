@@ -243,9 +243,10 @@ let testTargets: [Target] = [
         ]
     ),
     .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
-    // Integration suite against real local IMAP servers (TESTING.md Protocol
-    // row). Runs whenever a server is reachable at GEIST9_GREENMAIL_HOST /
-    // GEIST9_GREENMAIL_PORT; fails loudly when none is.
+    // Integration suite against the real local IMAP servers (TESTING.md
+    // Protocol row): GreenMail and Dovecot, at GEIST9_GREENMAIL_HOST /
+    // GEIST9_GREENMAIL_PORT and GEIST9_DOVECOT_HOST / GEIST9_DOVECOT_PORT.
+    // Fails loudly when a server is missing; never silently skips.
     .testTarget(
         name: "MailSyncIntegrationTests",
         dependencies: [
