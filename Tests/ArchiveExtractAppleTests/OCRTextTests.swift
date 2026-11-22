@@ -119,4 +119,15 @@ import PDFKit
         #expect(pages.count == 1)
         #expect(pages[0].contains("Embedded typewriter text") == true)
     }
+
+    /// Vision's accurate-level recognition can fail machine-wide (an ANE
+    /// compute error surfaces as a thrown call or zero observations —
+    /// observed in the wild 2026-11-22). The extractor must fall back to
+    /// the fast level in the same call rather than yielding nil for text
+    /// that is plainly legible (decision 0057): run the levels explicitly
+    /// and expect the fixture text from the fast attempt.
+    @Test func fallsBackToFastRecognitionWhenAccurateYieldsNothing() throws {
+        let text = try #require(OCRText.withLevels([.fast], data: png(["Scanned receipt from Harbor Lane"])))
+        #expect(text.contains("receipt") == true)
+    }
 }
