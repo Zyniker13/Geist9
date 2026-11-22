@@ -23,10 +23,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Python for the docs check and SQLite headers for GRDB
+      - name: Python for the docs check, SQLite headers for GRDB, curl and dovecot for the IMAP fixture
         # curl: GreenMail's jar download (scripts/imap-servers.sh); the
-        # swift:6.2-noble base image does not ship it.
-        run: apt-get update -qq && apt-get install -y -qq curl python3 libsqlite3-dev default-jre-headless >/dev/null
+        # swift:6.2-noble base image does not ship it. dovecot-core: the
+        # Dovecot half of the integration fixture (2.4 on noble).
+        run: apt-get update -qq && apt-get install -y -qq curl python3 libsqlite3-dev default-jre-headless dovecot-core >/dev/null
       - run: scripts/check.sh
 
   macos:
@@ -38,5 +39,5 @@ jobs:
         with:
           persist-credentials: false
       - run: swift --version
-      - run: brew install xcodegen
+      - run: brew install xcodegen dovecot
       - run: scripts/check.sh

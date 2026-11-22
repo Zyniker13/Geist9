@@ -33,16 +33,25 @@ PASSWORD="secret"
 is_listening() {
     # Instant probe: one attempt, no waiting. Used only for the idempotence
     # check; wait_ready does the actual waiting after a launch.
+    #
+    # In a SUBSHELL: `exec 3<>...` replaces this shell's descriptors and the
+    # redirection persists after the function returns — the 2>/dev/null of
+    # the failed connect then swallows every later diagnostic (and a probe
+    # during server boot spams "Connection refused" that under `set -e` the
+    # surrounding caller must not see as a command failure). The subshell
+    # confines both the descriptor change and the exit status.
     local port="$1"
-    if exec 3<>"/dev/tcp/$HOST/$port" 2>/dev/null; then
-        local greeting
-        greeting=$(head -c 256 <&3 2>/dev/null || true)
-        exec 3<&- 3>&- || true
-        case "$greeting" in
-            *OK*) return 0 ;;
-        esac
-    fi
-    return 1
+    (
+        if exec 3<>"/dev/tcp/$HOST/$port" 2>/dev/null; then
+            local greeting
+            greeting=$(head -c 256 <&3 2>/dev/null || true)
+            exec 3<&- 3>&- || true
+            case "$greeting" in
+                *OK*) exit 0 ;;
+            esac
+        fi
+        exit 1
+    )
 }
 
 wait_ready() {
@@ -143,9 +152,23 @@ write_dovecot_config() {
 $USER:{PLAIN}$PASSWORD:$MAIL_UID:$MAIL_GID::$DOVECOT_DIR/mail/$USER::
 EOF
 
+    # The config header versions must match the INSTALLED dovecot, not a
+    # pinned number: noble ships 2.4.0 and rejects a 2.4.5 header, while a
+    # future brew bump may reject a 2.4.0 one. Parse `dovecot --version`
+    # ("2.4.5 (0cbb641e3e)" — first whitespace field is the number).
+    local dovecot_version=""
+    dovecot_version="$("$bin" --version 2>/dev/null | head -n1 | awk '{print $1}')"
+    case "$dovecot_version" in
+        2.4.*) : ;;
+        *)
+            echo "imap-servers: cannot parse a 2.4.x dovecot version from '$bin --version' (got: ${dovecot_version:-nothing}); the fixture needs Dovecot 2.4" >&2
+            return 1
+            ;;
+    esac
+
     {
-        echo "dovecot_config_version = 2.4.5"
-        echo "dovecot_storage_version = 2.4.5"
+        echo "dovecot_config_version = $dovecot_version"
+        echo "dovecot_storage_version = $dovecot_version"
         if [[ -n "$internal_user" ]]; then
             echo "default_internal_user = $internal_user"
             echo "default_internal_group = $internal_group"
