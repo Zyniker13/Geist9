@@ -112,6 +112,12 @@ public final class IMAPSyncEngine: Sendable {
     public let account: AccountIdentity
     /// Byte budget per fetch batch (DESIGN 5: batches sized by bytes, not count).
     public let batchBytes: Int
+    /// Awaited once after each batch's checkpoint commit (nil = no pause).
+    /// Test seam for the kill-mid-pass contract: without it the batches of a
+    /// small folder complete faster than an observer can see a checkpoint,
+    /// and the "killed mid-pass" case can never be reproduced. Production
+    /// passes leave this nil and pause per folder instead (politeness).
+    public let betweenBatches: (@Sendable () async throws -> Void)?
 
     /// The archive-store calls block (SQLite, file writes), and a blocked
     /// call inside an async context parks a cooperative-pool thread — the
@@ -121,10 +127,15 @@ public final class IMAPSyncEngine: Sendable {
     /// continuation), keeping the pool free.
     private let storeQueue = DispatchQueue(label: "geist9.sync.store")
 
-    public init(profile: ProviderProfile, account: AccountIdentity, batchBytes: Int = 2_000_000) {
+    public init(
+        profile: ProviderProfile, account: AccountIdentity,
+        batchBytes: Int = 2_000_000,
+        betweenBatches: (@Sendable () async throws -> Void)? = nil
+    ) {
         self.profile = profile
         self.account = account
         self.batchBytes = batchBytes
+        self.betweenBatches = betweenBatches
     }
 
     /// Runs one blocking store call off the cooperative pool.
@@ -165,11 +176,19 @@ public final class IMAPSyncEngine: Sendable {
         )
         do {
             return try await self.run(config: config, store: store, user: user, password: password) { progress($0) }
-        } catch let error as IMAPConnection.Error {
+        } catch _ as IMAPConnection.Error {
             // The library's own failures (connection closed mid-command,
-            // greeting never arrived, channel error) are connection loss.
-            _ = error
+            // greeting never arrived, channel error) are connection loss —
+            // but a kill (task cancellation) also closes the channel, and a
+            // kill must surface as cancellation, not as an unrelated
+            // connection error (the resume-from-checkpoint contract reads
+            // the thrown error).
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             throw SyncEngineError.connectionLost
+        } catch is CancellationError {
+            throw CancellationError()
         }
     }
 
@@ -363,6 +382,9 @@ public final class IMAPSyncEngine: Sendable {
                     .map(\.path)
             }
         } catch _ as IMAPConnection.Error {
+            // Same rule as sync: a cancellation that closed the channel is a
+            // kill, not connection loss.
+            if Task.isCancelled { throw CancellationError() }
             throw SyncEngineError.connectionLost
         }
     }
@@ -465,6 +487,12 @@ public final class IMAPSyncEngine: Sendable {
             )
             try await self.offPool {
                 try store.setSyncState(checkpoint, account: account, mailbox: path)
+            }
+            // The between-batch seam (a test-only pacing hook; nil in
+            // production) sits after the checkpoint commit, so a kill
+            // landing inside it resumes from this batch's checkpoint.
+            if let pause = self.betweenBatches {
+                try await pause()
             }
             // The batch ended because the window is exhausted, not because
             // the budget capped it (a capped batch continues next batch).

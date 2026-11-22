@@ -1,4 +1,4 @@
-# Decision 0057: OCR falls back to fast recognition when accurate yields nothing
+# Decision 0061: OCR falls back to fast recognition when accurate yields nothing
 
 **Date:** 2026-11-22
 **Status:** Accepted
