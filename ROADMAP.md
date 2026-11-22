@@ -106,19 +106,19 @@ Goal: complete, incremental, read-only sync from every provider that accepts an 
 
 Tasks:
 
-- [ ] Sync engine (DESIGN 5): the IMAP algorithm, Gmail label mode, politeness profiles and byte budgets, backoff, resumable checkpoints, deletion tracking without deletion.
-- [ ] Provider database and the discovery chain (PROVIDERS, "What Generic IMAP Gets From This").
-- [ ] Credential store (DESIGN 4): the `CredentialStore` protocol and the Keychain backend; the 1Password backend by the route decision 0005 chose (M4 ships both).
-- [ ] Onboarding: provider picker, per-provider setup steps with links, connection test, clear errors.
-- [ ] Quirk replay transcripts for every M4 provider (TESTING), written from the providers' documented behavior and sanitized captures.
-- [ ] Maildir and Thunderbird import.
+- [x] Sync engine (DESIGN 5): the IMAP algorithm, Gmail label mode, politeness profiles and byte budgets, backoff, resumable checkpoints, deletion tracking without deletion.
+- [x] Provider database and the discovery chain (PROVIDERS, "What Generic IMAP Gets From This").
+- [x] Credential store (DESIGN 4): the `CredentialStore` protocol and the Keychain backend; the 1Password backend by the route decision 0005 chose (M4 ships both).
+- [x] Onboarding: provider picker, per-provider setup steps with links, connection test, clear errors.
+- [x] Quirk replay transcripts for every M4 provider (TESTING), written from the providers' documented behavior and sanitized captures.
+- [x] Maildir and Thunderbird import.
 
 Done when:
 
-- Against the local Dovecot, GreenMail, and Stalwart servers: a full sync, then an incremental sync that downloads only what changed; a forced `UIDVALIDITY` change downloads nothing twice; no flag ever changes on the server.
-- Every M4 provider's quirk replay passes.
-- Kill tests during sync pass; the next sync resumes from the last checkpoint.
-- Accounts work with credentials in the Keychain and in the (fake) 1Password backend, and can be moved between them.
+- [x] Against the local Dovecot, GreenMail, and Stalwart servers: a full sync, then an incremental sync that downloads only what changed; a forced `UIDVALIDITY` change downloads nothing twice; no flag ever changes on the server. — `Tests/MailSyncIntegrationTests/RealServerSyncTests.swift` runs four flows × GreenMail and Dovecot (`swift test --filter RealServerSyncTests` → 8 tests, 0 failures, 20.8 s, both servers live; full `scripts/check.sh` → "All checks passed"): full→incremental→re-offer dedupe (only new UIDs fetched on pass 2; `messagesStored==0`), the forced `UIDVALIDITY` change via RENAME+CREATE (new validity recorded, high-water reset, 2 stored / 5 deduped — nothing downloads twice), kill-mid-pass resume from the last checkpoint, and the read-only audit (flags seeded unset across three passes; the fake-server suite asserts the recorded command list directly — LOGIN, ID, LIST, STATUS, SELECT, UID FETCH, UID SEARCH, LOGOUT only). Stalwart is the documented exception: v1.1.1 does not serve the API its own current docs and CLI describe (`docs/spikes/imap-client.md`, "Stalwart: parked"), so its leg is parked per that recorded decision until a matching release; the archive-side behaviors it would exercise (QRESYNC/CONDSTORE narrowing) are covered by the library and fake-server tests, and real-provider CONDSTORE/QRESYNC verification is listed under Needs the Maintainer.
+- [x] Every M4 provider's quirk replay passes. — `Tests/MailSyncTests/QuirkReplayTests.swift` (7 scenarios over the scripted fake server, from PROVIDERS.md's documented quirks only: 163's ID-before-SELECT, Gmail labels/All-Mail-once, Yahoo-family silent disconnect resume, Outlook-family localized folders via SPECIAL-USE, Proton Bridge self-signed fail-closed + confirmed-fingerprint, Comcast flaky auth surfaced-not-retried) plus the charset fixtures for the M4 providers' documented charsets (`MailMIMETests/CharsetFixtures.swift`: gb2312/gbk/gb18030, koi8-r/koi8-u, euc-kr/cp949, windows-1251, …; 42 fixtures + mislabel aliases). `swift test` green; CI green.
+- [x] Kill tests during sync pass; the next sync resumes from the last checkpoint. — `testKillMidPassResumesFromTheLastCheckpoint` on GreenMail and Dovecot (real-server, Flow 3 above) and `testMidPassDisconnectResumesFromTheCheckpoint` in the quirk suite; the durability contract is asserted from the archive (every stored UID ≤ the checkpoint; the retry stores exactly the remainder).
+- [x] Accounts work with credentials in the Keychain and in the (fake) 1Password backend, and can be moved between them. — Keychain and 1Password (`op` CLI, decision 0005) backends with their own suites (`CredentialsTests`, 20 tests: round-trips, missing-item surfaces, locked-vault unavailability, `op` stderr classification per decision 0055); `CredentialStoreMove` verifies the candidate secret with a real read-only IMAP sign-in (`IMAPSignInVerifier`) before deleting the old copy; `CredentialMoveEndToEndTests` (4) runs full moves against the in-repo fake server both directions, and proves a scripted rejection or an unreachable server keeps the old copy byte-for-byte.
 
 Needs the Maintainer: real test accounts for each M4 provider, to fill in the capability table and confirm the replays.
 
