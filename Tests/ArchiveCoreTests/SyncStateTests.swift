@@ -194,6 +194,36 @@ final class SyncStateTests: XCTestCase {
         XCTAssertEqual(try store.syncState(account: account, mailbox: "INBOX")?.highestUID, 42)
     }
 
+    /// Decision 0062: opening an archive written before the profile column
+    /// (index at core-v16) must add `providerJSON` without touching stored
+    /// rows, and the migrated schema must accept a profile write.
+    func testIndexMigratesV16ArchiveToV17ProfileColumn() throws {
+        _ = try ArchiveStore.create(at: archiveURL, appVersion: "0.1.0")
+
+        let indexURL = archiveURL.appendingPathComponent(ArchiveStore.indexName)
+        let pool = try DatabasePool(path: indexURL.path)
+        try IndexSchema.migrator(through: "core-v16").migrate(pool)
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO message (hash, size, subject, normalizedSubject, dateSent, messageID, fromEmail)
+                VALUES (x'01020304', 12, 'Old subject', 'old subject',
+                        '2024-03-05T14:23:01Z', '<old@example.com>', 'alice@example.com')
+                """
+            )
+        }
+
+        let store = try ArchiveStore.open(at: archiveURL)
+        // The old row is untouched.
+        XCTAssertEqual(try count(store, "SELECT COUNT(*) FROM message"), 1)
+        // The new column exists and is empty; unknown accounts report no
+        // profile rather than throwing.
+        XCTAssertNil(try store.accountProfileJSON(account: account))
+        // The migrated schema accepts a profile write and reads it back.
+        try store.setAccountProfile("{\"id\":\"x\"}", account: account)
+        XCTAssertEqual(try store.accountProfileJSON(account: account), "{\"id\":\"x\"}")
+    }
+
     // MARK: - Corrupt checkpoint
 
     func testCorruptCheckpointThrows() throws {

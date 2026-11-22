@@ -105,6 +105,34 @@ extension ArchiveStore {
         }
     }
 
+    // MARK: - Sync profiles (decision 0062)
+
+    /// Store the profile the person confirmed at onboarding on the account
+    /// row. The row is created when absent; the JSON is replaced on re-add.
+    /// Failures to encode are `corruptLayout`, not silent drops.
+    public func setAccountProfile(_ profileJSON: String, account: AccountIdentity) throws {
+        try db.write { db in
+            let accountID = try Self.getOrCreateAccount(account, db: db)
+            try db.execute(
+                sql: "UPDATE account SET providerJSON = ? WHERE id = ?",
+                arguments: [profileJSON, accountID]
+            )
+        }
+    }
+
+    /// The stored profile JSON for an account, or `nil` when the account
+    /// has no stored profile (imports, pre-0062 rows).
+    public func accountProfileJSON(account: AccountIdentity) throws -> String? {
+        try db.read { db in
+            guard let accountID = try Self.accountID(for: account, db: db) else { return nil }
+            return try String.fetchOne(
+                db,
+                sql: "SELECT providerJSON FROM account WHERE id = ?",
+                arguments: [accountID]
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     private static func accountID(for account: AccountIdentity, db: Database) throws -> Int64? {

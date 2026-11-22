@@ -205,6 +205,39 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(stored, "second", "the newer secret replaces the older one")
     }
 
+    /// Decision 0062: the profile travels with the account row, so the
+    /// scheduler can run a pass after a relaunch without onboarding again.
+    func testAddAccountPersistsTheProfileAndItRoundTrips() async throws {
+        let store = try makeStore()
+        let credentials = InMemoryCredentialStore()
+        let controller = OnboardingController(resolver: { _ in .manual })
+        var profile = self.profile(host: "imap.example-mail.test", port: 993)
+        profile.quirks = [.selfSignedLocalhost]
+        profile.confirmedFingerprints = ["aa11"]
+        profile.politeness.batchPauseSeconds = 0.25
+
+        try await controller.addAccount(
+            store: store, credentials: credentials, identity: account,
+            profile: profile, password: "pw"
+        )
+        let loaded = try store.accountProfile(identity: account)
+        XCTAssertEqual(loaded, profile)
+        // A re-add updates the stored profile too.
+        var updated = profile
+        updated.host = "imap2.example-mail.test"
+        try await controller.addAccount(
+            store: store, credentials: credentials, identity: account,
+            profile: updated, password: "pw"
+        )
+        XCTAssertEqual(try store.accountProfile(identity: account), updated)
+        // An import pseudo-account has no profile and is never listed.
+        let pseudo = AccountIdentity(email: "import:eml", displayName: "EML", providerKind: "import")
+        _ = try store.getOrCreateAccount(pseudo)
+        let syncable = try store.syncableAccounts()
+        XCTAssertEqual(syncable.map(\.identity), [account], "only imap accounts with a stored profile are listed")
+        XCTAssertEqual(syncable.map(\.profile), [updated])
+    }
+
     // MARK: - Helpers
 
     private func profile(host: String, port: Int) -> ProviderProfile {

@@ -84,7 +84,7 @@ public struct PolitenessProfile: Sendable, Equatable, Codable {
 /// person must set up first, how politely to behave, and which quirks to
 /// expect. Built from PROVIDERS.md; the M0 spikes confirm each against a live
 /// account before the sync engine depends on it.
-public struct ProviderProfile: Sendable, Equatable {
+public struct ProviderProfile: Sendable, Equatable, Codable {
     /// Stable id, e.g. "gmail", "icloud", "fastmail". Lower-case, no spaces.
     public var id: String
     /// Display name shown in the provider picker.

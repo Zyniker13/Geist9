@@ -14,7 +14,7 @@ public enum IndexSchema {
     /// format version, which tracks the on-disk file layout contract
     /// (docs/ARCHIVE-FORMAT.md): migrations make old indexes openable
     /// without any change to the stored files.
-    public static let version = 13
+    public static let version = 14
 
     /// The ordered, named migrations. Kept as a list so tests can build a
     /// database at an older schema version (`migrator(through:)`) and verify
@@ -36,6 +36,7 @@ public enum IndexSchema {
         ("core-v14", coreV14),
         ("core-v15", coreV15),
         ("core-v16", coreV16),
+        ("core-v17", coreV17),
     ]
 
     /// Migrator applying every step, or only those up to and including
@@ -468,6 +469,18 @@ public enum IndexSchema {
             t.column("mailboxID", .integer).notNull().references("mailbox", onDelete: .cascade)
             t.column("checkpointJSON", .text).notNull()
             t.uniqueKey(["accountID", "mailboxID"])
+        }
+    }
+
+    /// core-v17: the sync profile travels with the account row (decision
+    /// 0062). `providerJSON` is the `ProviderProfile` the person confirmed
+    /// at onboarding, so the sync scheduler can run a pass after a relaunch
+    /// and on any machine the archive is moved to, without onboarding
+    /// again. Nullable: import pseudo-accounts have no profile and are
+    /// never scheduled; older archives migrate with no data rewrite.
+    private static func coreV17(_ db: Database) throws {
+        try db.alter(table: "account") { t in
+            t.add(column: "providerJSON", .text)
         }
     }
 

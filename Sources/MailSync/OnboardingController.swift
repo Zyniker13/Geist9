@@ -99,6 +99,10 @@ public final class OnboardingController: Sendable {
     public enum AddAccountError: Error, Equatable {
         /// The password field was empty or whitespace-only; nothing stored.
         case emptyPassword
+        /// The provider profile could not be encoded; the account was not
+        /// recorded (the secret already landed in the credential store and
+        /// stays there — re-adding overwrites it).
+        case profileNotEncodable
     }
 
     /// Stores the secret under the account's key and creates (or updates)
@@ -116,6 +120,14 @@ public final class OnboardingController: Sendable {
         let key = Self.credentialKey(email: identity.email)
         try await credentials.put(key, secret: Data(trimmed.utf8))
         _ = try store.getOrCreateAccount(identity)
+        // Decision 0062: the profile travels with the account row, so the
+        // sync scheduler can run a pass after a relaunch (or on another
+        // machine the archive moves to) without onboarding again.
+        let data = try JSONEncoder().encode(profile)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw AddAccountError.profileNotEncodable
+        }
+        try store.setAccountProfile(json, account: identity)
         return identity.email.lowercased()
     }
 
