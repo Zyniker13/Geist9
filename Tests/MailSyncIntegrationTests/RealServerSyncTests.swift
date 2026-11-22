@@ -312,4 +312,61 @@ final class RealServerSyncTests: XCTestCase {
     func testKillMidPassResumesFromTheLastCheckpointOnDovecot() async throws {
         try await self.killMidPassResumesFromTheLastCheckpoint(on: try await self.server(.dovecot))
     }
+
+    // MARK: - Flow 4: a real UIDVALIDITY change, forced via RENAME
+
+    /// The fake-server suite covers the engine's UIDVALIDITY-change behavior
+    /// directly; this flow proves the transition against real servers, where
+    /// the change is *forced*: the synced folder is renamed aside (RENAME,
+    /// RFC 3501 §6.3.5 — DELETE is unusable on GreenMail for a folder any
+    /// session ever selected, see the server-quirks reference), its remains
+    /// are purged, and the original name is created anew — a brand-new
+    /// mailbox with a new validity and UIDs restarting at 1. The next pass
+    /// must notice the change, reset the checkpoint, refetch everything,
+    /// store only the genuinely new bytes, dedupe the rest by content, and
+    /// land on the new validity with the full highest UID.
+    private func forcedUIDValidityChangeRefetchesAndDedupes(on server: MailServer) async throws {
+        try await self.locked(on: server) {
+            let store = try makeStore()
+            let engine = IMAPSyncEngine(profile: self.profile(for: server), account: self.account)
+
+            let folder = server.freshFixtureFolder()
+            try await server.resetFixture(folder: folder)
+            try await server.seed((1...5).map { self.message("m\($0)") }, to: folder)
+
+            let full = try await self.sync(engine, store: store, server: server)
+            XCTAssertEqual(full.messagesStored, 5, "\(server.name): first pass stores everything")
+            let originalState = try store.syncState(account: self.account, mailbox: folder)
+            let originalValidity = try XCTUnwrap(originalState?.uidValidity, "\(server.name): checkpoint exists after the first pass")
+
+            // Force the change. The pause keeps the new mailbox's creation
+            // second distinct from the old one's, so a time-derived validity
+            // cannot collide with the original one.
+            let tombstone = folder + "-tomb"
+            try await server.renameFolder(from: folder, to: tombstone)
+            try await server.purgeFolder(tombstone)
+            try await Task.sleep(for: .milliseconds(1100))
+            try await server.createFolder(folder)
+            try await server.seed((1...7).map { self.message("m\($0)") }, to: folder)
+
+            let after = try await self.sync(engine, store: store, server: server)
+            let newState = try store.syncState(account: self.account, mailbox: folder)
+            let newValidity = try XCTUnwrap(newState?.uidValidity, "\(server.name): checkpoint exists after the change")
+            XCTAssertNotEqual(newValidity, originalValidity, "\(server.name): the engine saw and recorded a UIDVALIDITY change")
+            XCTAssertEqual(newState?.highestUID, 7, "\(server.name): checkpoint reaches the new mailbox's top UID")
+            XCTAssertEqual(after.messagesStored, 2, "\(server.name): only the two genuinely new messages store bytes")
+            XCTAssertEqual(after.messagesDuplicate, 5, "\(server.name): the five re-offered messages dedupe by content")
+            XCTAssertEqual(try self.count(store, "SELECT COUNT(*) FROM message"), 7, "\(server.name): nothing lost, nothing double-stored")
+            let allSeven: Set<String> = ["srv-m1", "srv-m2", "srv-m3", "srv-m4", "srv-m5", "srv-m6", "srv-m7"]
+            XCTAssertEqual(allSeven, try self.storedSubjects(store))
+        }
+    }
+
+    func testForcedUIDValidityChangeRefetchesAndDedupesOnGreenMail() async throws {
+        try await self.forcedUIDValidityChangeRefetchesAndDedupes(on: try await self.server(.greenmail))
+    }
+
+    func testForcedUIDValidityChangeRefetchesAndDedupesOnDovecot() async throws {
+        try await self.forcedUIDValidityChangeRefetchesAndDedupes(on: try await self.server(.dovecot))
+    }
 }

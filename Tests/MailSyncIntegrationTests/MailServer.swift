@@ -191,6 +191,19 @@ struct MailServer {
         }
     }
 
+    /// Purges a folder on its own fresh connection (fixture cleanup between
+    /// the harness's own operations, e.g. emptying the tombstone a UIDVALIDITY
+    /// rebuild leaves behind, so the next sync pass's LIST sees it empty).
+    func purgeFolder(_ name: String) async throws {
+        try await IMAPConnection.withConnection(configuration: self.configuration) { greeting, connection in
+            guard case .ok = greeting.status else { throw ServerMissing(message: "no greeting") }
+            try await connection.send(.login(username: Self.user, password: Self.password)) { _, stream in
+                try await Self.awaitOK(stream, what: "purge login")
+            }
+            try await self.purgeFolder(name, on: connection)
+        }
+    }
+
     /// Creates one folder (for the fresh replay folder the UIDVALIDITY test
     /// builds mid-run).
     func createFolder(_ folder: String) async throws {
@@ -201,6 +214,37 @@ struct MailServer {
             }
             try await connection.send(.create(MailboxName(Array(folder.utf8)), [])) { _, stream in
                 try await Self.awaitOK(stream, what: "create \(folder)")
+            }
+            return ()
+        }
+    }
+
+    /// Renames a folder on a fresh connection. This is how the UIDVALIDITY
+    /// test forces a new validity on a real server: RENAME the synced folder
+    /// aside (RFC 3501 §6.3.5; servers that keep the validity across a
+    /// rename are handled by the assertion failing loudly, and the tombstone
+    /// is then deleted by the cleanup pass below) and CREATE the original
+    /// name anew — a brand-new mailbox whose UIDs restart at 1.
+    ///
+    /// RENAME is used instead of DELETE because of the GreenMail quirk:
+    /// deleting a folder that any session has ever SELECTed crashes the
+    /// deleting session's bookkeeping (see references/imap-server-quirks.md).
+    /// A rename of the same folder does not hit that path, and the engine's
+    /// own sessions only ever SELECT the folder being synced.
+    func renameFolder(from old: String, to new: String) async throws {
+        try await IMAPConnection.withConnection(configuration: self.configuration) { greeting, connection in
+            guard case .ok = greeting.status else { throw ServerMissing(message: "no greeting") }
+            try await connection.send(.login(username: Self.user, password: Self.password)) { _, stream in
+                try await Self.awaitOK(stream, what: "rename login")
+            }
+            try await connection.send(
+                .rename(
+                    from: MailboxName(Array(old.utf8)),
+                    to: MailboxName(Array(new.utf8)),
+                    parameters: [:]
+                )
+            ) { _, stream in
+                try await Self.awaitOK(stream, what: "rename \(old) -> \(new)")
             }
             return ()
         }
