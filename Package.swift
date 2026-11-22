@@ -241,6 +241,21 @@ let testTargets: [Target] = [
         ]
     ),
     .testTarget(name: "CredentialsTests", dependencies: ["Credentials"]),
+    // Integration suite against real local IMAP servers (TESTING.md Protocol
+    // row). Runs whenever a server is reachable at GEIST9_GREENMAIL_HOST /
+    // GEIST9_GREENMAIL_PORT; fails loudly when none is.
+    .testTarget(
+        name: "MailSyncIntegrationTests",
+        dependencies: [
+            "MailSync",
+            "ArchiveCore",
+            .product(name: "GRDB", package: "GRDB.swift"),
+            .product(name: "IMAPCommands", package: "swift-nio-imap"),
+            .product(name: "NIOIMAP", package: "swift-nio-imap"),
+            .product(name: "NIOCore", package: "swift-nio"),
+            .product(name: "NIOPosix", package: "swift-nio"),
+        ]
+    ),
     // Launches the built email-archiver-mcp executable as a subprocess
     // (DESIGN 9A end-to-end contract), so it needs the ArchiveMCP library
     // and ArchiveCore to build the fixture archive.
