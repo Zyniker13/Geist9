@@ -25,10 +25,17 @@ jobs:
           persist-credentials: false
       - name: Python for the docs check, SQLite headers for GRDB, curl and dovecot for the IMAP fixture
         # curl: GreenMail's jar download (scripts/imap-servers.sh); the
-        # swift:6.2-noble base image does not ship it. dovecot-core: the
-        # Dovecot half of the integration fixture (2.4 on noble).
+        # swift:6.2-noble base image does not ship it. dovecot-core is
+        # installed so the missing-server failure names the real cause, but
+        # noble's package is 2.3.21 and the fixture needs Dovecot 2.4 config
+        # syntax — the Dovecot integration tests skip visibly on Linux
+        # (GEIST9_SKIP_SERVERS is the sanctioned exclusion) until a 2.4
+        # package is available here. macOS runs the Dovecot leg.
         run: apt-get update -qq && apt-get install -y -qq curl python3 libsqlite3-dev default-jre-headless dovecot-core >/dev/null
-      - run: scripts/check.sh
+      - name: Run checks
+        env:
+          GEIST9_SKIP_SERVERS: dovecot
+        run: scripts/check.sh
 
   macos:
     name: check (macos)
