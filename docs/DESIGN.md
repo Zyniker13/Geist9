@@ -95,7 +95,7 @@ Behavior:
 - OAuth refresh tokens that the provider rotates (Microsoft does) are written back to the same item; if the vault is read-only, the person is told to keep OAuth accounts in the Keychain.
 - When 1Password is locked or unreachable, background sync for those accounts waits and the app shows "Unlock 1Password to continue archiving", never a password prompt of its own.
 - **Import from 1Password:** the setup screen can search the chosen vault for existing mail credentials (items with an IMAP host or a known provider domain) and add those accounts in one step.
-- **Move credentials** between the Keychain and 1Password in Settings, per account or all at once, verified by a test sign-in before the old copy is deleted.
+- **Move credentials** between the Keychain and 1Password in Settings, per account or all at once, verified by a test sign-in before the old copy is deleted. The verifier is `IMAPSignInVerifier` (MailSync): it proves the candidate secret with the same read-only probe the onboarding connection test uses (LOGIN, ID, LIST, LOGOUT — never a sync pass, never a write), and answers `false` only when the server actively rejected the credentials; an unreachable server throws, so a network outage surfaces as "unavailable — try again", never as "wrong password", and the old copy survives either way.
 - The password fields also accept the system AutoFill, so a password manager can fill them without any integration.
 - 1Password integration is one of the features that rules out the App Store sandbox for the direct build (decision 0003).
 

@@ -80,6 +80,12 @@ final class FakeIMAPServer: @unchecked Sendable {
         self.scenario = scenario
     }
 
+    /// Make the server reject every login (test scripts a wrong password).
+    func setLoginFails(_ fails: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        self.scenario.loginFails = fails
+    }
+
     /// Swap the folder contents between sync passes.
     func updateFolders(_ folders: [FakeFolder]) {
         lock.lock(); defer { lock.unlock() }
