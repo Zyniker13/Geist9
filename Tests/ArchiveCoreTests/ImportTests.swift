@@ -808,4 +808,51 @@ final class ImportTests: XCTestCase {
         assertArithmetic(report)
         XCTAssertEqual(try count("SELECT COUNT(*) FROM message"), 1)
     }
+
+    // MARK: - Thunderbird profile folders (M4, DESIGN 8: mbox plus .msf ignored)
+
+    /// A Thunderbird "Local Folders" tree: extensionless mbox files are the
+    /// mailboxes, `.sbd` directories hold subfolders, `.msf` index files and
+    /// `.dat` files are ignored. Inbox must come from the mbox bytes, never
+    /// from an .msf.
+    func testThunderbirdProfileImportsExtensionlessMboxes() throws {
+        let profile = tempDir.appendingPathComponent("Local Folders")
+        // Root-level mailboxes (extensionless mbox files).
+        try write(mboxEntry(subject: "TB one"), to: profile.appendingPathComponent("Inbox"))
+        try write(mboxEntry(subject: "TB two"), to: profile.appendingPathComponent("Drafts"))
+        // An .msf index next to Inbox: same stem, must be skipped.
+        try write("junk msf bytes", to: profile.appendingPathComponent("Inbox.msf"))
+        try write("junk dat bytes", to: profile.appendingPathComponent("panacea.dat"))
+        // A subfolder inside an .sbd directory.
+        let sub = profile.appendingPathComponent("Archive.sbd", isDirectory: true)
+        try write(mboxEntry(subject: "TB archived"), to: sub.appendingPathComponent("2024"))
+
+        let report = try MailImporter.import(store, from: profile, now: importTime)
+
+        XCTAssertEqual(report.format, .thunderbird)
+        XCTAssertEqual(report.messagesFound, 3)
+        XCTAssertEqual(report.imported, 3)
+        assertArithmetic(report)
+        XCTAssertEqual(try count("SELECT COUNT(*) FROM message"), 3)
+        // Hierarchy from .sbd directories; root files keep their names.
+        XCTAssertEqual(try mailboxesOf(subject: "TB one"), ["Inbox"])
+        XCTAssertEqual(try mailboxesOf(subject: "TB two"), ["Drafts"])
+        XCTAssertEqual(try mailboxesOf(subject: "TB archived"), ["Archive/2024"])
+        XCTAssertEqual(try scalar("SELECT importSource FROM message WHERE subject = 'TB one'"), "thunderbird")
+        // Stored bytes match the mbox entry minus the From_ line.
+        XCTAssertTrue(String(decoding: try storedBytes(subject: "TB one"), as: UTF8.self).contains("Subject: TB one"))
+    }
+
+    func testThunderbirdSkipsEmptyMboxFiles() throws {
+        let profile = tempDir.appendingPathComponent("Local Folders")
+        try write(mboxEntry(subject: "TB kept"), to: profile.appendingPathComponent("Inbox"))
+        // An empty mbox file (folder never had mail): nothing found.
+        try write("", to: profile.appendingPathComponent("Empty"))
+
+        let report = try MailImporter.import(store, from: profile, now: importTime)
+
+        XCTAssertEqual(report.messagesFound, 1)
+        XCTAssertEqual(report.imported, 1)
+        assertArithmetic(report)
+    }
 }

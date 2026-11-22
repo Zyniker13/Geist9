@@ -19,6 +19,7 @@ public enum ImportFormat: String, Sendable, CaseIterable {
     case appleMail = "apple-mail"
     case googleTakeout = "takeout"
     case maildir = "maildir"
+    case thunderbird = "thunderbird"
 }
 
 /// What an import run did. `messagesFound` equals imported + duplicates +
@@ -171,8 +172,97 @@ public enum MailImporter {
             return try importMaildir(store, root: url, account: account, mailbox: mailbox, now: now)
         }
 
+        // Thunderbird (DESIGN 8): a "Local Folders" directory — extensionless
+        // mbox files are mailboxes, `X.sbd` directories hold the children of
+        // mailbox X, and `.msf`/`.dat` index files are never messages.
+        if name == "Local Folders" || Self.looksLikeThunderbirdProfile(url) {
+            return try importThunderbirdProfile(
+                store, root: url, account: account, mailbox: mailbox, now: now
+            )
+        }
+
         // Otherwise: an .eml folder tree.
         return try importEMLFolder(store, root: url, account: account, mailbox: mailbox, now: now)
+    }
+
+    /// A directory looks like a Thunderbird profile folder when it holds at
+    /// least one extensionless regular file whose `.msf` index sits beside it
+    /// (Thunderbird creates the `.msf` for every real mbox), or a `.sbd`
+    /// subdirectory. Conservative so an ordinary folder of loose files still
+    /// routes to the .eml importer.
+    static func looksLikeThunderbirdProfile(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        guard let children = try? fm.contentsOfDirectory(atPath: url.path) else { return false }
+        var hasSBD = false
+        var hasIndexedMbox = false
+        for child in children where !child.hasPrefix(".") {
+            let childURL = url.appendingPathComponent(child)
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: childURL.path, isDirectory: &isDirectory) else { continue }
+            if child.hasSuffix(".sbd") {
+                hasSBD = isDirectory.boolValue
+            } else if !isDirectory.boolValue && !child.contains(".") {
+                // Extensionless file with its `.msf` sibling: Thunderbird's
+                // signature pair.
+                let msf = url.appendingPathComponent(child + ".msf")
+                if fm.fileExists(atPath: msf.path) { hasIndexedMbox = true }
+            }
+        }
+        return hasSBD || hasIndexedMbox
+    }
+
+    /// Walks a Thunderbird profile folder. `prefix` is the mailbox path above
+    /// this directory's own name ("" at the root), and `ownName` is this
+    /// directory's mailbox name (nil at the profile root, whose files are
+    /// top-level mailboxes).
+    static func importThunderbirdProfile(
+        _ store: ArchiveStore,
+        root: URL,
+        account: AccountIdentity,
+        mailbox: String?,
+        prefix: String = "",
+        ownName: String? = nil,
+        now: Date
+    ) throws -> ImportReport {
+        var report = ImportReport(format: .thunderbird)
+        let start = Date()
+        let fm = FileManager.default
+        let children = ((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).sorted()
+        for child in children {
+            let childURL = root.appendingPathComponent(child)
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: childURL.path, isDirectory: &isDirectory) else { continue }
+            if child.hasSuffix(".sbd"), isDirectory.boolValue {
+                // `X.sbd` holds the children of mailbox X (DESIGN 8).
+                let parent = String(child.dropLast(4))
+                let nextPrefix = prefix.isEmpty ? parent : "\(prefix)/\(parent)"
+                let partial = try importThunderbirdProfile(
+                    store, root: childURL, account: account, mailbox: nil,
+                    prefix: nextPrefix, ownName: nil, now: now
+                )
+                report = merging(report, with: partial)
+            } else if isDirectory.boolValue {
+                // A plain directory inside a profile (e.g. ImapMail) is not
+                // part of this import; skipping reports nothing found, which
+                // merge handles.
+                continue
+            } else if child.hasSuffix(".msf") || child.hasSuffix(".dat")
+                        || child.hasPrefix(".") {
+                // Index and bookkeeping files are never messages.
+                continue
+            } else {
+                // Extensionless mbox file: one mailbox, bytes are an mbox.
+                let own = ownName ?? child
+                let mailboxName = prefix.isEmpty ? own : "\(prefix)/\(own)"
+                let partial = try importMboxFile(
+                    store, file: childURL, account: account,
+                    mailbox: mailbox ?? mailboxName, importSource: "thunderbird", now: now
+                )
+                report = merging(report, with: partial)
+            }
+        }
+        report.duration = Date().timeIntervalSince(start)
+        return report
     }
 
     // MARK: - Single-file routing
