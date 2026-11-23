@@ -98,6 +98,15 @@ public enum SyncEngineError: Error, Equatable, Sendable {
     case certificateNotConfirmed
 }
 
+/// How the engine authenticates a session: the stored secret directly
+/// (LOGIN — every M4 provider), or an OAuth access token over SASL
+/// (XOAUTH2; M5, DESIGN 4). The access token lives in memory only, so it
+/// arrives as a value, never from the credential store here.
+public enum SyncAuth: Sendable, Equatable {
+    case password(String)
+    case xoauth2(accessToken: String)
+}
+
 /// The IMAP sync engine for one account (DESIGN 5).
 ///
 /// A class so `self` can be captured across the connection library's
@@ -153,12 +162,27 @@ public final class IMAPSyncEngine: Sendable {
 
     /// One full-or-incremental sync pass against the server, storing what it
     /// finds into `store`. Returns progress. Read-only: only LIST / SELECT /
-    /// STATUS / UID FETCH are sent, plus ID and LOGIN.
+    /// STATUS / UID FETCH are sent, plus ID and the authentication command.
     @discardableResult
     public func sync(
         store: ArchiveStore,
         credentials user: String,
         password: String,
+        progress: @escaping @Sendable (SyncProgress) -> Void = { _ in }
+    ) async throws -> SyncProgress {
+        try await self.sync(store: store, credentials: user, auth: .password(password), progress: progress)
+    }
+
+    /// The OAuth entry point: same pass, SASL XOAUTH2 with an access token
+    /// held in memory (DESIGN 4: access tokens never touch disk). The
+    /// caller (the app layer) refreshes and retries once on
+    /// `authenticationFailed` if the server's rejection was a stale token;
+    /// the engine itself never refreshes.
+    @discardableResult
+    public func sync(
+        store: ArchiveStore,
+        credentials user: String,
+        auth: SyncAuth,
         progress: @escaping @Sendable (SyncProgress) -> Void = { _ in }
     ) async throws -> SyncProgress {
         // Fail closed on unconfirmed self-signed certificates (decision
@@ -175,8 +199,9 @@ public final class IMAPSyncEngine: Sendable {
             logging: .noLogging
         )
         do {
-            return try await self.run(config: config, store: store, user: user, password: password) { progress($0) }
-        } catch _ as IMAPConnection.Error {
+            return try await self.run(config: config, store: store, user: user, auth: auth) { progress($0) }
+        } catch let error as IMAPConnection.Error {
+            if CommandLine.arguments.contains("--geist9-debug-sync") { FileHandle.standardError.write(Data("DEBUG sync underlying: \(error)\n".utf8)) }
             // The library's own failures (connection closed mid-command,
             // greeting never arrived, channel error) are connection loss —
             // but a kill (task cancellation) also closes the channel, and a
@@ -191,12 +216,11 @@ public final class IMAPSyncEngine: Sendable {
             throw CancellationError()
         }
     }
-
     private func run(
         config: IMAPConnection.Configuration,
         store: ArchiveStore,
         user: String,
-        password: String,
+        auth: SyncAuth,
         progress: @escaping @Sendable (SyncProgress) -> Void
     ) async throws -> SyncProgress {
         var state = SyncProgress()
@@ -205,13 +229,7 @@ public final class IMAPSyncEngine: Sendable {
             guard case .ok = greeting.status else {
                 throw SyncEngineError.connectionLost
             }
-            try await send(connection, .login(username: user, password: password)) { response in
-                guard case .tagged(let t) = response else { return false }
-                guard case .ok = t.state else {
-                    throw SyncEngineError.authenticationFailed(Self.statusText(t.state))
-                }
-                return true
-            }
+            try await self.signIn(connection, user: user, auth: auth)
             // RFC 2971 ID once after login (163 requires it before SELECT;
             // servers without the extension reply NO/BAD and stay up).
             try await send(connection, .id(["name": "Bristlecone", "version": "0.1.0"])) { response in
@@ -289,6 +307,63 @@ public final class IMAPSyncEngine: Sendable {
         }
     }
 
+    /// Signs one connection in (the shared LOGIN/XOAUTH2 path).
+    ///
+    /// LOGIN for every password provider (unchanged M4 behavior). XOAUTH2
+    /// per RFC 7628 with SASL-IR: the challenge response a server sends
+    /// after the initial response is the SASL failure report — the engine
+    /// answers with an empty line (the mandated client termination), lets
+    /// the tagged NO arrive, and throws `authenticationFailed`. The caller
+    /// (app layer) decides between refresh-retry and "needs sign-in"; the
+    /// engine never touches the token store.
+    private func signIn(
+        _ connection: IMAPConnection,
+        user: String,
+        auth: SyncAuth
+    ) async throws {
+        switch auth {
+        case .password(let password):
+            try await send(connection, .login(username: user, password: password)) { response in
+                guard case .tagged(let t) = response else { return false }
+                guard case .ok = t.state else {
+                    throw SyncEngineError.authenticationFailed(Self.statusText(t.state))
+                }
+                return true
+            }
+        case .xoauth2(let accessToken):
+            let mechanism = AuthenticationMechanism("XOAUTH2")!
+            let body = OAuthSASL.xoauth2(user: user, accessToken: accessToken)
+            // The library's dedicated path: sends AUTHENTICATE with the
+            // SASL-IR and hands us a writer for continuation lines. A
+            // challenge after our initial response is the SASL failure
+            // report (RFC 7628 §3.2.4); the client terminates the exchange
+            // with a bare empty line, then the tagged NO arrives.
+            do {
+                return try await connection.sendAuthenticate(mechanism: mechanism, initialResponse: InitialResponse(ByteBuffer(bytes: body))) { _, stream, writer in
+                    for try await response in stream {
+                        switch response {
+                        case .authenticationChallenge:
+                            // The failure report; terminate the exchange with
+                            // an empty continuation, then read the tagged NO.
+                            try await writer.writeContinuation([])
+                        case .tagged(let t):
+                            guard case .ok = t.state else {
+                                throw SyncEngineError.authenticationFailed(Self.statusText(t.state))
+                            }
+                            return
+                        default:
+                            break
+                        }
+                    }
+                    throw SyncEngineError.connectionLost
+                }
+            } catch let debugError as IMAPConnection.Error {
+                FileHandle.standardError.write(Data("DEBUG signIn underlying: \(debugError)\n".utf8))
+                throw debugError
+            }
+        }
+    }
+
     private func send(
         _ connection: IMAPConnection, _ command: Command,
         untilDone check: @Sendable (Response) throws -> Bool
@@ -350,6 +425,14 @@ public final class IMAPSyncEngine: Sendable {
         credentials user: String,
         password: String
     ) async throws -> [String] {
+        try await self.testConnection(credentials: user, auth: .password(password))
+    }
+
+    /// The OAuth variant of the onboarding connection test (DESIGN 4).
+    public func testConnection(
+        credentials user: String,
+        auth: SyncAuth
+    ) async throws -> [String] {
         // Same fail-closed rule as sync (decision 0058).
         if profile.quirks.contains(.selfSignedLocalhost)
             && profile.confirmedFingerprints.isEmpty {
@@ -366,13 +449,7 @@ public final class IMAPSyncEngine: Sendable {
                 guard case .ok = greeting.status else {
                     throw SyncEngineError.connectionLost
                 }
-                try await send(connection, .login(username: user, password: password)) { response in
-                    guard case .tagged(let t) = response else { return false }
-                    guard case .ok = t.state else {
-                        throw SyncEngineError.authenticationFailed(Self.statusText(t.state))
-                    }
-                    return true
-                }
+                try await self.signIn(connection, user: user, auth: auth)
                 try await send(connection, .id(["name": "Bristlecone", "version": "0.1.0"])) { response in
                     if case .tagged = response { return true }
                     return false

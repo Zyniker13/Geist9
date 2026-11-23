@@ -60,6 +60,12 @@ struct FakeServerScenario: Sendable {
     // 163/126 (PROVIDERS row 8): the first SELECT without a prior RFC 2971
     // ID in the same session is refused ("Unsafe Login"); after ID it works.
     var refuseSelectBeforeID: Bool = false
+    /// XOAUTH2 fixtures: the access tokens this server accepts, and the
+    /// SASL body each authenticated user must carry. When non-empty, LOGIN
+    /// is refused (the server offers only AUTH=XOAUTH2) — the OAuth-on-IMAP
+    /// scenario.
+    var acceptedAccessTokens: Set<String> = []
+    var xoauth2User: String? = nil
 }
 
 /// A running fake server. Bind on 127.0.0.1 port 0, read back the port.
@@ -169,6 +175,12 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
     private var failFirstLoginsRemaining = 0
     private var selected: String?
     private var byID: [String: FakeFolder] = [:]
+    /// When set: an `AUTHENTICATE` sent the SASL failure report as a
+    /// continuation request under this tag and is now waiting for the
+    /// client's SASL termination (a bare base64 continuation-response
+    /// line) before sending the tagged completion — the exchange real
+    /// servers (Gmail, Yahoo) run per RFC 7628 §3.2.4.
+    private var pendingRejectTag: String?
 
     init(scenario: FakeServerScenario, server: FakeIMAPServer) {
         self.server = server
@@ -196,6 +208,15 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = self.unwrapInboundIn(data)
+        // The client's SASL termination line after a failure report
+        // arrives as a continuation-response part (the parser stays in
+        // `.expectingAuthenticationResponse`); a rejected AUTHENTICATE
+        // completes only once that line is in.
+        if case .continuationResponse = part, let tag = self.pendingRejectTag {
+            self.pendingRejectTag = nil
+            self.no(context, tag, "AUTHENTICATE failed")
+            return
+        }
         guard case .tagged(let command) = part else { return }
         self.commandsSeen += 1
         let tag = String(describing: command.tag)
@@ -300,6 +321,10 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
             if scenario.failFirstLogins > 0 {
                 self.failFirstLoginsRemaining -= 1
                 self.no(context, tag, "LOGIN failed")
+            } else if !scenario.acceptedAccessTokens.isEmpty {
+                // OAuth-only server: LOGIN is refused outright (Gmail with
+                // app passwords disabled for the account, Yahoo OAuth).
+                self.no(context, tag, "LOGIN: use AUTHENTICATE XOAUTH2")
             } else if scenario.loginFails || user != scenario.user || password != scenario.password {
                 self.no(context, tag, "LOGIN failed")
             } else {
@@ -310,6 +335,8 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
             self.sentID = true
             self.emit(context, .untagged(.id(["name": "FakeIMAP", "version": "1.0"])))
             self.ok(context, tag, "ID completed")
+        case .authenticate(let mechanism, let initialResponse):
+            self.handleAuthenticate(mechanism, initialResponse, tag: tag, scenario: scenario, context: context)
         case .list(_, _, _, _):
             for folder in scenario.folders {
                 let name = MailboxName(Array(folder.name.utf8))
@@ -454,6 +481,57 @@ final class CommandRecorderHandler: ChannelDuplexHandler, @unchecked Sendable {
             // command list contains no mutating command.)
             self.no(context, tag, "read-only test server: command not supported")
         }
+    }
+
+    /// SASL XOAUTH2 (RFC 7628): the engine sends AUTHENTICATE with the
+    /// base64 body `user=…\x01auth=Bearer …\x01\x01` as the initial
+    /// response. A valid token answers tagged OK; an invalid one answers
+    /// the RFC 7628 §3.2.4 failure report as a continuation request, then
+    /// reads the client's empty-line termination and answers tagged NO.
+    /// This mirrors what Gmail and Yahoo actually do on the wire.
+    private func handleAuthenticate(
+        _ mechanism: AuthenticationMechanism,
+        _ initialResponse: InitialResponse?,
+        tag: String,
+        scenario: FakeServerScenario,
+        context: ChannelHandlerContext
+    ) {
+        guard mechanism == AuthenticationMechanism("XOAUTH2") else {
+            self.no(context, tag, "unsupported mechanism")
+            return
+        }
+        guard let initialResponse else {
+            // No SASL-IR: the real servers expect it; refuse plainly.
+            self.no(context, tag, "SASL-IR required")
+            return
+        }
+        // The client's SASL-IR: `parseBase64` already decoded it, so
+        // `initialResponse.data` holds the raw `user=…\x01auth=Bearer …`
+        // bytes — decode nothing here.
+        var body = initialResponse.data
+        let text = body.readString(length: body.readableBytes) ?? ""
+        // Parse user=…\x01auth=Bearer …\x01\x01.
+        let fields = text.components(separatedBy: "\u{01}")
+        var user: String?
+        var token: String?
+        for field in fields {
+            if field.hasPrefix("user=") { user = String(field.dropFirst(5)) }
+            if field.hasPrefix("auth=Bearer ") { token = String(field.dropFirst(12)) }
+        }
+        if let user = user, user == (scenario.xoauth2User ?? scenario.user),
+           let token = token, scenario.acceptedAccessTokens.contains(token) {
+            self.loggedIn = true
+            self.ok(context, tag, "AUTHENTICATE completed")
+            return
+        }
+        // The failure report: a `+ <base64>` continuation (RFC 7628
+        // §3.2.4). The server then waits for the client's empty-line SASL
+        // termination before sending the tagged NO — matching Gmail and
+        // Yahoo. The encoder base64s the bytes it is handed, so give it
+        // the raw JSON.
+        let report = "{\"status\":\"401\",\"schemes\":\"bearer\",\"scope\":\"https://mail.example.com/read\"}"
+        self.pendingRejectTag = tag
+        self.emit(context, .authenticationChallenge(ByteBuffer(string: report)))
     }
 
     /// The fake's fixed INTERNALDATE (2026-01-01 12:00:00 UTC) as a
