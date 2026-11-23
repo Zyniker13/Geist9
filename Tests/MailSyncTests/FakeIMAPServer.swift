@@ -147,6 +147,13 @@ final class FakeIMAPServer: @unchecked Sendable {
         commands.append(name)
     }
 
+    /// Swaps the scenario mid-test: the next command (or connection) sees
+    /// the new state, the way a real server's state changes over time.
+    func updateScenario(_ mutate: @Sendable (inout FakeServerScenario) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        mutate(&self.scenario)
+    }
+
     /// Snapshot for handlers: folders + scenario under the lock.
     fileprivate func snapshot() -> (FakeServerScenario, [FakeFolder]) {
         lock.lock(); defer { lock.unlock() }

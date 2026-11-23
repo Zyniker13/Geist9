@@ -358,7 +358,9 @@ public final class IMAPSyncEngine: Sendable {
                     throw SyncEngineError.connectionLost
                 }
             } catch let debugError as IMAPConnection.Error {
-                FileHandle.standardError.write(Data("DEBUG signIn underlying: \(debugError)\n".utf8))
+                if CommandLine.arguments.contains("--geist9-debug-sync") {
+                    FileHandle.standardError.write(Data("DEBUG signIn underlying: \(debugError)\n".utf8))
+                }
                 throw debugError
             }
         }
