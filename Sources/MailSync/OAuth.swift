@@ -33,14 +33,19 @@ public struct PKCEPair: Sendable, Equatable {
     public let challenge: String
 
     public init() {
-        var bytes = Data(count: 32)
-        let status = bytes.withUnsafeMutableBytes {
-            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+        // 32 random bytes, base64url. `SystemRandomNumberGenerator` is the
+        // platform CSPRNG on both Apple platforms (SecRandom) and Linux
+        // (getrandom/urandom), so PKCE stays equally random everywhere
+        // without importing Security, which has no Linux counterpart.
+        var bytes = [UInt8](repeating: 0, count: 32)
+        var rng = SystemRandomNumberGenerator()
+        for index in bytes.indices {
+            var value = rng.next()
+            withUnsafeBytes(of: &value) { raw in
+                bytes[index] = raw[0]
+            }
         }
-        if status != errSecSuccess {
-            fatalError("SecRandomCopyBytes failed: \(status)")
-        }
-        self.verifier = Self.base64URL(bytes)
+        self.verifier = Self.base64URL(Data(bytes))
         let digest = SHA256.hash(data: Data(self.verifier.utf8))
         self.challenge = Self.base64URL(Data(digest))
     }
@@ -109,14 +114,16 @@ public struct OAuthError: Error, Sendable, Equatable {
     public init(kind: OAuthErrorKind) { self.kind = kind }
 }
 
-/// The HTTP seam for token endpoints. Production uses `URLSession`; the
-/// tests drive this seam directly against the local OAuth test server.
+/// The HTTP seam for token endpoints. Production uses `URLSession` (Apple
+/// platforms; Linux callers inject their own client over the same seam);
+/// the tests drive this seam directly against the local OAuth test server.
 public protocol OAuthHTTPClient: Sendable {
     /// POSTs an `application/x-www-form-urlencoded` body; returns the raw
     /// body and the status code.
     func postForm(url: URL, body: [String: String], headers: [String: String]) async throws -> (status: Int, body: Data)
 }
 
+#if canImport(Darwin)
 public struct URLSessionOAuthHTTPClient: OAuthHTTPClient {
     public init() {}
 
@@ -133,7 +140,12 @@ public struct URLSessionOAuthHTTPClient: OAuthHTTPClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         return (status: (response as? HTTPURLResponse)?.statusCode ?? 0, body: data)
     }
+}
+#endif
 
+extension OAuthHTTPClient {
+    /// Percent-encodes a form field per RFC 3986 unreserved characters
+    /// (application/x-www-form-urlencoded as OAuth 2.0 uses it).
     static func formEscape(_ value: String) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
