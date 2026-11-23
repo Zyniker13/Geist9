@@ -20,6 +20,13 @@ struct OAuthTestServerScenario: Sendable {
     var codeChallenge = "N_l8xE5cV3zS8wZ2KkP0nQ9tUvWxYz0a1B2c3D4e5F6"
     /// Issued codes, each remembered until exchanged (a code is single-use).
     var validCodes: [String: String] = [:]  // code -> scope
+    /// Per-code PKCE challenges captured from the authorize request
+    /// (code → S256 challenge), per RFC 7636 §4.6: the verifier presented
+    /// at the exchange must hash to the challenge *that code's* authorize
+    /// request carried. Codes seeded directly by a test (no /authorize)
+    /// have no entry here and verify against the scenario `codeChallenge`
+    /// as before.
+    var codeChallenges: [String: String] = [:]
     /// The refresh token(s) that still answer a refresh.
     var validRefreshTokens: Set<String> = ["r1-original"]
     /// How many refreshes have happened (rotation bookkeeping).
@@ -29,6 +36,14 @@ struct OAuthTestServerScenario: Sendable {
     /// When true, the token endpoint answers a valid code exchange with a
     /// rotated refresh token; otherwise it returns the same one.
     var rotatesRefreshToken = true
+    /// When set, the authorize endpoint answers a valid request with a
+    /// 302 redirect carrying this code — the browser step the flow's
+    /// `openBrowser` seam simulates by fetching the authorize URL and
+    /// following the redirect to the loopback receiver.
+    var authorizeRedirectCode: String? = nil
+    /// When true, the redirect the authorize endpoint issues carries a
+    /// wrong `state` (tampered or replayed); the flow must reject it.
+    var tamperState = false
     /// Access tokens the IMAP fixture (a separate layer) would accept.
     var acceptedAccessTokens: Set<String> = []
     /// When true, the revocation endpoint invalidates the refresh token.
@@ -227,16 +242,26 @@ final class OAuthTestServer: @unchecked Sendable {
         switch (request.path, request.method) {
         case ("/authorize", "GET"):
             // The authorize endpoint validates client, redirect, and PKCE
-            // presence; a valid one "shows the consent screen" (the test
-            // drives that part) and we just record what a completed
-            // consent would issue — the test calls issueCode itself, so
-            // authorize only validates.
+            // presence. When the scenario issues a code, it answers with
+            // a 302 redirect to the redirect URI — exactly what the
+            // browser delivers to the loopback receiver — recording the
+            // issued code so the exchange consumes it (single-use).
             guard request.parameter("client_id") == self.scenario.clientID,
                   request.parameter("redirect_uri") == self.scenario.redirectURI,
                   request.parameter("code_challenge") != nil,
                   request.parameter("code_challenge_method") == "S256"
             else {
                 return Self.http(400, "{\"error\": \"invalid_request\"}")
+            }
+            if let code = self.scenario.authorizeRedirectCode {
+                self.scenario.validCodes[code] = "mail"
+                // Bind the challenge the authorize request actually
+                // carried to this code (RFC 7636 §4.6).
+                self.scenario.codeChallenges[code] = request.parameter("code_challenge")
+                var state = request.parameter("state") ?? ""
+                if self.scenario.tamperState { state += "-tampered" }
+                let location = "\(self.scenario.redirectURI)?code=\(code)&state=\(state)"
+                return "HTTP/1.1 302 Found\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nLocation: \(location)\r\nConnection: close\r\n\r\n"
             }
             return Self.http(200, "{\"ok\": true}")
 
@@ -289,7 +314,11 @@ final class OAuthTestServer: @unchecked Sendable {
         // request carried (RFC 7636 §4.6). The server hashes like the
         // client does; the test seeds challenges with the same function.
         let verifier = request.parameter("code_verifier") ?? ""
-        if !self.pkceMatches(verifier: verifier, challenge: self.scenario.codeChallenge) {
+        // The challenge this code's authorize request carried, if the
+        // code came through /authorize; seeded codes fall back to the
+        // scenario challenge.
+        let challenge = self.scenario.codeChallenges[code] ?? self.scenario.codeChallenge
+        if !self.pkceMatches(verifier: verifier, challenge: challenge) {
             return Self.http(400, "{\"error\": \"invalid_grant\"}")
         }
         let access = "at-\(code)-\(self.scenario.refreshCount)"

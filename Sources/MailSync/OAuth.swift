@@ -202,6 +202,22 @@ public struct OAuthTokenClient: Sendable {
         return try await self.send(body)
     }
 
+    /// The exchange for a flow that bound its loopback receiver to a
+    /// random port after the configuration was built: identical to
+    /// `exchange` but with the redirect URI actually presented in the
+    /// authorize request (the provider checks they match).
+    public func exchangeWithRedirect(code: String, redirectURI: String, pkce: PKCEPair) async throws -> OAuthTokens {
+        var body: [String: String] = [
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirectURI,
+            "client_id": self.configuration.clientID,
+            "code_verifier": pkce.verifier,
+        ]
+        if let scope = Self.nonEmpty(self.configuration.scope) { body["scope"] = scope }
+        return try await self.send(body)
+    }
+
     /// Refreshes the access token. A rotated refresh token comes back in
     /// the response and MUST replace the stored one (DESIGN 4).
     public func refresh(refreshToken: String) async throws -> OAuthTokens {
