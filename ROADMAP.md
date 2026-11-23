@@ -128,9 +128,9 @@ Goal: sign-in with Microsoft (required for Outlook.com and Microsoft 365), Googl
 
 Tasks:
 
-- [ ] OAuth framework (DESIGN 4): `ASWebAuthenticationSession`, PKCE, loopback and custom-scheme redirects, `XOAUTH2` and `OAUTHBEARER`, refresh with rotation written back to the credential store, revocation, "needs sign-in" state.
-- [ ] Provider configurations for Microsoft, Google, Yahoo/AOL, Yandex, Zoho, Fastmail; client IDs read from the build environment.
-- [ ] The local OAuth test server (TESTING) covering every success and failure path.
+- [x] OAuth framework (DESIGN 4): `ASWebAuthenticationSession`, PKCE, loopback and custom-scheme redirects, `XOAUTH2` and `OAUTHBEARER`, refresh with rotation written back to the credential store, revocation, "needs sign-in" state.
+- [x] Provider configurations for Microsoft, Google, Yahoo/AOL, Yandex, Zoho, Fastmail; client IDs read from the build environment.
+- [x] The local OAuth test server (TESTING) covering every success and failure path.
 
 Done when:
 
