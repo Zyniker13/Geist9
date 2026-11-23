@@ -89,11 +89,23 @@ final class OAuthTestServer: @unchecked Sendable {
         self.port = UInt16(channel.localAddress!.port!)
     }
 
+    /// Closes the listening socket and tears the group down without
+    /// blocking the caller.
+    ///
+    /// The tests run under Swift concurrency (swift-testing), where a
+    /// blocking `syncShutdownGracefully()` from twelve concurrent tests
+    /// wedges the cooperative pool before the event-loop threads finish
+    /// spawning — a hard deadlock. Fire the async shutdown instead and
+    /// keep the group alive until it reports completion; nothing here
+    /// blocks, so a test's `defer { server.stop() }` returns at once.
+    /// Any request arriving after the close fails at the client, which
+    /// the tests treat as a failure anyway.
     func stop() {
-        try? self.channel?.close().wait()
-        try? self.group?.syncShutdownGracefully()
+        guard let group = self.group else { return }
+        self.channel?.close(promise: nil)
         self.channel = nil
         self.group = nil
+        group.shutdownGracefully { _ in }
     }
 
     // MARK: scenario access
