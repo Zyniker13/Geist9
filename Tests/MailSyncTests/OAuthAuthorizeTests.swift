@@ -1,9 +1,13 @@
 // The interactive sign-in flow against the local OAuth server: the
 // `openBrowser` seam is simulated by fetching the authorize URL over real
 // loopback HTTP and delivering its 302 Location to the flow's loopback
-// receiver — the same wire behavior a browser produces.
+// receiver — the same wire behavior a browser produces. The browser step
+// runs over NIO so it works on every CI leg; a test that needs no
+// network speaks its redirect straight to the receiver.
 
 import Foundation
+import NIOCore
+import NIOPosix
 import Testing
 
 @testable import MailSync
@@ -23,31 +27,106 @@ final class URLBox: @unchecked Sendable {
         guard let host = url.host, let port = url.port else { return }
         let head = "GET \(url.path.isEmpty ? "/" : url.path)?\(url.query ?? "") HTTP/1.1\r\nHost: \(host):\(port)\r\nConnection: close\r\n\r\n"
         // The test server's /authorize answers a 302 whose Location the
-        // receiver then hears as a plain GET. Use the NIO-based server's
-        // own HTTP channel machinery by opening a socket through the
-        // shared OAuthTestServer? No: connect here with a tiny
-        // synchronous socket exchange.
-        _ = try? await Self.rawGET(url: url, head: head)
+        // receiver then hears as a plain GET. Speak raw HTTP/1.1 over a
+        // short-lived NIO socket so the browser step works identically on
+        // every CI leg (URLSession is Apple-only and would compile away on
+        // Linux, leaving the flow waiting for a redirect that never
+        // comes).
+        guard let first = await Self.rawGet(host: host, port: port, head: head),
+              let status = first.components(separatedBy: "\r\n").first,
+              status.hasPrefix("HTTP/1.1 30"),
+              let location = first.components(separatedBy: "\r\n")
+                  .first(where: { $0.lowercased().hasPrefix("location:") })?
+                  .dropFirst("Location: ".count)
+                  .trimmingCharacters(in: .whitespaces),
+              let redirect = URL(string: location),
+              let redirectHost = redirect.host, let redirectPort = redirect.port
+        else { return }
+        let followHead = "GET \(redirect.path.isEmpty ? "/" : redirect.path)?\(redirect.query ?? "") HTTP/1.1\r\nHost: \(redirectHost):\(redirectPort)\r\nConnection: close\r\n\r\n"
+        _ = await Self.rawGet(host: redirectHost, port: redirectPort, head: followHead)
     }
 
-    /// A one-shot HTTP GET over a raw socket: sends `head`, reads until
-    /// the server closes, and follows a 302's Location once (that GET
-    /// lands on the flow's receiver, which answers and closes).
-    static func rawGET(url: URL, head: String) async throws {
-        // URLSession is Apple-only; tests run on macOS here, but the
-        // authorization-server fetch must work on both legs, so use the
-        // NIO client-free path: a short-lived connection through
-        // Foundation's synchronous socket is unavailable — instead the
-        // raw exchange runs through the test server's own handler via
-        // URLSession on Darwin and is skipped-meaningful on Linux CI
-        // (the OAuth suites are Darwin-only today via URLSessionOAuth
-        // usage in the browser step only; the flow itself is
-        // platform-neutral).
-        #if canImport(Darwin)
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        let (_, _) = try await URLSession.shared.data(for: request)
-        #endif
+    /// One raw HTTP GET over a short-lived NIO socket: sends `head`,
+    /// collects the response until the server closes, and returns its
+    /// text (nil when the connection fails). No platform-specific URL
+    /// machinery — the same code runs on every CI leg.
+    private static func rawGet(host: String, port: Int, head: String) async -> String? {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { group.shutdownGracefully { _ in } }
+        return await withCheckedContinuation { continuation in
+            ClientBootstrap(group: group)
+                .connectTimeout(TimeAmount.seconds(5))
+                .channelInitializer { channel in
+                    channel.pipeline.addHandlers([
+                        RawGetHandler(head: head, continuation: continuation),
+                    ])
+                }
+                .connect(host: host, port: port)
+                .whenFailure { _ in continuation.resume(returning: nil) }
+        }
+    }
+
+    /// Sends the request head on connect, accumulates the response, and
+    /// hands the text back once the server closes the connection.
+    private final class RawGetHandler: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        typealias OutboundOut = ByteBuffer
+
+        private let head: String
+        private let continuation: CheckedContinuation<String?, Never>
+        private var wrote = false
+        private var buffer = ByteBuffer()
+        private var resumed = false
+
+        init(head: String, continuation: CheckedContinuation<String?, Never>) {
+            self.head = head
+            self.continuation = continuation
+        }
+
+        func channelActive(context: ChannelHandlerContext) {
+            if !self.wrote {
+                self.wrote = true
+                var out = ByteBufferAllocator().buffer(capacity: self.head.utf8.count)
+                out.writeString(self.head)
+                context.writeAndFlush(self.wrapOutboundOut(out), promise: nil)
+            }
+            context.fireChannelActive()
+        }
+
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            var chunk = self.unwrapInboundIn(data)
+            self.buffer.writeBuffer(&chunk)
+            // The test server answers but never closes the socket; end
+            // the exchange once the response is complete: headers (the
+            // blank line) plus Content-Length body bytes. Every response
+            // both legs produce carries an exact Content-Length (0 for
+            // the 302).
+            let text = self.buffer.getString(at: self.buffer.readerIndex, length: self.buffer.readableBytes) ?? ""
+            guard let headerEnd = text.range(of: "\r\n\r\n") else { return }
+            let body = text[headerEnd.upperBound...]
+            let header = text[..<headerEnd.lowerBound]
+            var contentLength = 0
+            for line in header.components(separatedBy: "\r\n") where line.lowercased().hasPrefix("content-length:") {
+                contentLength = Int(line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) ?? 0
+            }
+            guard body.utf8.count >= contentLength else { return }
+            guard !self.resumed else { return }
+            self.resumed = true
+            self.continuation.resume(returning: text)
+            context.close(promise: nil)
+        }
+
+        func errorCaught(context: ChannelHandlerContext, error: Error) {
+            context.close(promise: nil)
+        }
+
+        func channelInactive(context: ChannelHandlerContext) {
+            guard !self.resumed else { return }
+            self.resumed = true
+            let text = self.buffer.readString(length: self.buffer.readableBytes)
+            self.continuation.resume(returning: text)
+            context.fireChannelInactive()
+        }
     }
 
     private func makeServer() throws -> OAuthTestServer {
@@ -156,9 +235,34 @@ final class URLBox: @unchecked Sendable {
         }
     }
 
+    /// A redirect that never arrives must end the flow, not park it: with
+    /// a short timeout the flow throws `.timedOut` (this suite once hung
+    /// the whole `swift test` run on a CI runner, where no browser exists
+    /// to deliver the redirect).
+    @Test func missingRedirectTimesOut() async throws {
+        let server = try makeServer()
+        defer { server.stop() }
+        let oauth = client(for: server, redirect: "http://127.0.0.1:0/callback")
+        do {
+            _ = try await runAuthorizeFlow(
+                authorizeEndpoint: server.authorizeEndpoint,
+                configuration: oauth.configuration,
+                client: oauth,
+                timeout: 0.5
+            ) { _ in
+                // No browser: the authorize URL opens into the void, so
+                // no redirect ever lands on the receiver.
+            }
+            Issue.record("expected timedOut")
+        } catch let error as OAuthAuthorizeFlowError {
+            #expect(error == .timedOut)
+        }
+    }
+
     /// Speaks the redirect straight to the receiver: GET
-    /// <path>?<query> — used for the error path where no real provider
-    /// redirect exists.
+    /// `<path>?<query>`, parsed on the receiver's socket just as the
+    /// browser's redirect would be. Used for the error path where no real
+    /// provider redirect exists. NIO end to end, so it runs on both legs.
     static func deliverDirect(url: URL, query: String) async {
         // Parse the receiver's address out of the bound redirect URI in
         // the authorize URL's redirect_uri parameter.
@@ -168,17 +272,8 @@ final class URLBox: @unchecked Sendable {
               let host = redirect.host, let port = redirect.port else {
             return
         }
-        _ = host
-        _ = port
-        // The receiver parses whatever GET arrives on its socket; speak
-        // to it directly through the same raw path as the browser step.
-        // The receiver binds 127.0.0.1 only, and the test process owns
-        // it, so the request goes over loopback with URLSession.
-        #if canImport(Darwin)
-        guard let target = URL(string: "\(bound)?\(query)") else { return }
-        var request = URLRequest(url: target)
-        request.httpMethod = "GET"
-        _ = try? await URLSession.shared.data(for: request)
-        #endif
+        let target = redirect.path.isEmpty ? "/" : redirect.path
+        let head = "GET \(target)?\(query) HTTP/1.1\r\nHost: \(host):\(port)\r\nConnection: close\r\n\r\n"
+        _ = await Self.rawGet(host: host, port: port, head: head)
     }
 }

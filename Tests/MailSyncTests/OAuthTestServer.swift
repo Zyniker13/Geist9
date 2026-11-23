@@ -153,8 +153,9 @@ final class OAuthTestServer: @unchecked Sendable {
         func channelRead(context: ChannelHandlerContext, data: NIOAny) {
             var chunk = self.unwrapInboundIn(data)
             self.buffer.writeBuffer(&chunk)
-            // Respond once a complete request is here. URLSession may
-            // pipeline, so answer every complete request found.
+            // Respond once a complete request is here. A pipelining
+            // client may send several requests in one chunk, so answer
+            // every complete request found.
             while let request = OAuthTestServer.parseRequest(&self.buffer) {
                 let response = self.server.respond(request)
                 var out = ByteBufferAllocator().buffer(capacity: response.utf8.count)

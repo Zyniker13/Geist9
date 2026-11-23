@@ -16,10 +16,10 @@ jobs:
   linux:
     name: check (linux)
     runs-on: ubuntu-24.04
-    # The Swift test suite grows every milestone (M4: ~6 min, M5: ~27 min
-    # on this leg); 30 cancelled two M5 runs at exactly 30m06s. Give the
-    # suite headroom the way the macOS leg does.
-    timeout-minutes: 60
+    # M4 measured ~6 min here; the OAuth authorize flow now ends its wait
+    # (`.timedOut`) instead of parking forever, which is what previously
+    # ate the whole budget. 30 minutes is the honest cap again.
+    timeout-minutes: 30
     # swift-nio-imap 0.5.0 needs a Swift 6.2 toolchain (its Package.swift floor).
     container: swift:6.2-noble
     steps:

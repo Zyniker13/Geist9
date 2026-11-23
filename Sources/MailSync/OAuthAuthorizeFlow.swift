@@ -25,6 +25,7 @@ public final class LoopbackRedirectReceiver: @unchecked Sendable {
     private var group: EventLoopGroup?
     private var captured: Captured?
     private var expectation: CheckedContinuation<Captured, Never>?
+    private var stopped = false
     private(set) var port: UInt16 = 0
     private let expectedPath: String
 
@@ -53,30 +54,74 @@ public final class LoopbackRedirectReceiver: @unchecked Sendable {
         self.port = UInt16(channel.localAddress!.port!)
     }
 
-    /// Waits for the single redirect the browser delivers. Returns the
-    /// captured query (code, state, or error) — never throws on a wrong
-    /// `state`: the caller judges, since it owns the expected value.
-    /// Times out after 5 minutes so a user who never returns to the
-    /// browser cannot leave the task parked forever.
-    public func awaitRedirect(timeout: TimeInterval = 300) async -> Captured {
-        let existing = self.lock.withLock { self.captured }
-        if let existing { return existing }
-        return await withCheckedContinuation { continuation in
-            let alreadyThere = self.lock.withLock { () -> Captured? in
-                if let captured = self.captured {
-                    return captured
+    /// Waits for the single redirect the browser delivers, or throws
+    /// `.timedOut` when nothing arrives within `timeout` seconds — a user
+    /// who never returns to the browser cannot leave the sign-in parked
+    /// forever. The capture is judged by the caller, which owns the
+    /// expected `state`.
+    public func awaitRedirect(timeout: TimeInterval = 300) async throws -> Captured {
+        if let existing = self.lock.withLock({ self.captured }) { return existing }
+        let receiver = self
+        return try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Captured?.self) { group in
+                // The wait: parks until deliver() or stop() resumes it,
+                // and honours cancellation by ending the park.
+                group.addTask { await receiver.waitForCapture() }
+                // The deadline: after `timeout` seconds the race is lost
+                // and the flow ends instead of parking forever.
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                    return nil
                 }
-                self.expectation = continuation
-                return nil
+                let first = try await group.next() ?? nil
+                group.cancelAll()
+                if Task.isCancelled { throw CancellationError() }
+                guard let captured = first else {
+                    throw OAuthAuthorizeFlowError.timedOut
+                }
+                return captured
             }
-            if let alreadyThere { continuation.resume(returning: alreadyThere) }
+        } onCancel: {
+            receiver.stop()
+        }
+    }
+
+    /// Parks until `deliver` or `stop` resumes the wait. Cancellation
+    /// ends the park with an empty capture (through `stop`), so a
+    /// cancelled or timed-out flow never leaves a parked waiter behind.
+    private func waitForCapture() async -> Captured {
+        if let existing = self.lock.withLock({ self.captured }) { return existing }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Captured, Never>) in
+                let outcome = self.lock.withLock { () -> ParkOutcome in
+                    if let captured = self.captured { return .deliver(captured) }
+                    // stop() already ran: no redirect can arrive after it,
+                    // so the wait ends at once with an empty capture.
+                    if self.stopped { return .stoppedEmpty }
+                    self.expectation = continuation
+                    return .parked
+                }
+                switch outcome {
+                case .deliver(let captured):
+                    continuation.resume(returning: captured)
+                case .stoppedEmpty:
+                    continuation.resume(returning: Captured(code: nil, state: nil, error: nil))
+                case .parked:
+                    break
+                }
+            }
+        } onCancel: {
+            self.stop()
         }
     }
 
     /// Stops listening; non-blocking (see OAuthTestServer.stop for why).
+    /// A waiter parked in `awaitRedirect` resumes immediately with an
+    /// empty capture.
     public func stop() {
         let group = self.lock.withLock { () -> EventLoopGroup? in
             let group = self.group
+            self.stopped = true
             self.channel?.close(promise: nil)
             self.channel = nil
             self.group = nil
@@ -99,6 +144,14 @@ public final class LoopbackRedirectReceiver: @unchecked Sendable {
             return waiting
         }
         waiting?.resume(returning: captured)
+    }
+
+    /// What the parked wait resolves to: the redirect's capture, an
+    /// already-stopped receiver (empty capture), or a registered park.
+    private enum ParkOutcome {
+        case deliver(Captured)
+        case stoppedEmpty
+        case parked
     }
 
     /// One redirect request, parsed by hand: method line, headers to the
@@ -238,7 +291,7 @@ public func runAuthorizeFlow(
     )
     await openBrowser(url)
 
-    let captured = await receiver.awaitRedirect(timeout: timeout)
+    let captured = try await receiver.awaitRedirect(timeout: timeout)
     if let error = captured.error, !error.isEmpty {
         throw OAuthAuthorizeFlowError.providerDeclined(error)
     }
