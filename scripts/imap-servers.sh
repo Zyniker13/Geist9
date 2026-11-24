@@ -55,10 +55,11 @@ is_listening() {
 }
 
 wait_ready() {
-    # $1: port. 120 s: the deadline also covers a cold GreenMail jar
-    # download on a fresh CI container, not just server startup.
+    # $1: port. 900 s: the deadline covers a cold GreenMail jar download
+    # on a rate-limited fresh CI container (retries spaced minutes apart),
+    # not just server startup.
     local port="$1"
-    local deadline=$((SECONDS + 120))
+    local deadline=$((SECONDS + 900))
     while (( SECONDS < deadline )); do
         if is_listening "$port"; then
             return 0
@@ -88,12 +89,23 @@ start_greenmail() {
     fi
     mkdir -p "$GREENMAIL_DIR"
     if [[ ! -s "$JAR" ]]; then
+        # Maven Central rate-limits fresh CI runners by IP (HTTP 429 with
+        # `Retry-After: 0`), and curl honours that header over
+        # --retry-delay, so its retries all land in the same second. The
+        # download is therefore retried here, in bash, with real sleeps
+        # between attempts — minutes, not the milliseconds curl would use.
         echo "imap-servers: downloading GreenMail $GREENMAIL_VERSION" >&2
-        # Transient maven/TLS hiccups otherwise kill a whole CI run. HTTP
-        # 429 from the release host is retried too: curl's --retry covers
-        # it with --retry-all-errors, and a fresh runner has nothing to
-        # lose by waiting a little for the rate limit to clear.
-        curl -fsSL --retry 5 --retry-delay 20 --retry-all-errors -o "$JAR" "$URL"
+        local attempt=1
+        until curl -fsSL -o "$JAR" "$URL"; do
+            rm -f "$JAR"
+            if (( attempt >= 6 )); then
+                echo "imap-servers: GreenMail download failed after $attempt attempts" >&2
+                return 1
+            fi
+            echo "imap-servers: download attempt $attempt failed; retrying in ${attempt}m" >&2
+            sleep $((attempt * 60))
+            attempt=$((attempt + 1))
+        done
     fi
     # Already answering? Nothing to do (idempotent: another session may have
     # started it).
