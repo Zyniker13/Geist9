@@ -63,7 +63,46 @@ mark imap-servers begin
 run_logged bash scripts/imap-servers.sh start
 mark imap-servers done
 mark swift-test begin
-run_logged swift test --parallel
+# A watchdog keeps a silent hang from eating the CI job cap: if the test
+# run outlasts 20 minutes (3x the normal full run) it is killed, the
+# failure names the phase and carries the log tail, and check.sh fails —
+# the same signal on the machine and in CI, minutes after the hang.
+TEST_WATCHDOG=1200
+test_log="/tmp/check-$$.swift-test.log"
+if swift test --parallel >"$test_log" 2>&1 &
+then :
+fi
+test_pid=$!
+watchdog_start=$(date +%s)
+while kill -0 "$test_pid" 2>/dev/null; do
+  now=$(date +%s)
+  if (( now - watchdog_start >= TEST_WATCHDOG )); then
+    echo "swift test exceeded ${TEST_WATCHDOG}s — killing the test run" >&2
+    if [[ -n "$SUMMARY" ]]; then
+      printf -- '- swift test exceeded %ss; killed by the check.sh watchdog\n' "$TEST_WATCHDOG" >> "$SUMMARY"
+      printf '::notice::swift test exceeded %ss, killed by the watchdog\n' "$TEST_WATCHDOG"
+    fi
+    tail -30 "$test_log" >&2 || true
+    tail_summary "$test_log" || true
+    pkill -TERM -P "$test_pid" 2>/dev/null || true
+    kill -TERM "$test_pid" 2>/dev/null || true
+    sleep 10
+    kill -KILL "$test_pid" 2>/dev/null || true
+    rm -f "$test_log"
+    exit 1
+  fi
+  sleep 5
+done
+test_status=0
+wait "$test_pid" || test_status=$?
+if (( test_status != 0 )); then
+  echo "### Failed: swift test --parallel" >> "$SUMMARY" 2>/dev/null || true
+  tail_summary "$test_log" || true
+  grep -iE "(error|exception|failed|refused|never answered)" "$test_log" | head -20 >&2 || true
+  tail -80 "$test_log" >&2 || true
+fi
+rm -f "$test_log"
+(( test_status == 0 ))
 mark swift-test done
 run_logged bash scripts/imap-servers.sh stop
 

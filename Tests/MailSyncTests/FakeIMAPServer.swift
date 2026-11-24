@@ -117,29 +117,43 @@ final class FakeIMAPServer: @unchecked Sendable {
         lock.lock()
         let scenario = self.scenario
         lock.unlock()
+        // The bind runs on its own worker thread with a deadline: a
+        // `.wait()` on the cooperative pool can wedge every concurrent
+        // test (see NonBlockingTestBootstrap), so nothing here parks the
+        // pool, and a stuck bind fails the start instead of hanging it.
+        // The bootstrap is built inside the worker closure: NIO types are
+        // not Sendable and must not cross the thread boundary.
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         self.group = group
-        let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.backlog, value: 16)
-            .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
         let recorder = self
-        let channel = try bootstrap.childChannelInitializer { channel in
-            let handler = CommandRecorderHandler(scenario: scenario, server: recorder)
-            return channel.pipeline.addHandlers([
-                ByteToMessageHandler(FrameDecoder()),
-                IMAPServerHandler(),
-                handler,
-            ])
-        }.bind(to: SocketAddress(ipAddress: "127.0.0.1", port: 0)).wait()
+        let channel = try NonBlockingTestBootstrap.bind({
+            let bind = try ServerBootstrap(group: group)
+                .serverChannelOption(ChannelOptions.backlog, value: 16)
+                .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+                .childChannelInitializer { channel -> EventLoopFuture<Void> in
+                    let handler = CommandRecorderHandler(scenario: scenario, server: recorder)
+                    return channel.pipeline.addHandlers([
+                        ByteToMessageHandler(FrameDecoder()),
+                        IMAPServerHandler(),
+                        handler,
+                    ])
+                }
+                .bind(to: SocketAddress(ipAddress: "127.0.0.1", port: 0))
+            return bind
+        }, timeout: 10)
         self.channel = channel
         self.port = UInt16(channel.localAddress!.port!)
     }
 
     func stop() {
-        try? channel?.close().wait()
-        try? group?.syncShutdownGracefully()
-        channel = nil
-        group = nil
+        // Non-blocking teardown (same pattern as OAuthTestServer.stop):
+        // firing the async close/shutdown from a `defer` returns at once
+        // instead of parking the cooperative pool on the event loops it
+        // must spawn — the wedge that once hung whole parallel runs.
+        self.channel?.close(promise: nil)
+        self.channel = nil
+        self.group?.shutdownGracefully { _ in }
+        self.group = nil
     }
 
     fileprivate func record(_ name: String) {

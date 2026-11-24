@@ -91,18 +91,35 @@ final class IngestPoolStarvationTests: XCTestCase {
             }
         }
         // All hops must finish within 10 seconds; a starvation deadlock
-        // leaves them hung forever. The wait runs on a plain pthread (never
-        // the cooperative pool) bridged by a continuation.
-        let ingestError: Error? = await withCheckedContinuation { continuation in
+        // leaves them hung forever. The bounded wait runs on a plain
+        // pthread (never the cooperative pool) bridged by a continuation:
+        // on timeout the test fails at the deadline instead of parking
+        // the task until the CI job cap.
+        let ingestError: Error? = try await withCheckedThrowingContinuation { continuation in
             Thread.detachNewThread {
-                for _ in 0..<hops { done.wait() }
-                continuation.resume(returning: box.error)
+                var hop = 0
+                do {
+                    // Each hop's wait carries the deadline; the first one
+                    // that expires fails the test instead of waiting more.
+                    while hop < hops {
+                        guard done.wait(timeout: .now() + 10) == .success else {
+                            throw IngestHopTimedOut()
+                        }
+                        hop += 1
+                    }
+                    continuation.resume(returning: box.error)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
-        // A hung ingest means the continuation never resumes and the test
-        // hangs — the suite watchdog/CI timeout catches that shape.
         if let ingestError = ingestError { throw ingestError }
         let stored = try await store.db.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message") }
         XCTAssertEqual(stored, 13)
     }
 }
+
+/// Thrown when the concurrent hops do not all finish within their
+/// deadline: a starvation deadlock now fails the test at the deadline
+/// instead of parking the task until the CI job cap.
+private struct IngestHopTimedOut: Error {}

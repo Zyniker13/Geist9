@@ -88,18 +88,23 @@ final class OAuthTestServer: @unchecked Sendable {
     }
 
     func start() throws {
+        // The bind runs on its own worker thread with a deadline: a
+        // `.wait()` on the cooperative pool can wedge every concurrent
+        // test (see NonBlockingTestBootstrap), so nothing here parks the
+        // pool, and a stuck bind fails the start instead of hanging it.
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         self.group = group
-        let channel = try ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.backlog, value: 16)
-            .childChannelInitializer { channel in
-                channel.pipeline.addHandlers([
-                    BackPressureHandler(),
-                    OAuthTestServer.HTTPHandler(server: self),
-                ])
-            }
-            .bind(host: "127.0.0.1", port: 0)
-            .wait()
+        let channel = try NonBlockingTestBootstrap.bind({
+            ServerBootstrap(group: group)
+                .serverChannelOption(ChannelOptions.backlog, value: 16)
+                .childChannelInitializer { channel in
+                    channel.pipeline.addHandlers([
+                        BackPressureHandler(),
+                        OAuthTestServer.HTTPHandler(server: self),
+                    ])
+                }
+                .bind(host: "127.0.0.1", port: 0)
+        }, timeout: 10)
         self.channel = channel
         self.port = UInt16(channel.localAddress!.port!)
     }
