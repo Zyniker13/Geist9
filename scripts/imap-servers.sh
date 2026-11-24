@@ -89,8 +89,11 @@ start_greenmail() {
     mkdir -p "$GREENMAIL_DIR"
     if [[ ! -s "$JAR" ]]; then
         echo "imap-servers: downloading GreenMail $GREENMAIL_VERSION" >&2
-        # Transient maven/TLS hiccups otherwise kill a whole CI run.
-        curl -fsSL --retry 3 --retry-delay 2 -o "$JAR" "$URL"
+        # Transient maven/TLS hiccups otherwise kill a whole CI run. HTTP
+        # 429 from the release host is retried too: curl's --retry covers
+        # it with --retry-all-errors, and a fresh runner has nothing to
+        # lose by waiting a little for the rate limit to clear.
+        curl -fsSL --retry 5 --retry-delay 20 --retry-all-errors -o "$JAR" "$URL"
     fi
     # Already answering? Nothing to do (idempotent: another session may have
     # started it).
