@@ -13,18 +13,43 @@
 # answers. A server can be left out only by naming it in
 # GEIST9_SKIP_SERVERS (comma-separated) — an explicit environment choice,
 # never a silent skip.
+#
+# Stalwart (the JMAP fixture) is included: its recovery listener is bound
+# to [::1]:$STALWART_PORT (IPv4 8080 is often taken on a shared machine)
+# and it runs in bootstrap mode — JMAP only, no IMAP/SMTP listeners. The
+# bootstrap password is GENERATED here and exported as
+# GEIST9_STALWART_PASSWORD for the tests to read; it is never written into
+# this repository (a committed bootstrap credential would be a secret in
+# a public tree).
 set -euo pipefail
 
 GREENMAIL_VERSION="2.1.3"
 HOST="127.0.0.1"
 GREENMAIL_PORT="${GEIST9_GREENMAIL_PORT:-13143}"
 DOVECOT_PORT="${GEIST9_DOVECOT_PORT:-14399}"
+STALWART_VERSION="1.2.0"
+STALWART_PORT="${GEIST9_STALWART_PORT:-18080}"
 # The scratch dirs keep binaries and state out of the repository (never
 # commit binaries) and out of everything but temporary space.
 GREENMAIL_DIR="${GEIST9_GREENMAIL_DIR:-${TMPDIR:-/tmp}/geist9-greenmail}"
 DOVECOT_DIR="${GEIST9_DOVECOT_DIR:-${TMPDIR:-/tmp}/geist9-dovecot}"
+STALWART_DIR="${GEIST9_STALWART_DIR:-${TMPDIR:-/tmp}/geist9-stalwart}"
 JAR="$GREENMAIL_DIR/greenmail-$GREENMAIL_VERSION.jar"
 URL="https://repo1.maven.org/maven2/com/icegreen/greenmail-standalone/$GREENMAIL_VERSION/greenmail-standalone-$GREENMAIL_VERSION.jar"
+# Stalwart release asset per platform (docs/spikes/jmap-stalwart.md).
+# bash 3.2 (macOS) treats the unquoted space in a case pattern as a word
+# separator, so the two-word platform is matched as one quoted string.
+case "$(uname) $(uname -m)" in
+    "Darwin arm64")  STALWART_ASSET="stalwart-aarch64-apple-darwin.tar.gz" ;;
+    Darwin*)         STALWART_ASSET="stalwart-x86_64-apple-darwin.tar.gz" ;;
+    Linux*)          STALWART_ASSET="stalwart-x86_64-unknown-linux-gnu.tar.gz" ;;
+    *)               STALWART_ASSET="" ;;
+esac
+STALWART_URL="https://github.com/stalwartlabs/mail-server/releases/download/v${STALWART_VERSION}/${STALWART_ASSET}"
+STALWART_BIN="$STALWART_DIR/stalwart"
+# The bootstrap password: generated once per scratch dir, exported for the
+# tests, never committed.
+STALWART_PASSWORD_FILE="$STALWART_DIR/bootstrap-password"
 # Fixtures only: obviously fake local test values, never real credentials.
 USER="alice@example.com"
 PASSWORD="secret"
@@ -275,6 +300,92 @@ stop_dovecot() {
     pkill -f "dovecot -c $DOVECOT_DIR/dovecot.conf" 2>/dev/null || true
 }
 
+# Stalwart 1.2.0 in bootstrap mode: JMAP-only on the recovery listener.
+# The recovery (bootstrap) mode needs no config: it serves the JMAP API on
+# one HTTP listener and auto-creates a scratch account. The password is
+# generated here, kept in the scratch dir, and exported for the tests —
+# never committed.
+start_stalwart() {
+    if [[ -z "$STALWART_ASSET" ]]; then
+        echo "imap-servers: no Stalwart release asset for $(uname) $(uname -m); leave it out with GEIST9_SKIP_SERVERS=stalwart" >&2
+        return 1
+    fi
+    mkdir -p "$STALWART_DIR"
+    if [[ ! -x "$STALWART_BIN" ]]; then
+        echo "imap-servers: downloading Stalwart $STALWART_VERSION" >&2
+        local tarball="$STALWART_DIR/$STALWART_ASSET"
+        local attempt=1
+        until curl -fsSL -o "$tarball" "$STALWART_URL"; do
+            rm -f "$tarball"
+            if (( attempt >= 6 )); then
+                echo "imap-servers: Stalwart download failed after $attempt attempts" >&2
+                return 1
+            fi
+            echo "imap-servers: Stalwart download attempt $attempt failed; retrying in ${attempt}m" >&2
+            sleep $((attempt * 60))
+            attempt=$((attempt + 1))
+        done
+        # The tarball unpacks the `stalwart` binary at its root (no
+        # versioned subdirectory).
+        tar -xzf "$tarball" -C "$STALWART_DIR"
+        if [[ ! -f "$STALWART_DIR/stalwart" ]]; then
+            echo "imap-servers: Stalwart tarball has no stalwart binary" >&2
+            return 1
+        fi
+        chmod +x "$STALWART_BIN"
+    fi
+    if stalwart_is_ready; then
+        echo "imap-servers: Stalwart already answering on [::1]:$STALWART_PORT"
+        return 0
+    fi
+    if [[ ! -s "$STALWART_PASSWORD_FILE" ]]; then
+        # A throwaway fixture password, generated fresh per scratch dir.
+        od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$STALWART_PASSWORD_FILE"
+    fi
+    local password
+    password="$(cat "$STALWART_PASSWORD_FILE")"
+    # Bootstrap (recovery) mode: HTTP only, JMAP on the one listener.
+    # 1.2.0 quirks (probed 2026-11-25): `./stalwart` with no arguments
+    # prints usage, so the config path is always passed — and it must NOT
+    # exist, or Stalwart parses it as store settings and fails. A missing
+    # -c path is what triggers bootstrap ("No configuration file was
+    # found. Port ... is open for initial setup").
+    # STALWART_RECOVERY_MODE_PORT moves the recovery listener off the
+    # default 8080 (IPv4 8080 is often taken on a shared machine; the
+    # listener binds IPv6 anyway, so [::1] reaches it).
+    ( cd "$STALWART_DIR" && nohup env \
+        STALWART_RECOVERY_ADMIN="admin:$password" \
+        STALWART_RECOVERY_MODE_PORT="$STALWART_PORT" \
+        "$STALWART_BIN" -c stalwart.json > stalwart.log 2>&1 & )
+    stalwart_wait_ready
+    echo "imap-servers: Stalwart JMAP listening on [::1]:$STALWART_PORT (log: $STALWART_DIR/stalwart.log)"
+}
+
+stalwart_is_ready() {
+    # The recovery listener answers /jmap/session with 401 before auth and
+    # 200 with the bootstrap credential: anything readable means it is up.
+    curl -s --max-time 2 -o /dev/null -w "%{http_code}" \
+        "http://[::1]:$STALWART_PORT/jmap/session" 2>/dev/null | grep -qE '^[12]|401'
+}
+
+stalwart_wait_ready() {
+    local deadline=$((SECONDS + 60))
+    while (( SECONDS < deadline )); do
+        if stalwart_is_ready; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "imap-servers: Stalwart never answered on [::1]:$STALWART_PORT" >&2
+    return 1
+}
+
+stop_stalwart() {
+    # Kill only the instance this script started: the binary path inside
+    # this script's scratch dir — never another process's stalwart.
+    pkill -f "$STALWART_BIN" 2>/dev/null || true
+}
+
 case "${1:-}" in
     start)
         # GEIST9_SKIP_SERVERS is an explicit operator choice to leave a
@@ -289,11 +400,21 @@ case "${1:-}" in
             *,dovecot,*) echo "imap-servers: dovecot skipped (GEIST9_SKIP_SERVERS)" ;;
             *) start_dovecot ;;
         esac
+        case ",$skipped," in
+            *,stalwart,*) echo "imap-servers: stalwart skipped (GEIST9_SKIP_SERVERS)" ;;
+            *) start_stalwart ;;
+        esac
+        # The bootstrap password is exported ONLY for this process's
+        # children (the test run), never written into the repository.
+        if [[ -s "$STALWART_PASSWORD_FILE" ]]; then
+            export GEIST9_STALWART_PASSWORD="$(cat "$STALWART_PASSWORD_FILE")"
+        fi
         echo "imap-servers: started"
         ;;
     stop)
         stop_greenmail
         stop_dovecot
+        stop_stalwart
         echo "imap-servers: stopped"
         ;;
     *)
