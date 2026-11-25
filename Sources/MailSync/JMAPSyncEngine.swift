@@ -234,7 +234,7 @@ public final class JMAPSyncEngine: Sendable {
         progress: @escaping @Sendable (JMAPSyncProgress) -> Void = { _ in }
     ) async throws -> JMAPSyncProgress {
         let session = try await Self.fetchSession(base: url, auth: auth, client: client)
-        return try await self.run(session: session, auth: auth, client: client, store: store, progress: progress)
+        return try await self.run(session: session, auth: auth, client: client, store: store, base: url, progress: progress)
     }
 
     private static func fetchSession(base: URL, auth: JMAPAuth, client: JMAPHTTPClient) async throws -> JMAPSession {
@@ -259,6 +259,7 @@ public final class JMAPSyncEngine: Sendable {
     private func run(
         session: JMAPSession, auth: JMAPAuth, client: JMAPHTTPClient,
         store: ArchiveStore,
+        base: URL? = nil,
         progress: @escaping @Sendable (JMAPSyncProgress) -> Void
     ) async throws -> JMAPSyncProgress {
         var state = JMAPSyncProgress()
@@ -268,7 +269,7 @@ public final class JMAPSyncEngine: Sendable {
         // keys memberships by the mailbox NAME the IMAP path would carry,
         // so JMAP mail and IMAP mail of the same server land in the same
         // rows when names agree (the local Stalwart: "Inbox" both ways).
-        let mailboxes = try await Self.getMailboxes(session: session, auth: auth, client: client)
+        let mailboxes = try await Self.getMailboxes(session: session, auth: auth, client: client, base: base)
         state.mailboxesListed = mailboxes.count
         progress(state)
 
@@ -296,7 +297,8 @@ public final class JMAPSyncEngine: Sendable {
 
             let outcome = try await self.syncMailbox(
                 session: session, auth: auth, client: client, store: store,
-                mailbox: mailbox, storedState: storedState, progress: &state, notify: progress
+                mailbox: mailbox, storedState: storedState, base: base,
+                progress: &state, notify: progress
             )
             // Commit the checkpoint only after the batch is durable (the
             // ingest contract: fsync before rename, rows after files). The
@@ -322,14 +324,15 @@ public final class JMAPSyncEngine: Sendable {
     private func syncMailbox(
         session: JMAPSession, auth: JMAPAuth, client: JMAPHTTPClient,
         store: ArchiveStore, mailbox: JMAPMailbox,
-        storedState: String?, progress: inout JMAPSyncProgress,
+        storedState: String?, base: URL?,
+        progress: inout JMAPSyncProgress,
         notify: @escaping @Sendable (JMAPSyncProgress) -> Void
     ) async throws -> (newState: String, bytes: Int) {
         if let storedState {
             // Incremental: ask the server what moved since our state.
             let delta = try await Self.emailChanges(
                 session: session, auth: auth, client: client,
-                accountId: session.accountId, sinceState: storedState
+                accountId: session.accountId, sinceState: storedState, base: base
             )
             // `serverStateChanged` means our state is ancient: fall through
             // to the full walk (the delta contract cannot resume).
@@ -353,7 +356,7 @@ public final class JMAPSyncEngine: Sendable {
                     pending.removeFirst(batch.count)
                     let stored2 = try await self.fetchAndIngest(
                         session: session, auth: auth, client: client, store: store,
-                        mailbox: mailbox, ids: batch
+                        mailbox: mailbox, ids: batch, base: base
                     )
                     bytes += stored2.bytes
                     progress.messagesStored += stored2.stored
@@ -371,13 +374,13 @@ public final class JMAPSyncEngine: Sendable {
         // next pass's incremental delta picks the difference up.
         let queryState = try await Self.emailQueryAll(
             session: session, auth: auth, client: client, accountId: session.accountId,
-            mailboxID: mailbox.id, limit: self.pageLimit
+            mailboxID: mailbox.id, limit: self.pageLimit, base: base
         )
         var bytes = 0
         for page in queryState.pages {
             let stored2 = try await self.fetchAndIngest(
                 session: session, auth: auth, client: client, store: store,
-                mailbox: mailbox, ids: page
+                mailbox: mailbox, ids: page, base: base
             )
             bytes += stored2.bytes
             progress.messagesStored += stored2.stored
@@ -399,7 +402,7 @@ public final class JMAPSyncEngine: Sendable {
     /// slices, this just bounds one fetch request's ids per `Email/get`.
     private func fetchAndIngest(
         session: JMAPSession, auth: JMAPAuth, client: JMAPHTTPClient,
-        store: ArchiveStore, mailbox: JMAPMailbox, ids: [String]
+        store: ArchiveStore, mailbox: JMAPMailbox, ids: [String], base: URL?
     ) async throws -> FetchedOutcome {
         var outcome = FetchedOutcome()
         guard !ids.isEmpty else { return outcome }
@@ -407,7 +410,7 @@ public final class JMAPSyncEngine: Sendable {
         // text (ingest parses the raw bytes), only the blobId per id.
         let blobs = try await Self.emailBlobs(
             session: session, auth: auth, client: client,
-            accountId: session.accountId, ids: ids
+            accountId: session.accountId, ids: ids, base: base
         )
         var batch: [(jmapID: String, blobID: String)] = []
         var batchBytes = 0
@@ -417,7 +420,7 @@ public final class JMAPSyncEngine: Sendable {
             if batchBytes >= self.batchBytes {
                 try await self.ingestBatch(
                     session: session, auth: auth, client: client, store: store,
-                    mailbox: mailbox, batch: batch, into: &outcome
+                    mailbox: mailbox, batch: batch, base: base, into: &outcome
                 )
                 batch.removeAll(keepingCapacity: true)
                 batchBytes = 0
@@ -425,7 +428,7 @@ public final class JMAPSyncEngine: Sendable {
         }
         try await self.ingestBatch(
             session: session, auth: auth, client: client, store: store,
-            mailbox: mailbox, batch: batch, into: &outcome
+            mailbox: mailbox, batch: batch, base: base, into: &outcome
         )
         return outcome
     }
@@ -433,7 +436,7 @@ public final class JMAPSyncEngine: Sendable {
     private func ingestBatch(
         session: JMAPSession, auth: JMAPAuth, client: JMAPHTTPClient,
         store: ArchiveStore, mailbox: JMAPMailbox,
-        batch: [(jmapID: String, blobID: String)], into outcome: inout FetchedOutcome
+        batch: [(jmapID: String, blobID: String)], base: URL?, into outcome: inout FetchedOutcome
     ) async throws {
         guard !batch.isEmpty else { return }
         var messages: [IngestedMessage] = []
@@ -441,7 +444,7 @@ public final class JMAPSyncEngine: Sendable {
         for entry in batch {
             let data = try await Self.downloadBlob(
                 session: session, auth: auth, client: client,
-                accountId: session.accountId, blobID: entry.blobID
+                accountId: session.accountId, blobID: entry.blobID, base: base
             )
             let parsed = MailBridge.parse(for: data, ocr: .deferred)
             let received = receivedDates[entry.jmapID] ?? parsed.record.dateSent
@@ -483,10 +486,18 @@ public final class JMAPSyncEngine: Sendable {
         session: JMAPSession, auth: JMAPAuth, client: JMAPHTTPClient,
         base: URL? = nil, calls: [[Any]]
     ) async throws -> [[Any]] {
-        var api = base ?? { URL(string: session.apiUrl) ?? nil }()!
-        if api.path().isEmpty || api.path() == "/" {
-            // apiUrl is usually absolute; a relative one rides on the base.
-            api = base ?? { URL(string: session.apiUrl, relativeTo: base) ?? nil }()!
+        // apiUrl may be absolute or relative ("/jmap/" from Stalwart).
+        // A relative string yields a URL with no host; riding it on the
+        // session's base turns it into a real endpoint the client can
+        // send to.
+        let rawAPI = URL(string: session.apiUrl)
+        let api: URL
+        if let parsed = rawAPI, parsed.host != nil || base == nil {
+            api = parsed
+        } else if let base, let resolved = URL(string: session.apiUrl, relativeTo: base) {
+            api = resolved
+        } else {
+            throw JMAPSyncError.protocolError("apiUrl unreadable: \(session.apiUrl)")
         }
         let url = api
         let payload: [String: Any] = [
@@ -681,8 +692,18 @@ public final class JMAPSyncEngine: Sendable {
             .replacingOccurrences(of: "{blobId}", with: Self.encodePath(blobID))
             .replacingOccurrences(of: "{name}", with: Self.encodePath("message.eml"))
             .replacingOccurrences(of: "{type}", with: "message%2Frfc822")
-        guard let url = URL(string: expanded) else {
+        guard let raw = URL(string: expanded) else {
             throw JMAPSyncError.protocolError("downloadUrl unreadable")
+        }
+        // downloadUrl may be absolute or relative ("/jmap/download/…"
+        // from Stalwart); a relative one rides on the session's base.
+        let url: URL
+        if raw.host != nil || base == nil {
+            url = raw
+        } else if let resolved = URL(string: expanded, relativeTo: base!) {
+            url = resolved
+        } else {
+            throw JMAPSyncError.protocolError("downloadUrl unreadable: \(expanded)")
         }
         let (status, body) = try await client.send(
             "GET", url, body: nil, tokenAuth: auth.isToken,

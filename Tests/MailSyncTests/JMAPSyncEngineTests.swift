@@ -96,7 +96,7 @@ enum JMAPFixtures {
         let data = try! JSONSerialization.data(withJSONObject: object, options: [])
         return String(data: data, encoding: .utf8)!
     }
-    static func session(accounts: [String: String] = ["u1": "acc1"]) -> String {
+    static func session(accounts: [String: String] = ["u1": "acc1"], apiUrl: String = "http://localhost/jmap/") -> String {
         var primary: [String: Any] = [:]
         for value in accounts.values {
             primary["urn:ietf:params:jmap:mail"] = value
@@ -106,7 +106,7 @@ enum JMAPFixtures {
             "accounts": accounts,
             "primaryAccounts": primary,
             "username": "alice@example.com",
-            "apiUrl": "http://localhost/jmap/",
+            "apiUrl": apiUrl,
             "downloadUrl": "http://localhost/jmap/download/{accountId}/{blobId}/{name}?accept={type}",
             "uploadUrl": "http://localhost/jmap/upload/{accountId}/",
             "eventSourceUrl": "http://localhost/jmap/eventsource/?types={types}&closeafter={closeafter}&ping={ping}",
@@ -305,6 +305,33 @@ final class JMAPSyncEngineTests: XCTestCase {
         }
         let data = try store.messageData(MessageHash(bytes: XCTUnwrap(hash)))
         XCTAssertEqual(data, original)
+    }
+
+    func testRelativeApiUrlResolvesAgainstBase() async throws {
+        // Real servers (e.g. Stalwart) may report a relative apiUrl
+        // ("/jmap/"). URL(string:) alone yields a URL with no host, and
+        // the engine must ride it on the session's base instead of
+        // force-unwrapping into a crash.
+        let server = FakeJMAPServer()
+        server.route("/jmap/session", status: 200, JMAPFixtures.session(apiUrl: "/jmap/"))
+        server.onJMAP(method: "Mailbox/get", respond: JMAPFixtures.envelope(name: "Mailbox/get", mailboxResponse))
+        server.onJMAP(method: "Email/query", respond: JMAPFixtures.envelope(name: "Email/query", JMAPFixtures.queryJSON(
+            ids: [], queryState: "q1", position: 0, total: 0
+        )))
+        server.onJMAP(method: "Email/query", respond: JMAPFixtures.envelope(name: "Email/query", JMAPFixtures.queryJSON(
+            ids: [], queryState: "q2", position: 0, total: 0
+        )))
+
+        let store = try makeStore("relative")
+        let engine = JMAPSyncEngine(account: account)
+        let progress = try await engine.sync(
+            store: store, base: URL(string: "http://localhost")!,
+            auth: .bearer(token: "t"), client: server
+        )
+        XCTAssertEqual(progress.mailboxesListed, 2)
+        XCTAssertEqual(progress.messagesStored, 0)
+        // The API POSTs landed on the base-relative path, not nowhere.
+        XCTAssertTrue(server.recorded.contains { $0.path == "/jmap" }, "POSTs must ride the base: \(server.recorded.map(\.path))")
     }
 
     func testIncrementalPassUsesChangesAndMarksDestroyed() async throws {
