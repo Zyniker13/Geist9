@@ -13,6 +13,10 @@ import Foundation
 import ArchiveCore
 @testable import MailSync
 
+// URLSessionJMAPClient is Darwin-only (the engine's real HTTP client rides
+// URLSession); on Linux the suite skips visibly with the reason, matching
+// the Dovecot precedent. macOS CI runs it against the real server.
+#if canImport(Darwin)
 enum StalwartFixture {
     /// Where the recovery listener listens: IPv4 8080 is often taken on
     /// this machine's shared loopback, so the fixture binds [::1] and the
@@ -180,3 +184,4 @@ enum StalwartFixture {
 
     static var apiUrl: String { "jmap/" }
 }
+#endif

@@ -13,6 +13,9 @@ import GRDB
 import ArchiveCore
 @testable import MailSync
 
+// See StalwartFixture.swift: the real HTTP client is Darwin-only, so on
+// Linux this suite skips visibly (Dovecot precedent); macOS CI runs it.
+#if canImport(Darwin)
 final class StalwartJMAPSyncTests: XCTestCase {
     private var server: StalwartFixture.Type { StalwartFixture.self }
 
@@ -137,3 +140,5 @@ final class StalwartJMAPSyncTests: XCTestCase {
         )
     }
 }
+
+#endif
