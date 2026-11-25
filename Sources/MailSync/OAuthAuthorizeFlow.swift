@@ -244,19 +244,34 @@ public enum OAuthAuthorizeFlowError: Error, Equatable {
     case wrongRedirect
     /// The receiver heard nothing before the timeout.
     case timedOut
+    /// The person closed the browser sheet before any redirect arrived
+    /// (the browser was the redirect's only source). A deliberate stop,
+    /// not a failure: the sign-in ends with nothing stored.
+    case cancelled
+    /// The browser sheet could not be shown (no window to present in, or
+    /// the session refused to start). The person never saw a consent
+    /// screen; nothing to blame on them.
+    case browserUnavailable
 }
 
 /// Runs one interactive sign-in: fresh PKCE + state, authorize URL, the
 /// caller's browser seam opens it, the redirect lands on the receiver,
 /// `state` is checked, and the code is exchanged. The browser seam is a
-/// closure so the app can drive `ASWebAuthenticationSession` and tests
-/// can drive the local server directly.
+/// closure so the app can drive `ASWebAuthenticationSession` (the app-side
+/// adapter is `BrowserSessionOpener`) and tests can drive the local server
+/// directly.
+///
+/// The seam receives a `BrowserSession` handle: the flow cancels it when
+/// the sign-in ends (whatever the outcome), so the browser sheet never
+/// outlives the exchange; and the person closing the sheet resolves the
+/// handle's waiter as `false`, which the flow turns into `.cancelled` —
+/// closing the sheet is how a person says "stop", not an error.
 public func runAuthorizeFlow(
     authorizeEndpoint: URL,
     configuration: OAuthTokenClient.Configuration,
     client: OAuthTokenClient,
     timeout: TimeInterval = 300,
-    openBrowser: @escaping @Sendable (URL) async -> Void
+    openBrowser: @escaping @Sendable (URL, BrowserSession) async -> Void
 ) async throws -> OAuthTokens {
     let pkce = PKCEPair()
     var stateBytes = [UInt8](repeating: 0, count: 32)
@@ -289,9 +304,25 @@ public func runAuthorizeFlow(
         pkce: pkce,
         state: state
     )
-    await openBrowser(url)
+    // The browser handle: cancelled when the sign-in ends (success,
+    // decline, mismatch, timeout — the sheet must not outlive the
+    // exchange), and resolved `false` by the adapter when the person
+    // closes the sheet before any redirect arrives.
+    let browser = BrowserSession { receiver.stop() }
+    await openBrowser(url, browser)
 
     let captured = try await receiver.awaitRedirect(timeout: timeout)
+    defer { browser.cancel() }
+    // An empty capture (nothing captured) happens when the receiver was
+    // stopped early: the person closed the sheet, or the browser could
+    // not open at all. Either ends the flow at once — the flags decide
+    // which sentence. A real redirect always wins over a late close.
+    let empty = captured.code == nil && captured.state == nil
+        && (captured.error == nil || captured.error!.isEmpty)
+    if empty {
+        if browser.sheetClosedByPerson { throw OAuthAuthorizeFlowError.cancelled }
+        if browser.openerFailed { throw OAuthAuthorizeFlowError.browserUnavailable }
+    }
     if let error = captured.error, !error.isEmpty {
         throw OAuthAuthorizeFlowError.providerDeclined(error)
     }
@@ -300,4 +331,116 @@ public func runAuthorizeFlow(
         throw OAuthAuthorizeFlowError.providerDeclined("missing_code")
     }
     return try await client.exchangeWithRedirect(code: code, redirectURI: boundRedirect, pkce: pkce)
+}
+
+/// The handle the browser seam receives with the authorize URL. The flow
+/// cancels it when the sign-in ends so the browser sheet is dismissed
+/// whatever the outcome; the adapter reports the person closing the sheet
+/// (`personClosedSheet`, which also ends the redirect wait — the browser
+/// was its only source) or the sheet failing to open
+/// (`openerCouldNotOpen`, same). The methods are public: the adapter lives
+/// in the app target, a different module.
+public final class BrowserSession: Sendable {
+    /// Latches, so a close or cancel is recorded exactly once.
+    private let closedByPerson = ClosedBox()
+    private let openerFailedBox = ClosedBox()
+    private let flowDone = SheetWaiter()
+    /// The flow's way to end the redirect wait when the browser dies
+    /// early: the receiver's `stop()`, which resumes the parked wait with
+    /// an empty capture. Installed at construction; never replaced.
+    private let unavailable: @Sendable () -> Void
+
+    /// - Parameter onUnavailable: called when the browser is gone before
+    ///   any redirect (person closed the sheet, or it failed to open).
+    ///   The flow passes the receiver's `stop()`.
+    public init(onUnavailable: @escaping @Sendable () -> Void) {
+        self.unavailable = onUnavailable
+    }
+
+    /// The adapter reports the person closed the sheet. Records the
+    /// close, ends the redirect wait (no browser, no future redirect),
+    /// and wakes the adapter's dismissal await with `false` (the sheet
+    /// is already gone; nothing to cancel).
+    public func personClosedSheet() {
+        if self.closedByPerson.close() {
+            self.unavailable()
+            self.flowDone.resolve(false)
+        }
+    }
+
+    /// The adapter reports the sheet could not open (no window, start
+    /// refused). Same early end as a person-close, reported to the flow
+    /// as `browserUnavailable` rather than `cancelled`.
+    public func openerCouldNotOpen() {
+        if self.openerFailedBox.close() {
+            self.unavailable()
+            self.flowDone.resolve(true)
+        }
+    }
+
+    /// True when the person closed the sheet before any redirect.
+    public var sheetClosedByPerson: Bool { self.closedByPerson.isOpen }
+    /// True when the sheet never opened or died with a non-person error.
+    public var openerFailed: Bool { self.openerFailedBox.isOpen }
+
+    /// The adapter awaits this to learn when the flow is done with the
+    /// browser: `true` resolves when the flow ends the sign-in (cancel
+    /// the sheet), `false` when the person already closed it themselves.
+    public func waitUntilFlowDone() async -> Bool {
+        await self.flowDone.wait()
+    }
+
+    /// The flow is done with the browser (any outcome): dismiss the
+    /// sheet if it is still up. Idempotent; a later person-close after
+    /// the flow finished is ignored (the waiter is single-shot).
+    public func cancel() {
+        _ = self.closedByPerson.close()
+        self.flowDone.resolve(true)
+    }
+}
+
+/// A one-way boolean latch safe to close from any thread.
+private final class ClosedBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closed = false
+    var isOpen: Bool { self.lock.withLock { self.closed } }
+    /// Returns true on the first close, false afterwards.
+    func close() -> Bool {
+        self.lock.withLock {
+            if self.closed { return false }
+            self.closed = true
+            return true
+        }
+    }
+}
+
+/// A single-shot async waiter for the adapter's sheet-dismissal await.
+/// The first `resolve` wins; later ones are ignored, and a resolve that
+/// lands before any `wait` is handed back immediately.
+private final class SheetWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var resolved: Bool?
+
+    func resolve(_ value: Bool) {
+        let toResume = self.lock.withLock { () -> CheckedContinuation<Bool, Never>? in
+            guard self.resolved == nil else { return nil }
+            self.resolved = value
+            let pending = self.continuation
+            self.continuation = nil
+            return pending
+        }
+        toResume?.resume(returning: value)
+    }
+
+    func wait() async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let outcome = self.lock.withLock { () -> Bool? in
+                if let resolved = self.resolved { return resolved }
+                self.continuation = continuation
+                return nil
+            }
+            if let outcome { continuation.resume(returning: outcome) }
+        }
+    }
 }

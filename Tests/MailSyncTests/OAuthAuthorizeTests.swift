@@ -162,7 +162,7 @@ final class URLBox: @unchecked Sendable {
             authorizeEndpoint: server.authorizeEndpoint,
             configuration: oauth.configuration,
             client: oauth
-        ) { url in
+        ) { url, _ in
             // The flow rebinds the redirect port before building the
             // URL; mirror the real redirect URI into the scenario so the
             // server's redirect_uri check accepts it, then fetch.
@@ -194,7 +194,7 @@ final class URLBox: @unchecked Sendable {
                 authorizeEndpoint: server.authorizeEndpoint,
                 configuration: oauth.configuration,
                 client: oauth
-            ) { url in
+            ) { url, _ in
                 let bound = url.query.flatMap { $0.split(separator: "&").first(where: { $0.hasPrefix("redirect_uri=") }) }
                     .map { String($0.dropFirst("redirect_uri=".count)).removingPercentEncoding ?? "" } ?? ""
                 server.update { scenario in
@@ -219,7 +219,7 @@ final class URLBox: @unchecked Sendable {
                 configuration: oauth.configuration,
                 client: oauth,
                 timeout: 3
-            ) { url in
+            ) { url, _ in
                 // The browser delivers an error redirect instead of a
                 // code: the person declined the consent screen.
                 let bound = url.query.flatMap { $0.split(separator: "&").first(where: { $0.hasPrefix("redirect_uri=") }) }
@@ -249,7 +249,7 @@ final class URLBox: @unchecked Sendable {
                 configuration: oauth.configuration,
                 client: oauth,
                 timeout: 0.5
-            ) { _ in
+            ) { _, _ in
                 // No browser: the authorize URL opens into the void, so
                 // no redirect ever lands on the receiver.
             }
@@ -276,4 +276,114 @@ final class URLBox: @unchecked Sendable {
         let head = "GET \(target)?\(query) HTTP/1.1\r\nHost: \(host):\(port)\r\nConnection: close\r\n\r\n"
         _ = await Self.rawGet(host: host, port: port, head: head)
     }
+
+    /// The person closing the browser sheet ends the sign-in at once —
+    /// not after the timeout — and reports `.cancelled`, not an error
+    /// worth alarming anyone with. The opener closure simulates the sheet:
+    /// it waits a beat, then reports the close through the handle, exactly
+    /// as `ASWebAuthenticationSession`'s completion handler would.
+    @Test func personClosingTheSheetEndsTheFlowAtOnce() async throws {
+        let server = try makeServer()
+        defer { server.stop() }
+        let oauth = client(for: server, redirect: "http://127.0.0.1:0/callback")
+        let started = ContinuousClock.now
+        do {
+            _ = try await runAuthorizeFlow(
+                authorizeEndpoint: server.authorizeEndpoint,
+                configuration: oauth.configuration,
+                client: oauth,
+                timeout: 60
+            ) { _, browser in
+                // The sheet is up; the person closes it without going
+                // through the consent screen.
+                browser.personClosedSheet()
+            }
+            Issue.record("expected cancelled")
+        } catch let error as OAuthAuthorizeFlowError {
+            #expect(error == .cancelled)
+        }
+        // The close ended the flow in milliseconds, not at the 60 s
+        // timeout: the sheet-close path must never park the flow.
+        let elapsed = ContinuousClock.now - started
+        #expect(elapsed < .seconds(10))
+    }
+
+    /// A sheet that can never be shown ends the flow at once with
+    /// `.browserUnavailable`: the person saw nothing, so waiting for a
+    /// redirect from a browser that does not exist is pointless.
+    @Test func unopenableBrowserEndsTheFlowAtOnce() async throws {
+        let server = try makeServer()
+        defer { server.stop() }
+        let oauth = client(for: server, redirect: "http://127.0.0.1:0/callback")
+        let started = ContinuousClock.now
+        do {
+            _ = try await runAuthorizeFlow(
+                authorizeEndpoint: server.authorizeEndpoint,
+                configuration: oauth.configuration,
+                client: oauth,
+                timeout: 60
+            ) { _, browser in
+                // The opener could not present a sheet (no window): it
+                // reports that through the handle and shows nothing.
+                browser.openerCouldNotOpen()
+            }
+            Issue.record("expected browserUnavailable")
+        } catch let error as OAuthAuthorizeFlowError {
+            #expect(error == .browserUnavailable)
+        }
+        let elapsed = ContinuousClock.now - started
+        #expect(elapsed < .seconds(10))
+    }
+
+    /// The flow cancels the browser when the sign-in ends: the handle's
+    /// dismissal await resolves, so the sheet never outlives the
+    /// exchange. (The success path's browser cancellation is what the
+    /// adapter's `session.cancel()` is keyed to.) The sheet task must be
+    /// forked outside the seam closure — the closure returning is itself
+    /// one of the things the flow's end depends on, so an `async let`
+    /// awaited inside it would deadlock.
+    @Test func flowEndsTheBrowserOnSuccess() async throws {
+        let server = try makeServer()
+        defer { server.stop() }
+        server.update { scenario in
+            scenario.authorizeRedirectCode = "code-flow-1"
+        }
+        let oauth = client(for: server, redirect: "http://127.0.0.1:0/callback")
+        let cancelledByFlow = SheetClosedBox()
+        _ = try await runAuthorizeFlow(
+            authorizeEndpoint: server.authorizeEndpoint,
+            configuration: oauth.configuration,
+            client: oauth
+        ) { url, browser in
+            let bound = url.query.flatMap { $0.split(separator: "&").first(where: { $0.hasPrefix("redirect_uri=") }) }
+                .map { String($0.dropFirst("redirect_uri=".count)).removingPercentEncoding ?? "" } ?? ""
+            server.update { scenario in
+                scenario.redirectURI = bound
+                scenario.authorizeRedirectCode = "code-flow-1"
+            }
+            // The adapter's sheet task, forked so it cannot block the
+            // closure's return: on flow-done it would call
+            // session.cancel(); here it records the resolution.
+            Task {
+                let done = await browser.waitUntilFlowDone()
+                cancelledByFlow.set(done)
+            }
+            await self.browserStep(url: url)
+        }
+        // The flow resolves the waiter on its way out; give the detached
+        // task a bounded beat to record it.
+        for _ in 0..<100 {
+            if cancelledByFlow.get() != nil { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(cancelledByFlow.get() == true)
+    }
+}
+
+/// A thread-safe box for the sheet-task's outcome.
+final class SheetClosedBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool?
+    func set(_ value: Bool) { self.lock.withLock { self.value = value } }
+    func get() -> Bool? { self.lock.withLock { self.value } }
 }

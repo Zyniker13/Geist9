@@ -21,6 +21,8 @@ targets:
       - package: EmailArchiver
         product: MailMIME
       - package: EmailArchiver
+        product: MailSync
+      - package: EmailArchiver
         product: ViewerKit
       - package: EmailArchiver
         product: ArchiveEmbedApple
