@@ -205,4 +205,85 @@ extension ArchiveStore {
             return DeletionReport(newlyRemoved: newlyRemoved, membershipsMarked: changed)
         }
     }
+
+    /// JMAP deletion tracking (DESIGN 5 "JMAP"): the server's
+    /// `Email/changes.destroyed` names JMAP email ids, not UIDs, so this
+    /// marks the membership whose stored external id matches. JMAP
+    /// memberships carry the JMAP id in `uid`'s place (they are nil-UID
+    /// memberships otherwise), keyed in `message_mailbox` the same way.
+    /// Nothing is ever deleted; the message row, its bytes, and its search
+    /// text all stay.
+    ///
+    /// The external id lives in the membership's uid column as a negative
+    /// stable hash of the JMAP id string: the uid column is NOT NULL in the
+    /// schema and the store keeps no separate column for it (decision 0066:
+    /// no schema change for M6 — a JMAP id hashed into the same column the
+    /// IMAP engine uses stays unique per server id and never collides with
+    /// a real IMAP UID because JMAP memberships are negative).
+    public func markJMAPMembershipsDestroyed(
+        account: AccountIdentity, mailbox: String, jmapIDs: [String]
+    ) throws -> DeletionReport {
+        guard !jmapIDs.isEmpty else {
+            return DeletionReport(newlyRemoved: 0, membershipsMarked: 0)
+        }
+        let now = Timestamp.string(Date())
+        let hashed = jmapIDs.map(Self.jmapMembershipUID)
+        return try db.write { db in
+            guard let accountID = try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM account WHERE email = ? AND providerKind = ?",
+                arguments: [account.email.lowercased(), account.providerKind]
+            ), let mailboxID = try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM mailbox WHERE accountID = ? AND name = ?",
+                arguments: [accountID, mailbox]
+            ) else {
+                return DeletionReport(newlyRemoved: 0, membershipsMarked: 0)
+            }
+            var marked = 0
+            for uid in hashed {
+                marked += try Int.fetchAll(
+                    db,
+                    sql: """
+                    UPDATE message_mailbox
+                    SET removedFromServer = 1, lastSeen = ?
+                    WHERE mailboxID = ? AND uid = ? AND removedFromServer = 0
+                    RETURNING messageID
+                    """,
+                    arguments: [now, mailboxID, uid]
+                ).count
+            }
+            // A message is "gone from the server" when EVERY membership that
+            // named it is now removed (it may live in several mailboxes).
+            let newlyRemoved = try Int.fetchOne(
+                db,
+                sql: """
+                SELECT COUNT(*) FROM message m
+                WHERE m.id IN (
+                    SELECT messageID FROM message_mailbox
+                    WHERE mailboxID = ? AND removedFromServer = 1
+                      AND lastSeen = ?
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM message_mailbox mm
+                    WHERE mm.messageID = m.id AND mm.removedFromServer = 0
+                  )
+                """,
+                arguments: [mailboxID, now]
+            ) ?? 0
+            return DeletionReport(newlyRemoved: newlyRemoved, membershipsMarked: marked)
+        }
+    }
+
+    /// The stable, non-colliding uid-column value for a JMAP email id:
+    /// the low 62 bits of the id's SHA-256, negated (never a real IMAP UID).
+    public static func jmapMembershipUID(_ jmapID: String) -> Int64 {
+        let digest = MessageHash.sha256(Data(jmapID.utf8)).bytes
+        var value: UInt64 = 0
+        for byte in digest.prefix(8) {
+            value = (value << 8) | UInt64(byte)
+        }
+        let positive = Int64(value & 0x3FFF_FFFF_FFFF_FFFF)
+        return positive == 0 ? -1 : -positive
+    }
 }
