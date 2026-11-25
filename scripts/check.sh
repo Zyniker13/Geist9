@@ -61,6 +61,13 @@ mark swift-build done
 # and unprivileged; failure to start fails the run loudly.
 mark imap-servers begin
 run_logged bash scripts/imap-servers.sh start
+# The Stalwart fixture's throwaway bootstrap credential lives in the same
+# scratch file imap-servers.sh generated for the server's own
+# STALWART_RECOVERY_ADMIN; export it so the JMAP integration tests run
+# (not skip) wherever the server was started. Never committed.
+if [[ -s "${TMPDIR:-/tmp}/geist9-stalwart/bootstrap-password" ]]; then
+    export GEIST9_STALWART_PASSWORD="$(cat "${TMPDIR:-/tmp}/geist9-stalwart/bootstrap-password")"
+fi
 mark imap-servers done
 mark swift-test begin
 # A watchdog keeps a silent hang from eating the CI job cap: if the test

@@ -35,6 +35,17 @@ jobs:
         # (GEIST9_SKIP_SERVERS is the sanctioned exclusion) until a 2.4
         # package is available here. macOS runs the Dovecot leg.
         run: apt-get update -qq && apt-get install -y -qq curl python3 libsqlite3-dev default-jre-headless dovecot-core >/dev/null
+      - name: Cache the GreenMail jar and Stalwart tarball
+        # Maven Central rate-limits fresh runner IPs (HTTP 429); a cache hit
+        # makes those downloads the exception, not the rule. Keyed by the
+        # versions pinned in scripts/imap-servers.sh; a miss just downloads
+        # as before.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            /tmp/geist9-greenmail
+            /tmp/geist9-stalwart
+          key: geist9-imap-servers-greenmail-2.1.3-stalwart-1.2.0
       - name: Run checks
         env:
           GEIST9_SKIP_SERVERS: dovecot
